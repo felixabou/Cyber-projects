@@ -1,0 +1,9 @@
+state/
+config.yaml
+.env
+*.json.tmp
+STOP
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/

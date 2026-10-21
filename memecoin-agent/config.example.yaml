@@ -1,0 +1,67 @@
+# Copy to config.yaml and adjust. Every key is optional; omitted keys use the defaults
+# in memecoin_agent/config.py. Unknown keys are rejected so typos can't silently no-op.
+
+filters:
+  quote_symbols: [SOL, USDC]
+  min_liquidity_usd: 25000
+  min_market_cap_usd: 50000
+  max_market_cap_usd: 5000000
+  min_age_minutes: 20        # skip the first-minutes sniper/bundle chaos
+  max_age_hours: 72
+  min_volume_h1_usd: 20000
+  min_txns_h1: 150
+  min_buy_sell_ratio_h1: 1.15
+  min_buy_sell_ratio_m5: 1.0
+  min_price_change_m5: 0.0
+  min_price_change_h1: 5.0
+  max_price_change_h1: 250.0 # don't chase vertical candles
+  min_volume_to_liquidity_h1: 0.3
+  min_score: 0.55
+  require_rugcheck: true     # fails closed if RugCheck is unreachable
+  max_rugcheck_score: 50
+  reject_danger_risks: true  # mint/freeze authority, unlocked LP, whale concentration...
+  blacklist: []
+  watchlist: []              # mints to evaluate every scan in addition to discovery
+
+exits:
+  stop_loss_pct: 25
+  take_profit_levels:
+    - {at_pct: 50, sell_fraction: 0.4}
+    - {at_pct: 120, sell_fraction: 0.5}
+  trailing_activation_pct: 30
+  trailing_stop_pct: 20
+  max_hold_minutes: 240
+  liquidity_drop_exit_pct: 40
+
+risk:
+  starting_balance_usd: 1000 # paper mode only; live mode reads your wallet
+  position_size_pct: 5
+  max_position_usd: 100
+  min_position_usd: 10
+  max_open_positions: 5
+  max_daily_loss_pct: 15
+  token_cooldown_minutes: 180
+  max_entries_per_hour: 6
+
+execution:
+  mode: paper                # paper | live  (live also needs MEMECOIN_AGENT_CONFIRM_LIVE=yes)
+  slippage_bps: 300
+  paper_fee_pct: 0.5
+  paper_price_impact: true
+  # Use a private RPC (Helius, Triton, QuickNode...) for live trading; the public one is rate-limited.
+  rpc_url: https://api.mainnet-beta.solana.com
+  jupiter_base_url: https://lite-api.jup.ag/swap/v1
+  # jupiter_api_key: ...     # if you use the keyed api.jup.ag endpoint
+  priority_fee_max_lamports: 500000
+  min_sol_reserve: 0.05
+  confirm_timeout_s: 60
+  max_roundtrip_loss_pct: 12
+
+agent:
+  tick_seconds: 15
+  scan_every_ticks: 4        # discovery scan once a minute
+  max_candidates_per_scan: 60
+  state_file: state/state.json
+  trades_csv: state/trades.csv
+  log_file: state/agent.log
+  kill_switch_file: STOP     # `touch STOP` to halt new entries; exits keep running
