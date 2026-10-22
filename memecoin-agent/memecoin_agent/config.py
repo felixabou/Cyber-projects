@@ -99,12 +99,41 @@ class ExecutionConfig:
 class AgentConfig:
     tick_seconds: float = 15.0
     scan_every_ticks: int = 4
-    max_candidates_per_scan: int = 60
+    max_candidates_per_scan: int = 150
     state_file: str = "state/state.json"
     trades_csv: str = "state/trades.csv"
     log_file: str | None = "state/agent.log"
     # If this file exists the agent opens no new positions (exits still run).
     kill_switch_file: str = "STOP"
+
+
+@dataclass
+class FeedConfig:
+    """Real-time launch feed (PumpPortal websocket) merged into discovery."""
+
+    # Pump.fun graduations: tokens that just got a real AMM pool. Low volume, high signal.
+    pumpportal_migrations: bool = True
+    # Every new pump.fun token (thousands a day, mostly still on the bonding curve).
+    # Only useful if you loosen the liquidity/age filters to trade bonding-curve tokens.
+    pumpportal_new_tokens: bool = False
+    pumpportal_url: str = "wss://pumpportal.fun/api/data"
+    # Mints are kept until older than filters.max_age_hours, or evicted once their
+    # pool is clearly dead (30+ min after the event) so they stop using scan budget.
+    # Lower this if you enable new_tokens to trade bonding-curve tokens.
+    evict_below_liquidity_usd: float = 5_000.0
+    max_buffered_mints: int = 2_000
+    buffer_file: str | None = "state/feed.json"
+
+
+@dataclass
+class RecorderConfig:
+    dir: str = "recordings"
+    interval_s: float = 30.0
+    discover_every_ticks: int = 2
+    # Keep sampling each discovered token this long, so backtests see what happened after entry.
+    track_hours: float = 12.0
+    max_tracked: int = 400
+    record_safety: bool = True
 
 
 @dataclass
@@ -114,6 +143,8 @@ class Config:
     risk: RiskConfig = field(default_factory=RiskConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    feeds: FeedConfig = field(default_factory=FeedConfig)
+    recorder: RecorderConfig = field(default_factory=RecorderConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -131,6 +162,8 @@ class Config:
             raise ValueError("risk.min_position_usd cannot exceed risk.max_position_usd")
         if self.agent.scan_every_ticks < 1:
             raise ValueError("agent.scan_every_ticks must be >= 1")
+        if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
+            raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
 
 
 _SECTIONS: dict[str, type] = {
@@ -139,6 +172,8 @@ _SECTIONS: dict[str, type] = {
     "risk": RiskConfig,
     "execution": ExecutionConfig,
     "agent": AgentConfig,
+    "feeds": FeedConfig,
+    "recorder": RecorderConfig,
 }
 
 
@@ -150,6 +185,20 @@ def _build_section(cls: type, data: dict[str, Any], name: str) -> Any:
     if cls is ExitConfig and "take_profit_levels" in data:
         data = {**data, "take_profit_levels": [TakeProfitLevel(**lvl) for lvl in data["take_profit_levels"] or []]}
     return cls(**data)
+
+
+def apply_override(cfg: Config, assignment: str) -> None:
+    """Apply a `section.key=value` override (value parsed as YAML), e.g. `filters.min_score=0.6`."""
+    dotted, sep, raw_value = assignment.partition("=")
+    section, _, key = dotted.strip().partition(".")
+    if not sep or section not in _SECTIONS or not key:
+        raise ValueError(f"Override must look like section.key=value, got {assignment!r}")
+    current = dataclasses.asdict(getattr(cfg, section))
+    if key not in current:
+        raise ValueError(f"Unknown config key '{section}.{key}'")
+    current[key] = yaml.safe_load(raw_value)
+    setattr(cfg, section, _build_section(_SECTIONS[section], current, section))
+    cfg.validate()
 
 
 def load_config(path: str | Path | None) -> Config:

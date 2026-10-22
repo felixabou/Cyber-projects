@@ -136,7 +136,7 @@ class Agent:
         return sorted(evals, key=lambda e: (e.passed, e.score), reverse=True)
 
     def scan_and_enter(self, now: datetime) -> None:
-        if Path(self.cfg.agent.kill_switch_file).exists():
+        if self.cfg.agent.kill_switch_file and Path(self.cfg.agent.kill_switch_file).exists():
             log.info("Kill switch file '%s' present: not opening positions.", self.cfg.agent.kill_switch_file)
             return
         if block := self.risk.entry_block_reason(self.pf, now):

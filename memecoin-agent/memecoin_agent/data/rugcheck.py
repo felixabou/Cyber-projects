@@ -18,6 +18,7 @@ from ..models import SafetyReport
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.rugcheck.xyz/v1"
+UNAVAILABLE = "rugcheck unavailable"
 
 
 class RugCheckClient:
@@ -68,7 +69,7 @@ class RugCheckClient:
         except (httpx.HTTPError, ValueError) as exc:
             log.warning("RugCheck lookup failed for %s: %s", mint, exc)
             # Don't cache failures, so the next scan retries.
-            return SafetyReport(ok=not self.fail_closed, score=None, reasons=["rugcheck unavailable"])
+            return SafetyReport(ok=not self.fail_closed, score=None, reasons=[UNAVAILABLE])
         self._cache[mint] = (self.clock(), result)
         return result
 

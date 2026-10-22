@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +43,19 @@ class TokenSnapshot:
             return None
         return (now - self.pair_created_at).total_seconds() / 60
 
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["pair_created_at"] = self.pair_created_at.isoformat() if self.pair_created_at else None
+        d["fetched_at"] = self.fetched_at.isoformat()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "TokenSnapshot":
+        d = {k: v for k, v in d.items() if k in _SNAPSHOT_FIELDS}
+        d["pair_created_at"] = datetime.fromisoformat(d["pair_created_at"]) if d.get("pair_created_at") else None
+        d["fetched_at"] = datetime.fromisoformat(d["fetched_at"])
+        return cls(**d)
+
     @property
     def txns_h1(self) -> int:
         return self.buys_h1 + self.sells_h1
@@ -58,6 +71,9 @@ class TokenSnapshot:
     @property
     def volume_to_liquidity_h1(self) -> float:
         return self.volume_h1 / self.liquidity_usd if self.liquidity_usd > 0 else 0.0
+
+
+_SNAPSHOT_FIELDS = {f.name for f in fields(TokenSnapshot)}
 
 
 @dataclass
@@ -133,3 +149,29 @@ class TradeRecord:
         d = asdict(self)
         d["time"] = self.time.isoformat()
         return d
+
+
+@dataclass
+class ClosedTrade:
+    """One completed round trip (entry through final exit, including partial sells)."""
+
+    mint: str
+    symbol: str
+    opened_at: datetime
+    closed_at: datetime
+    cost_usd: float
+    proceeds_usd: float
+    exit_reason: str
+    entry_score: float
+
+    @property
+    def pnl_usd(self) -> float:
+        return self.proceeds_usd - self.cost_usd
+
+    @property
+    def pnl_pct(self) -> float:
+        return self.pnl_usd / self.cost_usd * 100 if self.cost_usd else 0.0
+
+    @property
+    def hold_minutes(self) -> float:
+        return (self.closed_at - self.opened_at).total_seconds() / 60

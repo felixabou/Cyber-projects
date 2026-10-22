@@ -22,7 +22,10 @@ Each tick (15s by default):
    - **Time stop.** Exit after 240 minutes.
    - **Staged take-profit.** Sell 40% at +50%, then 50% of what's left at +120%. A trailing stop rides the remainder.
 2. **Scan & enter** (every 4th tick):
-   - Discover mints from DexScreener's latest-profiles and boost feeds, plus your `watchlist`.
+   - Discover mints from three sources:
+     - **Pump.fun graduations, in real time.** A background websocket to PumpPortal sees each token the moment it moves from the bonding curve to a real AMM pool. These go first in the scan.
+     - DexScreener's latest-profiles and boost feeds.
+     - Your `watchlist`.
    - Keep tokens that pass every filter:
      - liquidity, market cap and pair-age windows;
      - 1h volume, transaction count and volume/liquidity turnover;
@@ -53,10 +56,12 @@ memecoin-agent scan --safety         # what would it buy right now? (no trading)
 cp config.example.yaml config.yaml
 memecoin-agent -c config.yaml run    # paper trading loop
 memecoin-agent -c config.yaml status # equity, PnL, open positions
+memecoin-agent -c config.yaml record # record market data for backtests (see below)
 ```
 
 State is written to `state/state.json` and every fill is appended to
-`state/trades.csv`. Restarting picks up where the agent left off.
+`state/trades.csv`. Restarting picks up where the agent left off, including the
+launch-feed buffer (`state/feed.json`).
 
 The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
@@ -84,7 +89,63 @@ Known live-mode limitations:
 
 - If a buy times out and lands later, the tokens sit in the wallet without being tracked. Check the wallet if you see `did not change ... balance` errors.
 - The `status` command's "return vs start" figure compares against `starting_balance_usd`, not your real deposit.
-- Discovery only sees tokens that bought a DexScreener profile or boost. Raw pump.fun launches won't appear unless you add a faster feed (Birdeye, Helius webhooks, a pump.fun stream) behind the same `MarketData` interface in `memecoin_agent/data/`.
+- The launch feed only sees graduations that happen while the agent (or recorder) is running. Downtime leaves gaps, which DexScreener's feeds partly cover.
+
+## Backtesting
+
+Backtests replay real recorded market data through the exact production code
+(agent, strategy, risk rules and paper fill model). So first, record:
+
+```bash
+memecoin-agent -c config.yaml record              # runs until Ctrl-C; --hours N to stop
+```
+
+The recorder polls discovery (DexScreener plus the launch feed) every 30 seconds.
+It samples every discovered token for 12 hours, so a backtest sees what happened
+after an entry, including for tokens your current filters would skip. It also
+stores each token's RugCheck verdict. Output goes to gzipped hourly files in
+`recordings/`. Run it on an always-on machine for a few days: hours of data are
+noise.
+
+Then replay it, changing parameters freely:
+
+```bash
+memecoin-agent -c config.yaml backtest
+memecoin-agent -c config.yaml backtest --set filters.min_score=0.65 --set exits.stop_loss_pct=15
+memecoin-agent backtest recordings/ --trades-out bt_trades.csv
+```
+
+```
+Backtest 2026-01-01 00:00 -> 2026-01-01 23:59 UTC (24.0h, 283,215 records)
+  Return          +93.50%   ($1,000.00 -> $1,934.99)
+  Max drawdown    16.43%
+  Round trips     68  (open at end: 0)
+  Win rate        60.3%   avg win +55.9%   avg loss -32.1%
+  Profit factor   2.58
+  ...
+  Exits           trailing stop: 31, stop loss: 22, time stop: 7, end of backtest: 5, liquidity pulled: 3
+```
+
+(That output is from the *synthetic* market, `record --synthetic`. Use it to try the
+workflow offline; its numbers mean nothing.)
+
+**How faithful the replay is.** At simulated time T the agent sees only data
+recorded at or before T:
+
+- Discovery returns what discovery returned at the last recorded poll.
+- A token that stopped being sampled looks unavailable, as it would live.
+- Tokens with no recorded RugCheck verdict are rejected, as live (fail closed). `--assume-safe` overrides this.
+- Open positions are sold at the last price when the replay ends. `--keep-open` leaves them open instead.
+
+**What a backtest can't capture:**
+
+- Price moves between 30-second samples. Stops fill at the next sample, which flatters them on fast dumps and rugs.
+- Real slippage, MEV sandwiches and failed transactions.
+- Your own buys moving the price. The fill model includes x*y=k price impact, but not other traders reacting.
+- Tokens discovered 12h+ before they'd have been bought (outside `track_hours`).
+
+Treat backtest results as an upper bound. Be wary of tuning parameters until one
+recording looks great: hold some days back and check the result holds on them.
 
 ## Layout
 
@@ -95,8 +156,11 @@ memecoin_agent/
   risk.py            sizing, exposure caps, daily loss halt, cooldowns
   portfolio.py       ledger, JSON state, CSV journal
   data/dexscreener.py, data/rugcheck.py
+  data/pumpportal.py real-time pump.fun graduation/launch websocket feed
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py
+  recording.py       market-data recorder (gzipped JSONL)
+  backtest.py        point-in-time replay + performance report
   simulation.py      offline synthetic market for demo/tests
 tests/               pytest suite (HTTP and RPC mocked; real tx signing)
 ```

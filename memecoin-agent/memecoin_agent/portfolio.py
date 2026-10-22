@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .models import Fill, Position, TokenSnapshot, TradeRecord
+from .models import ClosedTrade, Fill, Position, TokenSnapshot, TradeRecord
 
 
 @dataclass
@@ -21,6 +21,7 @@ class Portfolio:
     cooldowns: dict[str, str] = field(default_factory=dict)  # mint -> ISO time the cooldown ends
     entry_times: list[str] = field(default_factory=list)
     trades: list[TradeRecord] = field(default_factory=list)  # unsaved, flushed to CSV
+    closed: list[ClosedTrade] = field(default_factory=list)  # in-memory round-trip log (backtest stats)
 
     # -- valuation ----------------------------------------------------------------
     def positions_value_usd(self) -> float:
@@ -88,6 +89,8 @@ class Portfolio:
         )
         if closing:
             del self.positions[mint]
+            self.closed.append(ClosedTrade(mint, pos.symbol, pos.opened_at, now, pos.initial_cost_usd,
+                                           pos.proceeds_usd, reason, pos.entry_score))
             if cooldown_until is not None:
                 self.cooldowns[mint] = cooldown_until.isoformat()
         return realized

@@ -1,7 +1,8 @@
 state/
+recordings/
 config.yaml
 .env
-*.json.tmp
+*.tmp
 STOP
 __pycache__/
 *.egg-info/
