@@ -24,5 +24,8 @@ memecoin-agent = "memecoin_agent.cli:main"
 [tool.setuptools.packages.find]
 include = ["memecoin_agent*"]
 
+[tool.setuptools.package-data]
+"memecoin_agent.ui" = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

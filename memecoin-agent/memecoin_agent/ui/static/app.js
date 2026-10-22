@@ -1,0 +1,736 @@
+"use strict";
+// memecoin-agent dashboard. Vanilla JS, no build step. All data-derived text is
+// inserted with textContent (token names come from public APIs and are untrusted).
+
+const TOKEN = document.querySelector('meta[name="ui-token"]').content;
+const state = {
+  view: null,
+  tab: "overview",
+  range: "24h",
+  equity: [],
+  equityTable: false,
+  scanFilter: "all",
+  scanSearch: "",
+  logFilter: "all",
+  logAfter: 0,
+  logs: [],
+  configLoaded: false,
+  backtest: null,
+  failures: 0,
+  lastTicks: -1,
+  lastTickWall: Date.now(),  // browser time when the tick counter last advanced
+};
+
+// ---------------------------------------------------------------- helpers
+const $ = (sel) => document.querySelector(sel);
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, attrs, ...children) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined) continue;
+    if (k === "text") el.textContent = v;
+    else el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c) el.append(c);
+  return el;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "X-UI-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) },
+  });
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON */ }
+  if (!res.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
+  return body;
+}
+
+function store(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    localStorage.setItem(key, value);
+  } catch { return null; }
+  return value;
+}
+
+const nf2 = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function usd(v, { compact = false, sign = false } = {}) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const a = Math.abs(v);
+  let body;
+  if (compact && a >= 1e6) body = `${(a / 1e6).toFixed(a >= 1e7 ? 1 : 2)}M`;
+  else if (compact && a >= 1e4) body = `${(a / 1e3).toFixed(a >= 1e5 ? 0 : 1)}K`;
+  else body = nf2.format(a);
+  const pre = v < 0 ? "−" : sign && v > 0 ? "+" : "";
+  return `${pre}$${body}`;
+}
+function price(v) {
+  if (!v) return "—";
+  if (v >= 1) return `$${nf2.format(v)}`;
+  // Memecoin prices are tiny: keep 4 significant figures.
+  return `$${Number(v.toPrecision(4)).toString()}`;
+}
+function pct(v, digits = 1) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const pre = v > 0 ? "+" : v < 0 ? "−" : "";
+  return `${pre}${Math.abs(v).toFixed(digits)}%`;
+}
+function num(v, digits = 2) {
+  return v === null || v === undefined ? "—" : Number(v).toFixed(digits);
+}
+function delta(v, text) {
+  // Direction is carried by arrow + sign, not color alone.
+  const cls = v > 0 ? "delta-up" : v < 0 ? "delta-down" : "delta-flat";
+  const arrow = v > 0 ? "▲ " : v < 0 ? "▼ " : "";
+  return h("span", { class: cls, text: arrow + text });
+}
+function duration(minutes) {
+  if (minutes === null || minutes === undefined) return "—";
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const hrs = Math.floor(minutes / 60);
+  if (hrs < 48) return `${hrs}h ${Math.round(minutes % 60)}m`;
+  return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
+}
+function ago(iso, now) {
+  if (!iso) return "never";
+  const secs = (new Date(now || Date.now()) - new Date(iso)) / 1000;
+  if (secs < 5) return "just now";
+  if (secs < 60) return `${Math.round(secs)}s ago`;
+  return `${duration(secs / 60)} ago`;
+}
+function timeLabel(iso, withDate = false) {
+  const d = new Date(iso);
+  const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return withDate ? `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${t}` : t;
+}
+function safeUrl(u) {
+  return typeof u === "string" && /^https:\/\//.test(u) ? u : null;
+}
+function shortMint(m) {
+  return m && m.length > 12 ? `${m.slice(0, 4)}…${m.slice(-4)}` : m || "";
+}
+function tokenCell(symbol, mint, url) {
+  const link = safeUrl(url);
+  return h("div", { class: "token" },
+    link ? h("a", { href: link, target: "_blank", rel: "noopener noreferrer", class: "token-symbol", text: symbol || "?" })
+      : h("span", { class: "token-symbol", text: symbol || "?" }),
+    h("span", { class: "token-mint", title: mint, text: shortMint(mint) }));
+}
+function table(columns, rows, empty) {
+  if (!rows.length) return h("div", { class: "empty", text: empty });
+  return h("table", {},
+    h("thead", {}, h("tr", {}, columns.map((c) => h("th", { class: c.num ? "num" : null, scope: "col", text: c.label })))),
+    h("tbody", {}, rows.map((r) => h("tr", {}, columns.map((c) => {
+      const v = c.render(r);
+      return h("td", { class: c.num ? "num" : c.cls || null }, v);
+    })))));
+}
+function replace(el, ...children) {
+  el.replaceChildren(...children.flat().filter(Boolean));
+}
+
+let toastTimer = null;
+function toast(msg, isError = false) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.className = isError ? "toast error" : "toast";
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, isError ? 7000 : 3500);
+}
+
+function confirmDialog(title, body, okLabel) {
+  const dlg = $("#confirm");
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  $("#confirm-ok").textContent = okLabel || "Confirm";
+  return new Promise((resolve) => {
+    dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), { once: true });
+    dlg.returnValue = "cancel";
+    dlg.showModal();
+  });
+}
+
+// ---------------------------------------------------------------- charts
+function niceTicks(min, max, count = 4) {
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  const step0 = span / count;
+  const mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((st) => span / st <= count) || 10 * mag;
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = lo; v <= hi + step / 2; v += step) ticks.push(Number(v.toFixed(10)));
+  return ticks;
+}
+
+function axisUsd(ticks) {
+  const whole = ticks.every((t) => Math.abs(t - Math.round(t)) < 1e-9);
+  return (v) => (whole ? `${v < 0 ? "−" : ""}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : usd(v, { compact: true }));
+}
+
+function lineChart(container, points, { valueFmt = (v) => usd(v), emptyText = "No data yet" } = {}) {
+  container.replaceChildren();
+  if (!points || points.length < 2) {
+    container.append(h("div", { class: "chart-empty", text: emptyText }));
+    return;
+  }
+  const W = Math.max(container.clientWidth, 280);
+  const H = W < 560 ? 200 : 260;
+  const m = { top: 12, right: 72, bottom: 26, left: 52 };
+  const xs = points.map((p) => new Date(p[0]).getTime());
+  const ys = points.map((p) => p[1]);
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const pad = (yMax - yMin) * 0.08 || Math.abs(yMax) * 0.01 || 1;
+  const ticks = niceTicks(yMin - pad, yMax + pad, 4);
+  yMin = ticks[0]; yMax = ticks[ticks.length - 1];
+  const tickFmt = axisUsd(ticks);
+  const X = (t) => m.left + ((t - x0) / Math.max(x1 - x0, 1)) * (W - m.left - m.right);
+  const Y = (v) => m.top + (1 - (v - yMin) / (yMax - yMin)) * (H - m.top - m.bottom);
+
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": `Line chart, ${points.length} points, latest ${valueFmt(ys[ys.length - 1])}` });
+  for (const t of ticks) {
+    svg.append(s("line", { class: "grid", x1: m.left, x2: W - m.right, y1: Y(t), y2: Y(t) }));
+    svg.append(s("text", { x: m.left - 8, y: Y(t) + 4, "text-anchor": "end", text: tickFmt(t) }));
+  }
+  svg.append(s("line", { class: "baseline", x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom }));
+  const spanH = (x1 - x0) / 36e5;
+  const nX = Math.max(1, Math.min(5, Math.floor((W - m.left - m.right) / 110)));
+  for (let i = 0; i <= nX; i++) {
+    const t = x0 + ((x1 - x0) * i) / nX;
+    const iso = new Date(t).toISOString();
+    svg.append(s("text", { x: X(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === nX ? "end" : "middle",
+      text: timeLabel(iso, spanH > 20) }));
+  }
+  const d = points.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+  const base = Y(yMin);
+  svg.append(s("path", { class: "series-area", d: `${d}L${X(x1).toFixed(1)},${base}L${X(x0).toFixed(1)},${base}Z` }));
+  svg.append(s("path", { class: "series-line", d }));
+  const lastY = Y(ys[ys.length - 1]);
+  svg.append(s("circle", { class: "series-dot", cx: X(x1), cy: lastY, r: 4 }));
+  svg.append(s("text", { class: "end-label", x: X(x1) + 8, y: lastY + 4, text: valueFmt(ys[ys.length - 1]) }));
+
+  // Hover layer: crosshair snaps to the nearest sample; keyboard arrows move it too.
+  const cross = s("line", { class: "crosshair", y1: m.top, y2: H - m.bottom, visibility: "hidden" });
+  const dot = s("circle", { class: "series-dot", r: 4, visibility: "hidden" });
+  const hit = s("rect", { x: m.left, y: 0, width: W - m.left - m.right, height: H, fill: "transparent" });
+  svg.append(cross, dot, hit);
+  const tip = h("div", { class: "tooltip", hidden: true });
+  container.append(svg, tip);
+  container.tabIndex = 0;
+  let idx = points.length - 1;
+
+  function show(i) {
+    idx = Math.max(0, Math.min(points.length - 1, i));
+    const cx = X(xs[idx]), cy = Y(ys[idx]);
+    for (const el of [cross]) { el.setAttribute("x1", cx); el.setAttribute("x2", cx); el.setAttribute("visibility", "visible"); }
+    dot.setAttribute("cx", cx); dot.setAttribute("cy", cy); dot.setAttribute("visibility", "visible");
+    replace(tip,
+      h("div", { class: "tooltip-value" }, h("span", { class: "tooltip-key" }), valueFmt(ys[idx])),
+      h("div", { class: "tooltip-label", text: timeLabel(points[idx][0], true) }));
+    tip.hidden = false;
+    const scale = container.clientWidth / W;
+    const left = cx * scale;
+    tip.style.left = `${Math.min(Math.max(left - tip.offsetWidth / 2, 0), container.clientWidth - tip.offsetWidth)}px`;
+    tip.style.top = `${Math.max(cy * scale - tip.offsetHeight - 12, 0)}px`;
+  }
+  function hide() {
+    cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); tip.hidden = true;
+  }
+  function nearest(clientX) {
+    const r = svg.getBoundingClientRect();
+    const t = x0 + ((((clientX - r.left) * W) / r.width - m.left) / (W - m.left - m.right)) * (x1 - x0);
+    let lo = 0, hi = xs.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid] < t) lo = mid; else hi = mid; }
+    return t - xs[lo] < xs[hi] - t ? lo : hi;
+  }
+  hit.addEventListener("pointermove", (e) => show(nearest(e.clientX)));
+  hit.addEventListener("pointerleave", hide);
+  container.onfocus = () => show(idx);
+  container.onblur = hide;
+  container.onkeydown = (e) => {
+    if (e.key === "ArrowLeft") { show(idx - 1); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { show(idx + 1); e.preventDefault(); }
+    else if (e.key === "Home") { show(0); e.preventDefault(); }
+    else if (e.key === "End") { show(points.length - 1); e.preventDefault(); }
+  };
+}
+
+function barChart(container, items, { valueFmt = (v) => String(v) } = {}) {
+  container.replaceChildren();
+  if (!items.length) { container.append(h("div", { class: "chart-empty", text: "No trades" })); return; }
+  const W = Math.max(container.clientWidth, 280);
+  const labelW = Math.min(150, W * 0.38), barH = 18, gap = 12, valueW = 44;
+  const H = items.length * (barH + gap) - gap + 4;
+  const max = Math.max(...items.map((i) => i.value), 1);
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Bar chart" });
+  const tip = h("div", { class: "tooltip", hidden: true });
+  items.forEach((it, i) => {
+    const y = i * (barH + gap) + 2;
+    const len = Math.max(((W - labelW - valueW) * it.value) / max, 2);
+    const x0 = labelW, x1 = labelW + len, r = Math.min(4, len / 2);
+    // Rounded data end, square at the baseline.
+    const path = `M${x0},${y}H${x1 - r}Q${x1},${y} ${x1},${y + r}V${y + barH - r}Q${x1},${y + barH} ${x1 - r},${y + barH}H${x0}Z`;
+    const bar = s("path", { class: "series-bar", d: path });
+    const hitbox = s("rect", { x: 0, y: y - gap / 2, width: W, height: barH + gap, fill: "transparent", tabindex: 0 });
+    svg.append(
+      s("text", { class: "bar-label", x: labelW - 10, y: y + barH / 2 + 4, "text-anchor": "end", text: it.label }),
+      bar,
+      s("text", { class: "bar-value", x: x1 + 6, y: y + barH / 2 + 4, text: valueFmt(it.value) }),
+      hitbox);
+    const show = () => {
+      bar.classList.add("hover");
+      replace(tip, h("div", { class: "tooltip-value", text: valueFmt(it.value) }),
+        h("div", { class: "tooltip-label", text: it.detail || it.label }));
+      tip.hidden = false;
+      const scale = container.clientWidth / W;
+      tip.style.left = `${Math.min(x1 * scale + 8, container.clientWidth - tip.offsetWidth)}px`;
+      tip.style.top = `${Math.max(y * scale - tip.offsetHeight - 4, 0)}px`;
+    };
+    const hide = () => { bar.classList.remove("hover"); tip.hidden = true; };
+    hitbox.addEventListener("pointerenter", show);
+    hitbox.addEventListener("pointerleave", hide);
+    hitbox.addEventListener("focus", show);
+    hitbox.addEventListener("blur", hide);
+  });
+  container.append(svg, tip);
+}
+
+// ---------------------------------------------------------------- header
+function renderHeader(v) {
+  const badge = $("#mode-badge");
+  badge.textContent = v.synthetic ? "SIMULATED" : v.mode.toUpperCase();
+  badge.className = `badge ${v.mode === "live" ? "badge-live" : v.synthetic ? "badge-sim" : ""}`;
+  document.title = `${usd(v.equity)} · Memecoin Agent`;
+
+  // The view is only republished by the agent thread, so judge staleness by wall-clock time
+  // since the tick counter last moved. Network-heavy ticks can take a while; allow slack.
+  const sinceTickS = (Date.now() - state.lastTickWall) / 1000;
+  const stale = sinceTickS > (3 * v.tick_seconds) / (v.speed || 1) + 30;
+  let cls = "ok", label = "Trading";
+  if (stale) { cls = "bad"; label = "Agent stalled"; }
+  else if (v.kill_switch) { cls = "bad"; label = "Kill switch on"; }
+  else if (v.entries_paused) { cls = "paused"; label = "Entries paused"; }
+  else if (v.entry_block) { cls = "paused"; label = "Entries blocked"; }
+  const pill = $("#status-pill");
+  pill.className = `status-pill ${cls}`;
+  pill.title = v.entry_block || "";
+  replace(pill, h("span", { class: "dot", "aria-hidden": "true" }), label);
+
+  const bits = [`Last tick ${v.last_tick_at ? ago(new Date(state.lastTickWall).toISOString()) : "pending"}`];
+  if (v.synthetic) bits.push(`sim time ${timeLabel(v.now, true)} (${v.speed}× speed)`);
+  if (v.feed) bits.push(v.feed.connected ? `launch feed connected · ${v.feed.buffered} tokens` : "launch feed reconnecting");
+  if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
+  $("#meta").textContent = bits.join(" · ");
+
+  const pause = $("#btn-pause");
+  pause.textContent = v.entries_paused ? "Resume entries" : "Pause entries";
+  pause.setAttribute("aria-pressed", v.entries_paused ? "true" : "false");
+  $("#btn-close-all").disabled = !v.positions.length;
+  const passed = v.scan.candidates.filter((c) => c.passed).length;
+  $("#tab-scanner-count").textContent = v.scan.candidates.length ? `${passed}/${v.scan.candidates.length}` : "";
+
+  const banner = $("#banner");
+  if (state.failures >= 2) {
+    banner.hidden = false; banner.className = "banner";
+    banner.textContent = "Lost connection to the agent. Retrying… (is the process still running?)";
+  } else if (v.mode === "live") {
+    banner.hidden = false; banner.className = "banner warn";
+    banner.textContent = "LIVE TRADING: buttons on this page move real funds.";
+  } else banner.hidden = true;
+}
+
+// ---------------------------------------------------------------- overview
+function tile(label, value, sub) {
+  return h("div", { class: "card tile" },
+    h("div", { class: "tile-label", text: label }),
+    h("div", { class: "tile-value" }, value),
+    sub ? h("div", { class: "tile-sub" }, sub) : null);
+}
+
+function renderOverview(v) {
+  $("#hero-value").textContent = usd(v.equity);
+  const ret = v.baseline_equity ? (v.equity / v.baseline_equity - 1) * 100 : 0;
+  replace($("#hero-delta"), delta(ret, `${pct(ret, 2)} `),
+    h("span", { class: "muted", text: `vs ${usd(v.baseline_equity)} ${v.mode === "live" ? "at first sample" : "start"}` }));
+
+  const todayPct = v.day_start_equity ? (v.today_pnl / v.day_start_equity) * 100 : 0;
+  const sess = v.session;
+  replace($("#tiles"),
+    tile("Today", delta(v.today_pnl, usd(v.today_pnl, { sign: true })), pct(todayPct, 2)),
+    tile("Realized PnL", delta(v.realized_pnl, usd(v.realized_pnl, { sign: true })), `today ${usd(v.today_realized, { sign: true })}`),
+    tile("Unrealized", delta(v.unrealized_pnl, usd(v.unrealized_pnl, { sign: true })), `${v.positions.length} open`),
+    tile("Cash", usd(v.cash), `${usd(v.positions_value)} in positions`),
+    tile("Win rate", sess.win_rate_pct === null ? "—" : `${sess.win_rate_pct.toFixed(0)}%`,
+      `${sess.wins}/${sess.round_trips} round trips this session`));
+
+  $("#positions-count").textContent = `${v.positions.length} / ${v.risk.max_open_positions}`;
+  replace($("#positions"), table([
+    { label: "Token", render: (p) => tokenCell(p.symbol, p.mint, p.url) },
+    { label: "Value", num: true, render: (p) => usd(p.value_usd) },
+    { label: "PnL", num: true, render: (p) => delta(p.pnl_pct, pct(p.pnl_pct)) },
+    { label: "Peak", num: true, render: (p) => pct(p.peak_pct) },
+    { label: "Exit if below", num: true, render: (p) => h("span", { title: p.trailing_armed ? "Trailing stop armed" : "Stop loss" },
+      `${price(p.stop_price_usd)}${p.trailing_armed ? " ↟" : ""}`) },
+    { label: "Take profit", num: true, render: (p) => `${p.tp_hit}/${p.tp_total}` },
+    { label: "Liquidity", num: true, render: (p) => pct(p.liquidity_change_pct, 0) },
+    { label: "Held", num: true, render: (p) => h("span", { title: `Time stop at ${duration(p.max_hold_minutes)}` }, duration(p.held_minutes)) },
+    { label: "", render: (p) => h("button", { class: "btn btn-small btn-danger", type: "button",
+      onclick: () => closePosition(p), text: "Close" }) },
+  ], v.positions, "No open positions"));
+
+  const r = v.risk;
+  const lossPct = r.daily_loss_limit_usd ? (r.daily_loss_usd / r.daily_loss_limit_usd) * 100 : 0;
+  const meter = (label, value, frac, severity = false) => {
+    const sev = !severity ? "" : frac >= 0.85 ? "crit" : frac >= 0.6 ? "warn" : "";
+    const fill = h("div", { class: "meter-fill" });
+    fill.style.width = `${Math.min(100, Math.max(0, frac * 100)).toFixed(1)}%`;
+    return h("div", { class: "meter" },
+      h("div", { class: "meter-head" }, h("span", { text: label }),
+        h("span", { class: "meter-value", text: (sev === "crit" ? "⚠ " : "") + value })),
+      h("div", { class: `meter-track ${sev}`, role: "meter", "aria-label": label,
+        "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(frac * 100) }, fill));
+  };
+  let entry = "✓ Opening new positions when signals appear";
+  if (v.kill_switch) entry = "✕ Kill switch file present — no new entries (exits still run)";
+  else if (v.entries_paused) entry = "‖ Paused from the dashboard — exits still run";
+  else if (v.entry_block) entry = `‖ New entries blocked: ${v.entry_block}`;
+  replace($("#risk"),
+    meter("Daily loss limit", `${usd(r.daily_loss_usd)} of ${usd(r.daily_loss_limit_usd)} (${r.daily_loss_limit_pct}%)`, lossPct / 100, true),
+    meter("Open positions", `${r.open_positions} of ${r.max_open_positions}`, r.open_positions / r.max_open_positions),
+    meter("Entries in the last hour", `${r.entries_last_hour} of ${r.max_entries_per_hour}`, r.entries_last_hour / r.max_entries_per_hour),
+    h("div", { class: "entry-state", text: entry }));
+
+  replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
+}
+
+function tradesTable(trades, full) {
+  const cols = [
+    { label: "Time", cls: "nowrap", render: (t) => timeLabel(t.time, true) },
+    { label: "Side", render: (t) => h("span", { class: `side side-${t.side}`, text: t.side.toUpperCase() }) },
+    { label: "Token", render: (t) => tokenCell(t.symbol, t.mint, null) },
+    { label: "Amount", num: true, render: (t) => usd(t.usd_value) },
+    { label: "Price", num: true, render: (t) => price(t.price_usd) },
+    { label: "Realized", num: true, render: (t) => (t.side === "sell" ? delta(t.realized_pnl_usd, usd(t.realized_pnl_usd, { sign: true })) : "") },
+    { label: "Reason", cls: "reason", render: (t) => t.reason },
+  ];
+  if (full) {
+    cols.splice(5, 0, { label: "Fee", num: true, render: (t) => usd(t.fee_usd) });
+    cols.push({ label: "Tx", render: (t) => (t.signature
+      ? h("a", { href: `https://solscan.io/tx/${encodeURIComponent(t.signature)}`, target: "_blank", rel: "noopener noreferrer", text: shortMint(t.signature) })
+      : "") });
+  }
+  return table(cols, trades, "No trades yet");
+}
+
+async function closePosition(p) {
+  const live = state.view && state.view.mode === "live";
+  const ok = await confirmDialog(`Close ${p.symbol}?`,
+    `Sell the entire position (about ${usd(p.value_usd)}) at market now${live ? " — this is a real on-chain sale" : ""}.`, "Sell now");
+  if (ok) control("close", { mint: p.mint });
+}
+
+// ---------------------------------------------------------------- scanner
+function renderScanner(v) {
+  const all = v.scan.candidates;
+  const q = state.scanSearch.trim().toLowerCase();
+  const rows = all.filter((c) => (state.scanFilter === "all" || (state.scanFilter === "passed") === c.passed)
+    && (!q || (c.symbol || "").toLowerCase().includes(q) || c.mint.toLowerCase().includes(q)));
+  const passed = all.filter((c) => c.passed).length;
+  $("#scan-summary").textContent = v.scan.at
+    ? `Last scan ${ago(v.scan.at, v.now)} · ${all.length} candidates · ${passed} passed filters · scans every ${duration(v.scan.every_s / 60)}`
+    : "No scan yet";
+  replace($("#scan-table"), table([
+    { label: "Token", render: (c) => tokenCell(c.symbol, c.mint, c.url) },
+    { label: "Score", num: true, render: (c) => num(c.score) },
+    { label: "Liquidity", num: true, render: (c) => usd(c.liquidity_usd, { compact: true }) },
+    { label: "Mkt cap", num: true, render: (c) => usd(c.market_cap_usd, { compact: true }) },
+    { label: "5m", num: true, render: (c) => pct(c.price_change_m5) },
+    { label: "1h", num: true, render: (c) => pct(c.price_change_h1) },
+    { label: "Buys/sells 1h", num: true, render: (c) => num(c.buy_sell_ratio_h1) },
+    { label: "Age", num: true, render: (c) => duration(c.age_minutes) },
+    { label: "Verdict", cls: "reason", render: verdict },
+  ], rows, all.length ? "No candidates match" : "Waiting for the first scan…"));
+}
+
+function verdict(c) {
+  let cls = "v-fail", icon = "✗", text;
+  if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
+  else if (c.outcome.startsWith("unsafe")) { cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: "); }
+  else if (c.outcome) { text = c.outcome.charAt(0).toUpperCase() + c.outcome.slice(1); }
+  else if (c.passed) { cls = "v-pass"; icon = "✓"; text = "Passed filters"; }
+  else {
+    text = c.reasons.slice(0, 2).join(" · ");
+    if (c.reasons.length > 2) text += ` · +${c.reasons.length - 2} more`;
+  }
+  return h("span", { class: `verdict ${cls}`, title: c.reasons.join("\n") || null },
+    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), h("span", { text }));
+}
+
+// ---------------------------------------------------------------- trades
+function renderTrades(v) {
+  const sells = v.trades.filter((t) => t.side === "sell");
+  const realized = sells.reduce((a, t) => a + t.realized_pnl_usd, 0);
+  $("#trades-summary").textContent = `${v.trades.length} most recent trades · ${sells.length} sells · realized ${usd(realized, { sign: true })}`;
+  $("#trades-download").href = `/api/trades.csv?token=${encodeURIComponent(TOKEN)}`;
+  replace($("#trades-table"), tradesTable(v.trades, true));
+}
+
+// ---------------------------------------------------------------- activity
+async function pollLog() {
+  try {
+    const { entries } = await api(`/api/log?after=${state.logAfter}`);
+    if (entries.length) {
+      state.logs.push(...entries);
+      state.logs = state.logs.slice(-1500);
+      state.logAfter = entries[entries.length - 1].id;
+      if (state.tab === "activity") renderLog();
+    }
+  } catch { /* the view poll reports connection problems */ }
+}
+
+function renderLog() {
+  const el = $("#log");
+  const isTrade = (e) => /^(BUY|SELL)\b/.test(e.msg);
+  const rows = state.logs.filter((e) => state.logFilter === "all"
+    || (state.logFilter === "trades" ? isTrade(e) : e.level !== "INFO" && e.level !== "DEBUG"));
+  replace(el, rows.length ? rows.slice(-600).map((e) => h("div", { class: "log-line" },
+    h("span", { class: "log-time", text: new Date(e.t).toLocaleTimeString() }),
+    h("span", { class: `lvl lvl-${e.level}`, text: e.level }),
+    h("span", { class: "log-source", text: e.source }),
+    h("span", { class: "log-msg", text: e.msg }))) : h("div", { class: "empty", text: "Nothing logged yet" }));
+  if ($("#log-follow").checked) el.scrollTop = el.scrollHeight;
+}
+
+// ---------------------------------------------------------------- backtest
+async function pollBacktest() {
+  try {
+    state.backtest = await api("/api/backtest");
+    renderBacktest();
+  } catch { /* ignore */ }
+}
+
+function renderBacktest() {
+  const b = state.backtest;
+  if (!b) return;
+  const status = $("#bt-status");
+  $("#bt-run").disabled = b.status === "running";
+  if (b.status === "running") status.textContent = `Running since ${timeLabel(b.started_at)}…`;
+  else if (b.status === "error") status.textContent = `✗ ${b.error}`;
+  else if (b.status === "done") status.textContent = `✓ Finished in ${b.elapsed_s}s · ${b.records.toLocaleString()} records`;
+  else status.textContent = "";
+  const results = $("#bt-results");
+  if (b.status !== "done") { if (b.status !== "running") results.hidden = true; return; }
+  results.hidden = false;
+  const st = b.stats;
+  replace($("#bt-tiles"),
+    tile("Return", delta(st.return_pct, pct(st.return_pct, 2)), `${usd(b.starting_equity)} → ${usd(b.final_equity)}`),
+    tile("Max drawdown", pct(-st.max_drawdown_pct, 2)),
+    tile("Round trips", String(st.round_trips), `avg hold ${duration(st.avg_hold_min)}`),
+    tile("Win rate", `${st.win_rate_pct.toFixed(1)}%`, `avg win ${pct(st.avg_win_pct)} · loss ${pct(st.avg_loss_pct)}`),
+    tile("Profit factor", st.profit_factor === null ? "∞" : num(st.profit_factor), "gross wins ÷ gross losses"),
+    tile("Fees", usd(st.fees_usd), `realized ${usd(st.realized_pnl_usd, { sign: true })}`));
+  $("#bt-period").textContent = `${timeLabel(b.start, true)} → ${timeLabel(b.end, true)} · ${st.period_hours.toFixed(1)}h`;
+  lineChart($("#bt-chart"), b.equity, { emptyText: "Not enough data" });
+  const exits = Object.entries(st.exit_reasons).map(([label, value]) => ({
+    label, value, detail: `${label}: ${value} of ${st.round_trips} round trips` }));
+  barChart($("#bt-exits"), exits);
+  $("#bt-report").textContent = b.report;
+  const closed = [...b.closed].sort((a, z) => z.closed_at.localeCompare(a.closed_at));
+  $("#bt-closed-count").textContent = `${closed.length}${closed.length >= 500 ? " (latest 500)" : ""}`;
+  replace($("#bt-closed"), table([
+    { label: "Token", render: (c) => tokenCell(c.symbol, c.mint, null) },
+    { label: "Opened", cls: "nowrap", render: (c) => timeLabel(c.opened_at, true) },
+    { label: "Held", num: true, render: (c) => duration(c.hold_minutes) },
+    { label: "Cost", num: true, render: (c) => usd(c.cost_usd) },
+    { label: "PnL", num: true, render: (c) => delta(c.pnl_usd, `${usd(c.pnl_usd, { sign: true })} (${pct(c.pnl_pct)})`) },
+    { label: "Exit", cls: "reason", render: (c) => c.exit_reason },
+  ], closed, "No round trips"));
+}
+
+// ---------------------------------------------------------------- settings
+async function loadSettings() {
+  if (state.configLoaded) return;
+  try {
+    const cfg = await api("/api/config");
+    state.configLoaded = true;
+    if (!$("#bt-dir").value) $("#bt-dir").value = (cfg.recorder && cfg.recorder.dir) || "recordings";
+    const fmt = (v) => (Array.isArray(v) ? (v.length ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join(", ") : "[]")
+      : v === null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v));
+    replace($("#settings"), Object.entries(cfg).filter(([, sec]) => sec && typeof sec === "object").map(([name, sec]) =>
+      h("section", { class: "card" },
+        h("div", { class: "card-head" }, h("h2", { text: name })),
+        h("dl", {}, Object.entries(sec).flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: fmt(v) })])))));
+  } catch (e) { toast(`Could not load settings: ${e.message}`, true); }
+}
+
+// ---------------------------------------------------------------- equity
+async function pollEquity() {
+  try {
+    const { points } = await api(`/api/equity?range=${state.range}`);
+    state.equity = points;
+    if (state.tab === "overview") renderEquity();
+  } catch { /* ignore */ }
+}
+
+function renderEquity() {
+  lineChart($("#equity-chart"), state.equity, { emptyText: "Collecting equity samples…" });
+  const tableEl = $("#equity-table");
+  tableEl.hidden = !state.equityTable;
+  if (state.equityTable) {
+    const rows = state.equity.slice(-60).reverse();
+    replace(tableEl, table([
+      { label: "Time", render: (p) => timeLabel(p[0], true) },
+      { label: "Equity", num: true, render: (p) => usd(p[1]) },
+    ], rows, "No samples"));
+  }
+}
+
+// ---------------------------------------------------------------- controls
+async function control(action, extra = {}) {
+  try {
+    const res = await api("/api/control", { method: "POST", body: JSON.stringify({ action, ...extra }) });
+    if (res.message) toast(res.message);
+    await pollView();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------- loop & wiring
+function render() {
+  const v = state.view;
+  if (!v) return;
+  renderHeader(v);
+  if (state.tab === "overview") renderOverview(v);
+  else if (state.tab === "scanner") renderScanner(v);
+  else if (state.tab === "trades") renderTrades(v);
+}
+
+async function pollView() {
+  try {
+    state.view = await api("/api/view");
+    state.failures = 0;
+    if (state.view.ticks !== state.lastTicks) { state.lastTicks = state.view.ticks; state.lastTickWall = Date.now(); }
+  } catch (e) {
+    state.failures += 1;
+    if (state.view) renderHeader(state.view);
+    else $("#status-pill").textContent = `Can't reach the agent: ${e.message}`;
+    return;
+  }
+  render();
+  if (state.view.backtest_status === "running" || (state.backtest && state.backtest.status === "running")) pollBacktest();
+}
+
+function selectTab(name) {
+  state.tab = name;
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === name ? "true" : "false"));
+  document.querySelectorAll(".tab-panel").forEach((p) => { p.hidden = p.id !== `tab-${name}`; });
+  store("tab", name);
+  if (name === "activity") renderLog();
+  if (name === "settings") loadSettings();
+  if (name === "backtest") { loadSettings(); pollBacktest(); }
+  if (name === "overview") renderEquity();
+  render();
+}
+
+function segmented(id, key, onChange) {
+  const group = $(id);
+  group.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    group.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b === btn ? "true" : "false"));
+    onChange(btn.dataset[key]);
+  });
+}
+
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  $("#btn-theme").title = `Theme: ${t || "auto"} (click to change)`;
+}
+
+function init() {
+  applyTheme(store("theme"));
+  $("#btn-theme").addEventListener("click", () => {
+    const order = [null, "light", "dark"];
+    const cur = store("theme");
+    const next = order[(order.indexOf(cur === "light" || cur === "dark" ? cur : null) + 1) % 3];
+    store("theme", next || "auto");
+    applyTheme(next);
+    if (state.tab === "overview") renderEquity();
+  });
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => selectTab(t.dataset.tab)));
+  document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => selectTab(b.dataset.goto)));
+  segmented("#range-select", "range", (r) => { state.range = r; pollEquity(); });
+  segmented("#scan-filter", "filter", (f) => { state.scanFilter = f; render(); });
+  segmented("#log-filter", "filter", (f) => { state.logFilter = f; renderLog(); });
+  $("#scan-search").addEventListener("input", (e) => { state.scanSearch = e.target.value; render(); });
+  $("#equity-table-toggle").addEventListener("click", (e) => {
+    state.equityTable = !state.equityTable;
+    e.currentTarget.setAttribute("aria-pressed", state.equityTable ? "true" : "false");
+    renderEquity();
+  });
+  $("#btn-pause").addEventListener("click", () => control(state.view && state.view.entries_paused ? "resume" : "pause"));
+  $("#btn-scan").addEventListener("click", () => control("scan_now"));
+  $("#btn-close-all").addEventListener("click", async () => {
+    const v = state.view;
+    if (!v || !v.positions.length) return;
+    const ok = await confirmDialog("Close every position?",
+      `Sell all ${v.positions.length} open position(s), about ${usd(v.positions_value)}, at market now${v.mode === "live" ? " — real on-chain sales" : ""}. New entries keep running unless you also pause them.`,
+      "Sell everything");
+    if (ok) control("close_all");
+  });
+  $("#bt-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const overrides = $("#bt-overrides").value.split("\n").map((l) => l.trim()).filter(Boolean);
+    try {
+      state.backtest = await api("/api/backtest", { method: "POST", body: JSON.stringify({
+        dir: $("#bt-dir").value.trim(), overrides, assume_safe: $("#bt-assume-safe").checked }) });
+      renderBacktest();
+      const poll = setInterval(async () => {
+        await pollBacktest();
+        if (!state.backtest || state.backtest.status !== "running") clearInterval(poll);
+      }, 1000);
+    } catch (err) { toast(err.message, true); }
+  });
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (state.tab === "overview") renderEquity();
+      if (state.tab === "backtest") renderBacktest();
+    }, 150);
+  });
+
+  const saved = store("tab");
+  selectTab(["overview", "scanner", "trades", "activity", "backtest", "settings"].includes(saved) ? saved : "overview");
+  pollView(); pollEquity(); pollLog();
+  setInterval(pollView, 2000);
+  setInterval(pollEquity, 10000);
+  setInterval(pollLog, 2500);
+}
+
+document.addEventListener("DOMContentLoaded", init);

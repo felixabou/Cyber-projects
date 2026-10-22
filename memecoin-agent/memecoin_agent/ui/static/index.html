@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="ui-token" content="__UI_TOKEN__">
+  <title>Memecoin Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%232a78d6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">◆</span>
+      <span class="brand-name">memecoin-agent</span>
+      <span id="mode-badge" class="badge">—</span>
+    </div>
+    <div id="status-pill" class="status-pill" role="status" aria-live="polite">Connecting…</div>
+    <div id="meta" class="meta"></div>
+    <div class="actions">
+      <button id="btn-scan" class="btn" type="button" title="Run a discovery scan now (may open positions)">Scan now</button>
+      <button id="btn-pause" class="btn" type="button">Pause entries</button>
+      <button id="btn-close-all" class="btn btn-danger" type="button">Close all</button>
+      <button id="btn-theme" class="btn btn-icon" type="button" aria-label="Toggle theme" title="Theme">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" class="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button role="tab" class="tab" data-tab="scanner" aria-selected="false">Scanner <span id="tab-scanner-count" class="tab-count"></span></button>
+    <button role="tab" class="tab" data-tab="trades" aria-selected="false">Trades</button>
+    <button role="tab" class="tab" data-tab="activity" aria-selected="false">Activity</button>
+    <button role="tab" class="tab" data-tab="backtest" aria-selected="false">Backtest</button>
+    <button role="tab" class="tab" data-tab="settings" aria-selected="false">Settings</button>
+  </nav>
+
+  <main>
+    <!-- Overview -->
+    <section id="tab-overview" class="tab-panel" role="tabpanel">
+      <div class="hero-row">
+        <div class="hero card">
+          <div class="hero-label">Equity</div>
+          <div id="hero-value" class="hero-value">—</div>
+          <div id="hero-delta" class="hero-delta"></div>
+        </div>
+        <div id="tiles" class="tiles"></div>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Equity over time</h2>
+          <div class="card-tools">
+            <div class="segmented" id="range-select" role="group" aria-label="Time range">
+              <button type="button" data-range="1h">1H</button>
+              <button type="button" data-range="24h" aria-pressed="true">24H</button>
+              <button type="button" data-range="7d">7D</button>
+              <button type="button" data-range="all">All</button>
+            </div>
+            <button type="button" class="btn btn-small" id="equity-table-toggle" aria-pressed="false">Table</button>
+          </div>
+        </div>
+        <div id="equity-chart" class="chart"></div>
+        <div id="equity-table" class="table-wrap" hidden></div>
+      </section>
+
+      <div class="grid-2">
+        <section class="card">
+          <div class="card-head"><h2>Open positions</h2><span id="positions-count" class="muted"></span></div>
+          <div id="positions" class="table-wrap"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>Risk limits</h2></div>
+          <div id="risk"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head"><h2>Recent trades</h2><button type="button" class="btn btn-small" data-goto="trades">All trades →</button></div>
+        <div id="recent-trades" class="table-wrap"></div>
+      </section>
+    </section>
+
+    <!-- Scanner -->
+    <section id="tab-scanner" class="tab-panel" role="tabpanel" hidden>
+      <div class="filter-row">
+        <div class="segmented" id="scan-filter" role="group" aria-label="Show">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="passed">Passed filters</button>
+          <button type="button" data-filter="rejected">Rejected</button>
+        </div>
+        <input id="scan-search" class="input" type="search" placeholder="Filter by symbol or mint" aria-label="Filter by symbol or mint">
+        <span id="scan-summary" class="muted"></span>
+      </div>
+      <section class="card">
+        <div id="scan-table" class="table-wrap"></div>
+      </section>
+    </section>
+
+    <!-- Trades -->
+    <section id="tab-trades" class="tab-panel" role="tabpanel" hidden>
+      <div class="filter-row">
+        <span id="trades-summary" class="muted"></span>
+        <a id="trades-download" class="btn btn-small" href="#" download="trades.csv">Download CSV</a>
+      </div>
+      <section class="card"><div id="trades-table" class="table-wrap"></div></section>
+    </section>
+
+    <!-- Activity -->
+    <section id="tab-activity" class="tab-panel" role="tabpanel" hidden>
+      <div class="filter-row">
+        <div class="segmented" id="log-filter" role="group" aria-label="Show">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="trades">Trades</button>
+          <button type="button" data-filter="warnings">Warnings &amp; errors</button>
+        </div>
+        <label class="check"><input type="checkbox" id="log-follow" checked> Follow</label>
+      </div>
+      <section class="card"><div id="log" class="log" tabindex="0" aria-label="Activity log"></div></section>
+    </section>
+
+    <!-- Backtest -->
+    <section id="tab-backtest" class="tab-panel" role="tabpanel" hidden>
+      <section class="card">
+        <div class="card-head"><h2>Run a backtest</h2></div>
+        <form id="bt-form" class="form" novalidate>
+          <label class="field">
+            <span>Recording directory</span>
+            <input id="bt-dir" class="input" type="text" autocomplete="off">
+          </label>
+          <label class="field field-wide">
+            <span>Overrides <span class="muted">(one <code>section.key=value</code> per line)</span></span>
+            <textarea id="bt-overrides" class="input" rows="3" spellcheck="false" placeholder="filters.min_score=0.65&#10;exits.stop_loss_pct=15"></textarea>
+          </label>
+          <label class="check"><input type="checkbox" id="bt-assume-safe"> Treat tokens without a recorded RugCheck verdict as safe</label>
+          <div class="form-actions">
+            <button id="bt-run" class="btn btn-primary" type="submit">Run backtest</button>
+            <span id="bt-status" class="muted" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+        <p class="hint">Record data first with <code>memecoin-agent record</code>. Replays use the same strategy, risk and fill code as live trading, but can't model slippage between samples, MEV or failed transactions — treat results as an upper bound.</p>
+      </section>
+      <div id="bt-results" hidden>
+        <div id="bt-tiles" class="tiles tiles-wide"></div>
+        <section class="card">
+          <div class="card-head"><h2>Backtest equity</h2><span id="bt-period" class="muted"></span></div>
+          <div id="bt-chart" class="chart"></div>
+        </section>
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head"><h2>How trades ended</h2></div>
+            <div id="bt-exits" class="chart chart-bars"></div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2>Report</h2></div>
+            <pre id="bt-report" class="report"></pre>
+          </section>
+        </div>
+        <section class="card">
+          <div class="card-head"><h2>Round trips</h2><span id="bt-closed-count" class="muted"></span></div>
+          <div id="bt-closed" class="table-wrap"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab-panel" role="tabpanel" hidden>
+      <p class="hint">Settings are read-only here. Edit your <code>config.yaml</code> and restart the agent to change them; use the Backtest tab's overrides to try values first.</p>
+      <div id="settings" class="settings-grid"></div>
+    </section>
+  </main>
+
+  <dialog id="confirm" class="dialog">
+    <form method="dialog">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <p id="confirm-body"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn" type="submit">Cancel</button>
+        <button value="ok" id="confirm-ok" class="btn btn-danger" type="submit">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

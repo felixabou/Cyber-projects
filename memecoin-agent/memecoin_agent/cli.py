@@ -1,4 +1,4 @@
-"""Command-line entry point: run, scan, status, close-all, record, backtest, demo."""
+"""Command-line entry point: run, ui, scan, status, close-all, record, backtest, demo."""
 
 from __future__ import annotations
 
@@ -179,6 +179,61 @@ def cmd_backtest(args: argparse.Namespace, cfg: Config) -> None:
         print(f"Trades written to {args.trades_out}")
 
 
+def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
+    from .ui import redacted_config
+    from .ui.runner import AgentRunner, EquityHistory, LogBuffer
+    from .ui.server import DashboardServer
+
+    logs = LogBuffer()
+    root = logging.getLogger()
+    root.addHandler(logs)
+    for handler in root.handlers:
+        # A dashboard-launched backtest replays thousands of simulated trades; keep them out of the live log.
+        handler.addFilter(lambda record: record.threadName != "backtest")
+    feed = None
+    if args.synthetic:
+        from .simulation import SimClock, SyntheticMarket, SyntheticSafety
+
+        cfg.execution.mode = "paper"
+        clock = SimClock(utcnow())
+        market = SyntheticMarket(clock, seed=args.seed)
+
+        def advance(seconds: float) -> None:
+            clock.advance(seconds)
+            market.step(seconds)
+
+        agent = Agent(cfg, market, SyntheticSafety(market), PaperExecutor(cfg.execution),
+                      Portfolio(cash_usd=cfg.risk.starting_balance_usd), clock=clock, persist=False)
+        runner = AgentRunner(agent, advance=advance, speed=args.speed, synthetic=True)
+    else:
+        agent, feed = build_agent(cfg)
+        equity = EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv")
+        runner = AgentRunner(agent, feed=feed, equity=equity)
+    server = DashboardServer(runner, logs, host=args.host, port=args.port,
+                             password=os.environ.get("MEMECOIN_UI_PASSWORD"), config_dict=redacted_config(cfg))
+    if feed is not None:
+        feed.start()
+    runner.start()
+    print(f"Dashboard: {server.url}  ({'synthetic market' if args.synthetic else cfg.execution.mode + ' mode'}; Ctrl-C to stop)",
+          flush=True)
+    if not args.no_browser:
+        try:
+            import webbrowser
+
+            webbrowser.open(server.url)
+        except Exception:
+            pass
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        runner.stop()
+        if feed is not None:
+            feed.stop()
+
+
 def cmd_demo(args: argparse.Namespace, cfg: Config) -> None:
     from .simulation import SimClock, SyntheticMarket, SyntheticSafety
 
@@ -208,6 +263,16 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("run", help="run the trading loop")
     p.add_argument("--max-ticks", type=int, default=None)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("ui", help="run the trading loop with a local web dashboard")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="bind address (non-local addresses require MEMECOIN_UI_PASSWORD)")
+    p.add_argument("--port", type=int, default=8787)
+    p.add_argument("--no-browser", action="store_true", help="don't open a browser window")
+    p.add_argument("--synthetic", action="store_true", help="drive the dashboard with the offline synthetic market")
+    p.add_argument("--speed", type=float, default=20.0, help="synthetic mode: simulated seconds per real second")
+    p.add_argument("--seed", type=int, default=7)
+    p.set_defaults(func=cmd_ui)
 
     p = sub.add_parser("scan", help="one-shot: discover and score tokens, no trading")
     p.add_argument("--limit", type=int, default=30)
@@ -243,7 +308,8 @@ def main(argv: list[str] | None = None) -> None:
     cfg = load_config(args.config)
     offline = args.command in ("status", "demo", "backtest") or getattr(args, "synthetic", False)
     setup_logging(None if offline else cfg.agent.log_file, args.verbose)
-    if (args.command in ("status", "scan", "demo", "backtest") or getattr(args, "synthetic", False)) and not args.verbose:
+    quiet = args.command in ("status", "scan", "demo", "backtest") or (args.command == "record" and args.synthetic)
+    if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)
     args.func(args, cfg)

@@ -51,10 +51,12 @@ cd memecoin-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-memecoin-agent demo                  # offline synthetic market, no network needed
+memecoin-agent ui --synthetic        # dashboard on an offline simulated market (no network)
+memecoin-agent demo                  # same market, text-only summary
 memecoin-agent scan --safety         # what would it buy right now? (no trading)
 cp config.example.yaml config.yaml
-memecoin-agent -c config.yaml run    # paper trading loop
+memecoin-agent -c config.yaml ui     # paper trading with the web dashboard
+memecoin-agent -c config.yaml run    # paper trading, terminal only
 memecoin-agent -c config.yaml status # equity, PnL, open positions
 memecoin-agent -c config.yaml record # record market data for backtests (see below)
 ```
@@ -66,6 +68,44 @@ launch-feed buffer (`state/feed.json`).
 The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
 performance.
+
+## Dashboard
+
+`memecoin-agent -c config.yaml ui` runs the same trading loop as `run`, plus a
+local web dashboard at <http://127.0.0.1:8787>. It opens in your browser
+automatically; `--no-browser` and `--port` change that.
+
+![Dashboard overview](docs/dashboard.png)
+
+- **Overview**:
+  - equity, today's PnL, realized and unrealized PnL, cash and session win rate;
+  - an equity chart (1H / 24H / 7D / All) with a hover readout and a table view;
+  - open positions, with each one's current exit price, take-profit progress and liquidity change since entry, and a **Close** button;
+  - how close you are to each risk limit;
+  - recent trades.
+- **Scanner**: every token from the last scan, with its score, key metrics and verdict. The verdict is *Bought*, *Passed filters*, *Unsafe: …* (the RugCheck reason) or the exact filters it failed. This is the place to tune your filters.
+- **Trades**: the trade journal, with transaction links in live mode and a CSV download.
+- **Activity**: the agent's log, live, filterable to trades or to warnings.
+- **Backtest**: pick a recording, enter `section.key=value` overrides, and get the report, equity curve, exit breakdown and every round trip. It runs on a copy of the config and never touches the live agent.
+- **Settings**: the active config, read-only, with API keys masked.
+
+Header controls:
+
+- **Pause entries** stops new buys; exits keep running.
+- **Close all** sells everything, after a confirmation.
+- **Scan now** runs a scan immediately.
+
+The dashboard reflects the live process, so stopping `ui` stops trading. Equity
+history is saved to `state/equity.csv`, so the chart survives restarts.
+
+**Security.** The dashboard can sell your positions, so:
+
+- It listens on 127.0.0.1 only.
+- Every API call needs a random per-session token that only the served page holds. Other websites can't trigger actions or read your data.
+- It rejects requests addressed to any other hostname (blocking DNS-rebinding attacks).
+- Other sites can't embed it in a frame (blocking clickjacking).
+
+To reach it from another device, set `MEMECOIN_UI_PASSWORD` and pass `--host 0.0.0.0`. It refuses to bind publicly without a password. Put it behind HTTPS (for example, an SSH tunnel or a reverse proxy) before exposing it beyond your LAN.
 
 ## Going live
 
@@ -162,6 +202,8 @@ memecoin_agent/
   recording.py       market-data recorder (gzipped JSONL)
   backtest.py        point-in-time replay + performance report
   simulation.py      offline synthetic market for demo/tests
+  ui/runner.py       agent thread, command queue, published views, equity history
+  ui/server.py       stdlib HTTP server + auth; ui/static/ is the page (vanilla JS, no build)
 tests/               pytest suite (HTTP and RPC mocked; real tx signing)
 ```
 
