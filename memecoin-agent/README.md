@@ -110,6 +110,20 @@ These catch what market data and RugCheck's summary miss. In the first live pape
 
 Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the gate switches off with a warning.
 
+**Held coins.** LarpCheck keeps watching after a buy. Every 5 minutes it re-reads the verdict of each coin held (free). When a coin is flagged, the agent first reads LarpCheck's reasoning: the summary, the claim and whether it held up, each risk finding with its evidence, and what would change the picture. Then it sells:
+
+| LarpCheck's view of a held coin | Action |
+|---|---|
+| LARP or SCAM, or RIGGED on any other verdict | sell 100% |
+| LIKELY LARP (any stamp), or LIKELY REAL with a RIGGED stamp | sell 80%, keep 20% as dust |
+| LIKELY LARP or LIKELY REAL and **anything changes**: a new check, a different verdict or coin stamp | sell 80%, keep 20% as dust (100% if it changed into LARP/SCAM) |
+| REAL / PARTLY REAL / UNCLEAR, not RIGGED | hold |
+
+- **Dust** is left alone: no stop loss, take-profit or time stop, and it doesn't use one of the open-position slots. Only a manual close (the dashboard's **Close**, or **Close all**) sells it.
+- **Where to read why:** the dashboard's positions table shows each coin's LarpCheck verdict, and the panel under it lays out why a coin was flagged. The trade journal records the verdict too.
+- **Full reports:** they're open for checks you ran. For someone else's check, the free plan spends a credit to open it (`max_report_opens_per_day`); after that the agent uses the free headline and stamp line.
+- **In check mode,** a held coin that was bought while unchecked gets one check started for it.
+
 The recorder keeps to RugCheck, so backtests don't replay LarpCheck verdicts yet.
 
 ## Dashboard

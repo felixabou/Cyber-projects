@@ -23,6 +23,10 @@ class Portfolio:
     trades: list[TradeRecord] = field(default_factory=list)  # unsaved, flushed to CSV
     closed: list[ClosedTrade] = field(default_factory=list)  # in-memory round-trip log (backtest stats)
 
+    def active_positions(self) -> dict[str, Position]:
+        """Positions that count toward limits (dust doesn't)."""
+        return {m: p for m, p in self.positions.items() if not p.dust}
+
     # -- valuation ----------------------------------------------------------------
     def positions_value_usd(self) -> float:
         return sum(p.market_value_usd() for p in self.positions.values())

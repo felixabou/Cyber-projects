@@ -32,6 +32,8 @@ class ExitDecision:
     fraction: float  # of the current position, (0, 1]
     reason: str
     tp_level: int | None = None
+    make_dust: bool = False  # keep what's left as dust (LarpCheck-flag exits)
+    larp: dict | None = None  # LarpCheck verdict + reasoning behind the exit, stored on the position
 
 
 def momentum_score(s: TokenSnapshot) -> float:

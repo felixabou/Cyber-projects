@@ -258,6 +258,17 @@ td.nowrap { white-space: nowrap; }
 .lvl-ERROR, .lvl-CRITICAL { color: var(--critical); }
 .lvl-INFO { color: var(--text-2); }
 
+/* LarpCheck in positions */
+.token-row { display: flex; align-items: center; gap: 8px; }
+.pill-dust { background: var(--surface-2); border: 1px dashed var(--axis); }
+.plain-link { text-decoration: none; }
+.larp-reason { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.larp-reason summary { cursor: pointer; }
+.larp-reason p { margin: 6px 0; }
+.larp-reason ul { margin: 6px 0; padding-left: 18px; }
+.larp-reason li { margin: 4px 0; }
+.larp-reason .pill { margin-left: 6px; text-decoration: none; }
+
 /* Recording panel */
 .rec-status p { margin: 0 0 6px; font-size: 13px; }
 .rec-status p:last-child { margin-bottom: 0; }

@@ -92,7 +92,11 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     else:
         executor = PaperExecutor(cfg.execution)
     pf = Portfolio.load(cfg.agent.state_file, cfg.risk.starting_balance_usd)
-    return Agent(cfg, market, safety, executor, pf), feed
+    from .data.larpcheck import CompositeSafety, LarpCheckGate
+
+    # The LarpCheck gate also reviews held coins and exits when it flags them.
+    guard = safety.find(LarpCheckGate) if isinstance(safety, CompositeSafety) else None
+    return Agent(cfg, market, safety, executor, pf, guard=guard), feed
 
 
 class Engine:

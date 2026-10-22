@@ -26,7 +26,7 @@ class RiskManager:
         return start > 0 and (realized + unrealized) <= -start * self.cfg.max_daily_loss_pct / 100
 
     def entry_block_reason(self, pf: Portfolio, now: datetime) -> str | None:
-        if len(pf.positions) >= self.cfg.max_open_positions:
+        if len(pf.active_positions()) >= self.cfg.max_open_positions:
             return f"max open positions ({self.cfg.max_open_positions})"
         if self.daily_loss_halted(pf, now):
             return f"daily loss limit ({self.cfg.max_daily_loss_pct:.0f}%) hit"

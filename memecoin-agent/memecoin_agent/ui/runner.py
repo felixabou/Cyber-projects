@@ -410,6 +410,7 @@ class AgentRunner:
                 "liquidity_change_pct": (p.last_liquidity_usd / p.entry_liquidity_usd - 1) * 100
                 if p.entry_liquidity_usd else 0.0,
                 "entry_score": p.entry_score,
+                "dust": p.dust, "larp": p.larp,
             })
         positions.sort(key=lambda x: x["opened_at"] or "")
 
@@ -433,7 +434,7 @@ class AgentRunner:
             "unrealized_pnl": sum(p["unrealized_usd"] for p in positions),
             "entries_paused": a.entries_paused, "kill_switch": kill, "entry_block": a.entry_block,
             "risk": {
-                "open_positions": len(pf.positions), "max_open_positions": cfg.risk.max_open_positions,
+                "open_positions": len(pf.active_positions()), "max_open_positions": cfg.risk.max_open_positions,
                 "entries_last_hour": entries_last_hour, "max_entries_per_hour": cfg.risk.max_entries_per_hour,
                 "daily_loss_usd": loss_now, "daily_loss_limit_usd": loss_limit,
                 "daily_loss_limit_pct": cfg.risk.max_daily_loss_pct,

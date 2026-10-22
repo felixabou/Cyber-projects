@@ -99,3 +99,14 @@ larpcheck:
   max_checks_per_day: 4           # free plan: 5 credits a day
   pending_max_minutes: 5
   fail_closed: false              # LarpCheck down: false = other checks decide
+  # Held coins: re-read the verdict every few minutes (free). When LarpCheck flags one, read its
+  # reasoning and sell. LIKELY LARP / LIKELY REAL coins sell 80% and keep 20% as dust; anything
+  # worse (LARP, SCAM, RIGGED on another verdict) sells in full.
+  exit_on_flag: true
+  exit_verdicts: [LIKELY LARP, LARP, SCAM]
+  exit_coin_stamps: [RIGGED]
+  dust_verdicts: [LIKELY LARP, LIKELY REAL]
+  exit_sell_fraction: 0.8
+  sell_on_change: true            # a LIKELY coin whose LarpCheck view changes (new check/verdict/stamp) sells too
+  held_recheck_minutes: 5
+  max_report_opens_per_day: 1     # opening someone else's full report costs a credit (free plan)

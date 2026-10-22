@@ -158,6 +158,20 @@ class LarpCheckConfig:
     pending_max_minutes: float = 5.0
     # LarpCheck unreachable: false = let the other checks decide, true = skip the buy.
     fail_closed: bool = False
+    # Held coins: re-read LarpCheck's verdict every few minutes (free); when it flags one, read the
+    # reasoning and sell. Coins rated one of dust_verdicts sell exit_sell_fraction and keep the rest
+    # as dust; any other flagged coin (LARP, SCAM, RIGGED on another verdict) sells in full.
+    exit_on_flag: bool = True
+    exit_verdicts: list[str] = field(default_factory=lambda: ["LIKELY LARP", "LARP", "SCAM"])
+    exit_coin_stamps: list[str] = field(default_factory=lambda: ["RIGGED"])
+    dust_verdicts: list[str] = field(default_factory=lambda: ["LIKELY LARP", "LIKELY REAL"])
+    exit_sell_fraction: float = 0.8
+    # A held coin rated one of dust_verdicts whose LarpCheck view then changes (a new check, or a
+    # different verdict or coin stamp) is sold the same way.
+    sell_on_change: bool = True
+    held_recheck_minutes: float = 5.0
+    # Opening a full report of a check someone else ran costs a credit on the free plan.
+    max_report_opens_per_day: int = 1
 
 
 @dataclass
@@ -187,6 +201,8 @@ class Config:
             raise ValueError("risk.min_position_usd cannot exceed risk.max_position_usd")
         if self.agent.scan_every_ticks < 1:
             raise ValueError("agent.scan_every_ticks must be >= 1")
+        if not 0 < self.larpcheck.exit_sell_fraction <= 1:
+            raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:

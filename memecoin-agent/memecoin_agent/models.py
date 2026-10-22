@@ -111,6 +111,11 @@ class Position:
     tp_levels_hit: list[int] = field(default_factory=list)
     proceeds_usd: float = 0.0
     entry_score: float = 0.0
+    # Dust: the remainder kept after a LarpCheck-flag exit. Strategy exits leave it alone and it
+    # doesn't take an open-position slot; it goes only on a manual close.
+    dust: bool = False
+    # LarpCheck's view of the coin while held: verdict, stamp, parsed reasoning (see data/larpcheck.py).
+    larp: dict[str, Any] | None = None
 
     def pnl_pct(self, price: float | None = None) -> float:
         p = self.last_price_usd if price is None else price

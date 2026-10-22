@@ -29,6 +29,7 @@ class Agent:
         portfolio: Portfolio,
         clock: Callable[[], datetime] = utcnow,
         persist: bool = True,
+        guard: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -38,6 +39,8 @@ class Agent:
         self.risk = RiskManager(cfg.risk)
         self.clock = clock
         self.persist = persist
+        # Optional held-position reviewer (LarpCheckGate.review_position): exits on outside verdicts.
+        self.guard = guard
         self.ticks = 0
         # State surfaced by the dashboard (memecoin_agent/ui).
         self.entries_paused = False
@@ -95,7 +98,14 @@ class Agent:
                 self.pf.mark(snap)
             else:
                 log.warning("No market data for held token %s", pos.symbol)
+            if pos.dust:
+                continue  # dust is left alone until a manual close
             decision = evaluate_exit(pos, snap, self.cfg.exits, now)
+            if decision is None and self.guard is not None:
+                try:
+                    decision = self.guard.review_position(pos)
+                except Exception as exc:  # an outside service must never break exit handling
+                    log.warning("Position review failed for %s: %s", pos.symbol, exc)
             if decision:
                 self._sell(mint, decision, snap, now)
 
@@ -112,6 +122,13 @@ class Agent:
                                   cooldown_until=self.risk.cooldown_until(now))
         log.info("SELL %s %.0f%% -> $%.2f | %s | realized %+.2f | equity $%.2f",
                  pos.symbol, decision.fraction * 100, fill.usd_value, decision.reason, realized, self.pf.equity_usd())
+        if mint in self.pf.positions:
+            if decision.larp is not None:
+                self.pf.positions[mint].larp = decision.larp
+            if decision.make_dust:
+                self.pf.positions[mint].dust = True
+                log.info("Keeping %.0f%% of %s as dust (left alone until closed manually)",
+                         (1 - decision.fraction) * 100, pos.symbol)
 
     def close_position(self, mint: str, reason: str = "manual close") -> bool:
         if mint not in self.pf.positions:

@@ -394,7 +394,8 @@ function renderOverview(v) {
 
   $("#positions-count").textContent = `${v.positions.length} / ${v.risk.max_open_positions}`;
   replace($("#positions"), table([
-    { label: "Token", render: (p) => tokenCell(p.symbol, p.mint, p.url) },
+    { label: "Token", render: (p) => h("div", { class: "token-row" }, tokenCell(p.symbol, p.mint, p.url),
+      p.dust ? h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }) : null) },
     { label: "Value", num: true, render: (p) => usd(p.value_usd) },
     { label: "PnL", num: true, render: (p) => delta(p.pnl_pct, pct(p.pnl_pct)) },
     { label: "Peak", num: true, render: (p) => pct(p.peak_pct) },
@@ -402,10 +403,12 @@ function renderOverview(v) {
       `${price(p.stop_price_usd)}${p.trailing_armed ? " ↟" : ""}`) },
     { label: "Take profit", num: true, render: (p) => `${p.tp_hit}/${p.tp_total}` },
     { label: "Liquidity", num: true, render: (p) => pct(p.liquidity_change_pct, 0) },
+    { label: "LarpCheck", render: larpCell },
     { label: "Held", num: true, render: (p) => h("span", { title: `Time stop at ${duration(p.max_hold_minutes)}` }, duration(p.held_minutes)) },
     { label: "", render: (p) => h("button", { class: "btn btn-small btn-danger", type: "button",
       onclick: () => closePosition(p), text: "Close" }) },
   ], v.positions, "No open positions"));
+  renderLarpReasons(v.positions);
 
   const r = v.risk;
   const lossPct = r.daily_loss_limit_usd ? (r.daily_loss_usd / r.daily_loss_limit_usd) * 100 : 0;
@@ -430,6 +433,39 @@ function renderOverview(v) {
     h("div", { class: "entry-state", text: entry }));
 
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
+}
+
+const LARP_BAD = new Set(["LARP", "SCAM", "LIKELY LARP"]);
+
+function larpCell(p) {
+  const l = p.larp;
+  if (!l) return h("span", { class: "muted", text: "—" });
+  const bad = LARP_BAD.has(l.verdict) || l.coin_stamp === "RIGGED";
+  const label = l.verdict + (l.coin_stamp ? ` · ${l.coin_stamp}` : "");
+  const tip = [l.summary, ...((l.reasoning && l.reasoning.risks) || []).map((r) => `• ${r.title}`)].filter(Boolean).join("\n");
+  const link = safeUrl(l.url);
+  const badge = h("span", { class: `verdict ${bad ? "v-unsafe" : "v-pass"}`, title: tip || null },
+    h("span", { class: "verdict-icon", "aria-hidden": "true", text: bad ? "✗" : "✓" }), h("span", { text: label }));
+  return link ? h("a", { href: link, target: "_blank", rel: "noopener noreferrer", class: "plain-link" }, badge) : badge;
+}
+
+// LarpCheck's reasoning for every held coin it flagged: why, the risk findings with evidence, what to watch.
+function renderLarpReasons(positions) {
+  const flagged = positions.filter((p) => p.larp && p.larp.reasoning);
+  replace($("#larp-reasons"), flagged.map((p) => {
+    const l = p.larp, r = l.reasoning;
+    return h("details", { class: "larp-reason", open: true },
+      h("summary", {}, h("strong", { text: `Why LarpCheck flagged ${p.symbol}` }),
+        h("span", { class: "muted", text: ` · ${l.verdict}${l.coin_stamp ? " · " + l.coin_stamp : ""} · ${l.trigger || "flagged"}${r.source === "full report" ? " · full report" : ""}` })),
+      r.summary ? h("p", { text: r.summary }) : null,
+      r.claim ? h("p", { class: "muted", text: `Claim: ${r.claim} (${r.claim_status || "unverified"})` }) : null,
+      r.coin_line ? h("p", { class: "muted", text: `Coin: ${r.coin_line}` }) : null,
+      r.risks && r.risks.length ? h("ul", {}, r.risks.map((f) => h("li", {}, h("strong", { text: f.title }),
+        f.detail ? ` ${f.detail}` : "",
+        safeUrl(f.evidence) ? h("a", { href: f.evidence, target: "_blank", rel: "noopener noreferrer", class: "pill", text: "evidence" }) : null))) : null,
+      r.watch ? h("p", { class: "muted", text: `What would change the picture: ${r.watch}` }) : null,
+      safeUrl(l.url) ? h("a", { href: l.url, target: "_blank", rel: "noopener noreferrer", text: "Full check on LarpCheck →" }) : null);
+  }));
 }
 
 function tradesTable(trades, full) {
