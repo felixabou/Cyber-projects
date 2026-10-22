@@ -392,14 +392,15 @@ function renderOverview(v) {
     tile("Win rate", sess.win_rate_pct === null ? "—" : `${sess.win_rate_pct.toFixed(0)}%`,
       `${sess.wins}/${sess.round_trips} round trips this session`));
 
-  $("#positions-count").textContent = `${v.positions.length} / ${v.risk.max_open_positions}`;
+  const dust = v.positions.filter((p) => p.dust).length;  // dust doesn't take a slot
+  $("#positions-count").textContent = `${v.positions.length - dust} / ${v.risk.max_open_positions}${dust ? ` + ${dust} dust` : ""}`;
   replace($("#positions"), table([
     { label: "Token", render: (p) => h("div", { class: "token-row" }, tokenCell(p.symbol, p.mint, p.url),
       p.dust ? h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }) : null) },
     { label: "Value", num: true, render: (p) => usd(p.value_usd) },
     { label: "PnL", num: true, render: (p) => delta(p.pnl_pct, pct(p.pnl_pct)) },
     { label: "Peak", num: true, render: (p) => pct(p.peak_pct) },
-    { label: "Exit if below", num: true, render: (p) => h("span", { title: p.trailing_armed ? "Trailing stop armed" : "Stop loss" },
+    { label: "Exit if below", num: true, render: (p) => p.dust ? h("span", { class: "muted", title: "Dust has no automatic exits", text: "none (dust)" }) : h("span", { title: p.trailing_armed ? "Trailing stop armed" : "Stop loss" },
       `${price(p.stop_price_usd)}${p.trailing_armed ? " ↟" : ""}`) },
     { label: "Take profit", num: true, render: (p) => `${p.tp_hit}/${p.tp_total}` },
     { label: "Liquidity", num: true, render: (p) => pct(p.liquidity_change_pct, 0) },

@@ -262,6 +262,7 @@ td.nowrap { white-space: nowrap; }
 .token-row { display: flex; align-items: center; gap: 8px; }
 .pill-dust { background: var(--surface-2); border: 1px dashed var(--axis); }
 .plain-link { text-decoration: none; }
+.plain-link .verdict, td .verdict { white-space: nowrap; }
 .larp-reason { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
 .larp-reason summary { cursor: pointer; }
 .larp-reason p { margin: 6px 0; }
