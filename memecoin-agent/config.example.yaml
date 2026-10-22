@@ -95,17 +95,19 @@ larpcheck:
   reject_verdicts: [LARP, LIKELY LARP, SCAM]
   reject_coin_stamps: [RIGGED]    # stamps: OK / NEUTRAL / SKETCHY / RIGGED
   min_coin_score: null
-  on_unchecked: allow             # allow (free) | check (spends a daily credit, buys only if it passes) | reject
+  require_verdict: true           # never buy a coin LarpCheck hasn't checked (no credits / down / no key = no buy)
+  on_unchecked: check             # check (spends a daily credit, buys only if it passes) | reject | allow (needs require_verdict: false)
   max_checks_per_day: 4           # free plan: 5 credits a day
   pending_max_minutes: 5
-  fail_closed: false              # LarpCheck down: false = other checks decide
+  fail_closed: false              # only used with require_verdict: false (LarpCheck down: other checks decide)
   # Held coins: re-read the verdict every few minutes (free). When LarpCheck flags one, read its
-  # reasoning and sell. LIKELY LARP / LIKELY REAL coins sell 80% and keep 20% as dust; anything
-  # worse (LARP, SCAM, RIGGED on another verdict) sells in full.
+  # reasoning and sell. Only a LIKELY LARP / LIKELY REAL coin stamped OK, never RIGGED in any check,
+  # sells 80% and keeps 20% as dust; everything else LarpCheck flags sells in full.
   exit_on_flag: true
   exit_verdicts: [LIKELY LARP, LARP, SCAM]
   exit_coin_stamps: [RIGGED]
   dust_verdicts: [LIKELY LARP, LIKELY REAL]
+  dust_coin_stamps: [OK]
   exit_sell_fraction: 0.8
   sell_on_change: true            # a LIKELY coin whose LarpCheck view changes (new check/verdict/stamp) sells too
   held_recheck_minutes: 5

@@ -61,17 +61,20 @@ def build_safety(cfg: Config, with_larpcheck: bool = True):
                           min_lp_locked_pct=f.min_lp_locked_pct) if f.require_rugcheck else NoSafetyCheck())
     if not (with_larpcheck and cfg.larpcheck.enabled):
         return rug
-    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, load_api_key
+    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
 
     key = load_api_key(cfg.larpcheck)
     if not key:
-        log.warning("LarpCheck is enabled but no API key was found (set LARPCHECK_API_KEY or "
-                    "larpcheck.api_key_file); continuing without it")
+        if cfg.larpcheck.require_verdict:
+            log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
+                      "larpcheck.api_key_file): the agent will open no positions; exits still run")
+            return CompositeSafety(rug, RequireLarpCheck("no LarpCheck API key configured"))
+        log.warning("LarpCheck is enabled but no API key was found; continuing without it")
         return rug
     gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
-    log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s",
+    log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
              "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
-             cfg.larpcheck.on_unchecked)
+             cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
     return CompositeSafety(rug, gate)
 
 

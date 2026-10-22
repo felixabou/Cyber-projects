@@ -524,6 +524,10 @@ function verdict(c) {
   let evidence = null;
   if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
   else if (c.outcome === "unsafe: larpcheck check running") { cls = "v-pass"; icon = "…"; text = "Waiting for LarpCheck verdict"; }
+  else if (/^unsafe: larpcheck( unavailable|:| required:)/.test(c.outcome)) {
+    // No verdict to go on: never bought (require_verdict).
+    icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck( required)?:? ?/, "");
+  }
   else if (c.outcome.startsWith("unsafe")) {
     cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: ");
     const m = text.match(/\s\((https:\/\/[^\s)]+)\)$/);  // LarpCheck appends its evidence page

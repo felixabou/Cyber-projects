@@ -99,7 +99,16 @@ class Agent:
             else:
                 log.warning("No market data for held token %s", pos.symbol)
             if pos.dust:
-                continue  # dust is left alone until a manual close
+                # Dust is left alone by the strategy; it only goes if it stops qualifying (or by hand).
+                dust_exit = None
+                if self.guard is not None:
+                    try:
+                        dust_exit = self.guard.review_dust(pos)
+                    except Exception as exc:
+                        log.warning("Dust review failed for %s: %s", pos.symbol, exc)
+                if dust_exit:
+                    self._sell(mint, dust_exit, snap, now)
+                continue
             decision = evaluate_exit(pos, snap, self.cfg.exits, now)
             if decision is None and self.guard is not None:
                 try:

@@ -195,10 +195,9 @@ class LarpCheckGate:
             pos.larp = {**verdict.as_dict(), "fp": fp}
             return None
 
-        # Dust only for LIKELY LARP / LIKELY REAL coins; a worse call (LARP, SCAM, RIGGED on another
-        # verdict) sells everything.
-        severe = flagged and verdict.verdict not in dust_ok
-        frac = 1.0 if severe else self.cfg.exit_sell_fraction
+        # Dust only for a LIKELY LARP / LIKELY REAL coin whose coin stamp is OK and that no check has
+        # ever stamped RIGGED; anything else LarpCheck sells is sold in full.
+        frac = self.cfg.exit_sell_fraction if self._dust_problem(verdict, data, latest) is None else 1.0
         reasoning = self.read_reasoning(latest)
         trigger = (f"changed from {prev_verdict}" + (f"/{prev_fp[2]}" if prev_fp and prev_fp[2] else "")
                    if changed and not flagged else "flagged")
@@ -209,6 +208,38 @@ class LarpCheckGate:
                     why[:300], (reasoning.get("watch") or "-")[:200], verdict.url)
         return ExitDecision(frac, f"{verdict.describe()[:140]} ({trigger}): sold {frac * 100:.0f}%{keep}",
                             make_dust=frac < 0.999, larp=larp)
+
+    def _dust_problem(self, verdict: Verdict, data: dict[str, Any], latest: dict[str, Any]) -> str | None:
+        """Why this coin may not be kept as dust, or None if it may."""
+        upper = lambda xs: {x.upper() for x in xs}
+        history = [c for c in (data.get("checks") or []) if isinstance(c, dict)] + [latest]
+        if any(str(st.get("word", "")).upper() == "RIGGED"
+               for c in history for st in c.get("stamps") or [] if st.get("id") == "coin"):
+            return "stamped RIGGED in a LarpCheck check"
+        if verdict.verdict not in upper(self.cfg.dust_verdicts):
+            return f"verdict is {verdict.verdict}"
+        if (verdict.coin_word or "") not in upper(self.cfg.dust_coin_stamps):
+            return f"coin stamp is {verdict.coin_word or 'missing'}, not {'/'.join(self.cfg.dust_coin_stamps)}"
+        return None
+
+    def review_dust(self, pos: Position) -> ExitDecision | None:
+        """Dust stays only while the coin still qualifies; once it doesn't, sell the remainder."""
+        if not self.cfg.exit_on_flag:
+            return None
+        now = self.clock()
+        if now < self._held_next.get(pos.mint, 0.0):
+            return None
+        self._held_next[pos.mint] = now + self.cfg.held_recheck_minutes * 60
+        data = self.client.lookup_coin(pos.mint)
+        latest = (data.get("latest") or {}) if isinstance(data, dict) else {}
+        verdict = Verdict.from_latest(latest)
+        if verdict is None:
+            return None
+        problem = self._dust_problem(verdict, data, latest)
+        if problem is None:
+            return None
+        log.warning("Dust %s no longer qualifies (%s): selling the rest | %s", pos.symbol, problem, verdict.url)
+        return ExitDecision(1.0, f"dust no longer qualifies: {problem} ({verdict.describe()[:120]})")
 
     def read_reasoning(self, latest: dict[str, Any]) -> dict[str, Any]:
         """LarpCheck's reasoning for a verdict: the full report when it's open to us (our own checks,
@@ -265,6 +296,13 @@ class LarpCheckGate:
             bad |= v.coin_score < self.cfg.min_coin_score
         return SafetyReport(ok=not bad, score=v.score, reasons=[f"{v.describe()} ({v.url})"] if bad else [])
 
+    def _no_verdict(self, mint: str, why: str, ttl_s: float = 60) -> SafetyReport:
+        """No finished verdict to go on. With require_verdict that means no buy."""
+        if self.cfg.require_verdict:
+            return self._cached(mint, SafetyReport(ok=False, score=None, reasons=[f"larpcheck: {why}"]), ttl_s)
+        # Short TTL: someone may check it in the next minutes, and we want that verdict.
+        return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 120)
+
     def check(self, mint: str) -> SafetyReport:
         hit = self._cache.get(mint)
         if hit and hit[0] > self.clock():
@@ -287,19 +325,18 @@ class LarpCheckGate:
                 since = self._pending_since.setdefault(mint, now)
                 if now - since < self.cfg.pending_max_minutes * 60:
                     return SafetyReport(ok=False, score=None, reasons=[PENDING])
-                log.info("LarpCheck check on %s still running after %.0f min; treating as unchecked",
-                         mint, self.cfg.pending_max_minutes)
+                # Don't spend another credit on it; if the check finishes later, its verdict is used.
+                return self._no_verdict(mint, f"check still running after {self.cfg.pending_max_minutes:g} min")
             return self._unchecked(mint)
         except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
             log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
-            return SafetyReport(ok=not self.cfg.fail_closed, score=None,
-                                reasons=[UNAVAILABLE] if self.cfg.fail_closed else [])
+            if self.cfg.require_verdict or self.cfg.fail_closed:
+                return SafetyReport(ok=False, score=None, reasons=[UNAVAILABLE])
+            return SafetyReport(ok=True, score=None, reasons=[])
 
     def _unchecked(self, mint: str) -> SafetyReport:
         mode = self.cfg.on_unchecked
-        if mode == "check" and mint in self._pending_since:
-            mode = "allow"  # our check never finished in time; don't spend another credit on it
-        elif mode == "check":
+        if mode == "check":
             if self.checks_left_today() > 0:
                 started = self.client.start_check(mint)
                 day = self.today()
@@ -308,12 +345,21 @@ class LarpCheckGate:
                 log.info("Started LarpCheck check on %s (%d left today): %s",
                          mint, self.checks_left_today(), started.get("url") if isinstance(started, dict) else "")
                 return SafetyReport(ok=False, score=None, reasons=[PENDING])
-            log.info("LarpCheck daily check budget used up; %s goes ahead on the other checks", mint)
-            mode = "allow"
+            return self._no_verdict(mint, "not checked yet and no checks left today", ttl_s=300)
         if mode == "reject":
             return self._cached(mint, SafetyReport(ok=False, score=None, reasons=["larpcheck: no verdict yet"]), 120)
-        # Short TTL: someone may check it in the next minutes, and we want that verdict.
-        return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 120)
+        return self._no_verdict(mint, "not checked yet")
+
+
+class RequireLarpCheck:
+    """Stands in for the gate when a verdict is required but LarpCheck can't be reached at all
+    (no API key): every buy is refused, loudly, instead of trading without the check."""
+
+    def __init__(self, why: str) -> None:
+        self.why = why
+
+    def check(self, mint: str) -> SafetyReport:
+        return SafetyReport(ok=False, score=None, reasons=[f"larpcheck required: {self.why}"])
 
 
 class CompositeSafety:

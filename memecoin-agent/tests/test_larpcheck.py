@@ -99,53 +99,44 @@ def test_thresholds_are_configurable():
     assert make_gate(fake, reject_verdicts=[], reject_coin_stamps=[]).check("RIGGED1").ok
 
 
-def test_unchecked_allow_is_free_and_rechecked_soon():
+def test_allow_mode_only_without_require_verdict():
     clock = Clock()
     fake = FakeLarpCheck({})
-    gate = make_gate(fake, clock=clock)
-    assert gate.check("NEW1").ok
-    assert fake.started == []  # never spends a credit by default
-    fake.coins["NEW1"] = {**RIGGED, "address": "NEW1"}  # someone else checks it a minute later
-    clock.t += 60
-    assert gate.check("NEW1").ok  # still the short-lived cached "no verdict"
-    clock.t += 61
-    assert not gate.check("NEW1").ok  # the new verdict is picked up
+    with pytest.raises(ValueError, match="require_verdict"):
+        Config(larpcheck=LarpCheckConfig(on_unchecked="allow")).validate()
+    gate = make_gate(fake, clock=clock, require_verdict=False, on_unchecked="allow")
+    assert gate.check("NEW1").ok and fake.started == []
+    fake.coins["NEW1"] = {**RIGGED, "address": "NEW1"}  # someone checks it a few minutes later
+    clock.t += 121
+    assert not gate.check("NEW1").ok
 
 
-def test_check_mode_starts_one_check_waits_then_judges():
+def test_never_buys_without_a_verdict():
     clock = Clock()
     fake = FakeLarpCheck({})
-    gate = make_gate(fake, clock=clock, on_unchecked="check", max_checks_per_day=2)
-    assert gate.check("NEW1").reasons == [PENDING]
-    # The lookup doesn't list it as running yet (race): still pending, and no second credit spent.
-    clock.t += 15
-    assert gate.check("NEW1").reasons == [PENDING]
-    assert fake.started == ["NEW1"] and gate.checks_left_today() == 1
-    fake.coins["NEW1"] = {**RIGGED, "address": "NEW1"}
-    clock.t += 45
-    assert not gate.check("NEW1").ok and "RIGGED" in gate.check("NEW1").reasons[0]
-
-
-def test_check_budget_and_stuck_checks_fall_back_to_allow():
-    clock = Clock()
-    fake = FakeLarpCheck({})
-    gate = make_gate(fake, clock=clock, on_unchecked="check", max_checks_per_day=1, pending_max_minutes=5)
-    assert gate.check("A1").reasons == [PENDING]
-    assert gate.check("B2").ok and fake.started == ["A1"]  # budget spent: B2 goes ahead on other checks
+    gate = make_gate(fake, clock=clock, max_checks_per_day=1, pending_max_minutes=5)
+    assert gate.check("A1").reasons == [PENDING] and fake.started == ["A1"]
+    b = gate.check("B2")  # no credits left: refused, not waved through
+    assert not b.ok and "no checks left today" in b.reasons[0] and fake.started == ["A1"]
     clock.t += 5 * 60 + 1
-    assert gate.check("A1").ok  # our check never finished: don't block forever, don't re-spend
-    assert fake.started == ["A1"]
+    a = gate.check("A1")  # our check never finished: refused, and no second credit spent on it
+    assert not a.ok and "still running" in a.reasons[0] and fake.started == ["A1"]
+    fake.coins["A1"] = {**FAIR, "address": "A1"}  # the check finishes later: its verdict is used
+    clock.t += 61
+    assert gate.check("A1").ok
 
     fake2 = FakeLarpCheck({"RUN1": {**UNCHECKED, "address": "RUN1", "running": ["someone"]}})
-    g2 = make_gate(fake2, clock=clock)
-    assert g2.check("RUN1").reasons == [PENDING]  # someone else's check is running: wait for it
+    assert make_gate(fake2, clock=clock).check("RUN1").reasons == [PENDING]  # someone else's check: wait
+    assert not make_gate(FakeLarpCheck({}), on_unchecked="reject").check("X9").ok
 
 
-def test_outages_fail_open_by_default_closed_on_request():
+def test_outages_refuse_buys_unless_verdicts_are_optional():
     fake = FakeLarpCheck({})
     fake.down = True
-    assert make_gate(fake).check("X1") == SafetyReport(ok=True, score=None, reasons=[])
-    assert make_gate(fake, fail_closed=True).check("X1").reasons == [UNAVAILABLE]
+    assert make_gate(fake).check("X1").reasons == [UNAVAILABLE]
+    open_gate = make_gate(fake, require_verdict=False, on_unchecked="check")
+    assert open_gate.check("X1") == SafetyReport(ok=True, score=None, reasons=[])
+    assert make_gate(fake, require_verdict=False, on_unchecked="check", fail_closed=True).check("X1").reasons == [UNAVAILABLE]
     fake.down = False
     client = LarpCheckClient("lc_test", client=httpx.Client(transport=httpx.MockTransport(fake)))
     with pytest.raises(Exception, match="nope"):
@@ -172,15 +163,21 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
     from memecoin_agent import cli
 
     cfg = Config()
+    cfg.filters.require_rugcheck = False  # isolate the LarpCheck wiring (and stay off the network)
     cfg.larpcheck.api_key_file = str(tmp_path / "key")
     monkeypatch.delenv("LARPCHECK_API_KEY", raising=False)
     assert load_api_key(cfg.larpcheck) is None
-    assert not isinstance(cli.build_safety(cfg), CompositeSafety)  # no key: RugCheck only, with a warning
+    no_key = cli.build_safety(cfg)  # verdicts required but no key: every buy refused, loudly
+    assert not no_key.check("ANY").ok and "no LarpCheck API key" in no_key.check("ANY").reasons[0]
+    cfg.larpcheck.require_verdict = False
+    cfg.larpcheck.on_unchecked = "check"
+    assert not isinstance(cli.build_safety(cfg), CompositeSafety)  # optional: RugCheck only, with a warning
+    cfg.larpcheck.require_verdict = True
     (tmp_path / "key").write_text("lc_file\n")
     assert load_api_key(cfg.larpcheck) == "lc_file"
     monkeypatch.setenv("LARPCHECK_API_KEY", "lc_env")
     assert load_api_key(cfg.larpcheck) == "lc_env"
-    assert isinstance(cli.build_safety(cfg), CompositeSafety)
+    assert cli.build_safety(cfg).find(LarpCheckGate) is not None
     assert not isinstance(cli.build_safety(cfg, with_larpcheck=False), CompositeSafety)  # recorder
     cfg.larpcheck.enabled = False
     assert not isinstance(cli.build_safety(cfg), CompositeSafety)
@@ -207,8 +204,11 @@ REPORT = {  # shape of a real full report (MrBeast check), trimmed
 }
 
 
-def coin(mint, verdict, stamp, check_id="chk0000001", score=30):
-    return {"address": mint, "checked": True, "running": [], "latest": {
+def coin(mint, verdict, stamp, check_id="chk0000001", score=30, history_stamps=()):
+    """A lookup_coin reply; history_stamps adds earlier checks with those coin stamps."""
+    history = [{"id": f"old{i:07d}", "status": "done", "verdict": "PARTLY REAL",
+                "stamps": [{"id": "coin", "word": w, "score": 20}]} for i, w in enumerate(history_stamps)]
+    return {"address": mint, "checked": True, "running": [], "checks": history, "latest": {
         "id": check_id, "url": f"https://larpcheck.app/c/{check_id}", "status": "done", "verdict": verdict,
         "score": score, "stamps": [{"id": "story", "word": verdict, "score": score},
                                    {"id": "coin", "word": stamp, "score": 12}],
@@ -249,7 +249,7 @@ def review_gate(fake, clock=None, **cfg):
 
 
 def test_likely_larp_sells_80_keeps_dust_and_parses_reasoning():
-    fake = FakeWithReports({"H1": coin("H1", "LIKELY LARP", "RIGGED")})
+    fake = FakeWithReports({"H1": coin("H1", "LIKELY LARP", "OK")})
     d = review_gate(fake).review_position(held())
     assert d.fraction == pytest.approx(0.8) and d.make_dust
     assert "20% kept as dust" in d.reason
@@ -263,21 +263,24 @@ def test_likely_larp_sells_80_keeps_dust_and_parses_reasoning():
     assert r["watch"].startswith("A post from") and r["coin_line"] == "dev + 611 wallets hold 79.5%"
 
 
-@pytest.mark.parametrize("verdict, stamp, fraction", [
-    ("LARP", "RIGGED", 1.0),          # worse than LIKELY: sell everything
-    ("SCAM", "SKETCHY", 1.0),
-    ("PARTLY REAL", "RIGGED", 1.0),   # rigged, and not a LIKELY verdict: no dust
-    ("LIKELY REAL", "RIGGED", 0.8),   # rigged but LIKELY REAL: the dust rule applies
-    ("LIKELY LARP", "NEUTRAL", 0.8),
+@pytest.mark.parametrize("verdict, stamp, history, fraction", [
+    ("LIKELY LARP", "OK", (), 0.8),             # the one case that keeps dust
+    ("LIKELY LARP", "NEUTRAL", (), 1.0),        # stamp not OK: no dust
+    ("LIKELY LARP", "RIGGED", (), 1.0),
+    ("LIKELY REAL", "RIGGED", (), 1.0),
+    ("LIKELY LARP", "OK", ("RIGGED",), 1.0),    # OK now, but stamped RIGGED in an earlier check
+    ("LARP", "OK", (), 1.0),                    # worse than LIKELY: sell everything
+    ("SCAM", "SKETCHY", (), 1.0),
+    ("PARTLY REAL", "RIGGED", (), 1.0),
 ])
-def test_dust_only_for_likely_verdicts(verdict, stamp, fraction):
-    d = review_gate(FakeWithReports({"H1": coin("H1", verdict, stamp)})).review_position(held())
+def test_dust_only_for_likely_verdicts_stamped_ok_and_never_rigged(verdict, stamp, history, fraction):
+    d = review_gate(FakeWithReports({"H1": coin("H1", verdict, stamp, history_stamps=history)})).review_position(held())
     assert d.fraction == pytest.approx(fraction) and d.make_dust == (fraction < 1)
 
 
 def test_likely_real_held_until_anything_changes():
     clock = Clock()
-    fake = FakeWithReports({"H1": coin("H1", "LIKELY REAL", "NEUTRAL", "chkAAAAAAA")})
+    fake = FakeWithReports({"H1": coin("H1", "LIKELY REAL", "OK", "chkAAAAAAA")})
     gate = review_gate(fake, clock=clock)
     pos = held()
     assert gate.review_position(pos) is None and pos.larp["verdict"] == "LIKELY REAL"  # baseline stored
@@ -285,10 +288,17 @@ def test_likely_real_held_until_anything_changes():
     assert gate.review_position(pos) is None and sum(c[0] == "lookup_coin" for c in fake.calls) == 1  # throttled
     clock.t += 5 * 60
     assert gate.review_position(pos) is None  # same view: hold
-    fake.coins["H1"] = coin("H1", "LIKELY REAL", "SKETCHY", "chkBBBBBBB")  # a new check: the stamp changed
+    fake.coins["H1"] = coin("H1", "LIKELY REAL", "OK", "chkBBBBBBB")  # a new check, still LIKELY REAL + OK
     clock.t += 5 * 60
     d = gate.review_position(pos)
-    assert d.fraction == pytest.approx(0.8) and d.make_dust and "changed from LIKELY REAL/NEUTRAL" in d.reason
+    assert d.fraction == pytest.approx(0.8) and d.make_dust and "changed from LIKELY REAL/OK" in d.reason
+
+    pos1 = held("H1b")
+    fake.coins["H1b"] = coin("H1b", "LIKELY REAL", "OK", "chkGGGGGGG")
+    assert gate.review_position(pos1) is None
+    fake.coins["H1b"] = coin("H1b", "LIKELY REAL", "SKETCHY", "chkHHHHHHH")  # stamp left the OK range: all of it
+    clock.t += 5 * 60
+    assert gate.review_position(pos1).fraction == 1.0
 
     pos2 = held("H2")
     fake.coins["H2"] = coin("H2", "LIKELY REAL", "OK", "chkCCCCCCC")
@@ -306,8 +316,8 @@ def test_likely_real_held_until_anything_changes():
 
 
 def test_locked_reports_spend_one_credit_then_fall_back_to_summary():
-    fake = FakeWithReports({"H1": coin("H1", "LIKELY LARP", "RIGGED", "chkLOCKED1"),
-                            "H2": coin("H2", "LIKELY LARP", "RIGGED", "chkLOCKED2")}, open_reports=())
+    fake = FakeWithReports({"H1": coin("H1", "LIKELY LARP", "OK", "chkLOCKED1"),
+                            "H2": coin("H2", "LIKELY LARP", "OK", "chkLOCKED2")}, open_reports=())
     gate = review_gate(fake, max_report_opens_per_day=1)
     assert gate.review_position(held("H1")).larp["reasoning"]["source"] == "full report"
     r2 = gate.review_position(held("H2")).larp["reasoning"]
@@ -338,7 +348,7 @@ def test_agent_sells_80_then_leaves_dust_alone(tmp_path):
     cfg = Config()
     cfg.agent.kill_switch_file = ""
     cfg.risk.max_open_positions = 1
-    fake = FakeWithReports({"GOOD": coin("GOOD", "LIKELY LARP", "RIGGED")})
+    fake = FakeWithReports({"GOOD": coin("GOOD", "LIKELY LARP", "OK")})
     clock = Clock()
     gate = review_gate(fake, clock=clock)
     market = FakeMarket([make_snap(mint="GOOD")])
@@ -354,14 +364,30 @@ def test_agent_sells_80_then_leaves_dust_alone(tmp_path):
     sells = [x for x in agent.pf.trades if x.side == "sell"]
     assert len(sells) == 1 and "kept as dust" in sells[0].reason
 
-    # Dust: no strategy exits (even a -90% crash), no LarpCheck re-review, no slot taken.
+    # Dust: no strategy exits (even a -90% crash), no slot taken; re-checked only for still qualifying.
     market.snaps["GOOD"] = make_snap(mint="GOOD", price_usd=0.0001)
-    lookups = sum(c[0] == "lookup_coin" for c in fake.calls)
     clock.t += 3600
     t["now"] += timedelta(minutes=10)
     agent.tick()
-    assert "GOOD" in agent.pf.positions and sum(c[0] == "lookup_coin" for c in fake.calls) == lookups
+    assert "GOOD" in agent.pf.positions and agent.pf.positions["GOOD"].dust
     assert agent.risk.entry_block_reason(agent.pf, t["now"]) is None
     restored = Position.from_dict(pos.to_dict())
     assert restored.dust and restored.larp["verdict"] == "LIKELY LARP"
     assert agent.close_position("GOOD") and "GOOD" not in agent.pf.positions  # manual close takes the dust
+
+
+def test_dust_that_stops_qualifying_is_sold():
+    clock = Clock()
+    fake = FakeWithReports({"H1": coin("H1", "LIKELY LARP", "OK", "chkAAAAAAA")})
+    gate = review_gate(fake, clock=clock)
+    pos = held()
+    pos.dust = True
+    assert gate.review_dust(pos) is None  # still LIKELY LARP + OK, never rigged: keep
+    fake.coins["H1"] = coin("H1", "LIKELY LARP", "OK", "chkBBBBBBB", history_stamps=("RIGGED",))
+    clock.t += 60
+    assert gate.review_dust(pos) is None  # throttled
+    clock.t += 5 * 60
+    d = gate.review_dust(pos)
+    assert d.fraction == 1.0 and "RIGGED" in d.reason and not d.make_dust
+    fake.coins["H2"] = coin("H2", "LIKELY REAL", "SKETCHY")
+    assert "coin stamp is SKETCHY" in gate.review_dust(held("H2")).reason

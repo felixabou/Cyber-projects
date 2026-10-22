@@ -104,25 +104,27 @@ These catch what market data and RugCheck's summary miss. In the first live pape
 - **Where it runs:** only on tokens that already passed every filter and RugCheck, so a few lookups a day. Looking up existing verdicts is free.
 - **What it blocks:** a story verdict of LARP, LIKELY LARP or SCAM, or a RIGGED stamp (configurable). Bad verdicts block even when out of date: a rigged holder base stays rigged.
 - **If a check is running:** the buy waits for the verdict (up to `pending_max_minutes`).
-- **Never-checked coins:** `on_unchecked: allow` (the default) lets the other checks decide and spends nothing. `check` starts a check, spending one of your daily credits (`max_checks_per_day` caps it), and buys only once the coin passes. `reject` skips the coin.
-- **If LarpCheck is down:** the other checks decide (`fail_closed: true` skips the buy instead). Exits never depend on it.
-- **In the dashboard:** the Scanner shows blocked coins as *Unsafe: larpcheck …* with an **evidence** link to the check's page.
+- **No verdict, no buy** (`require_verdict: true`, the default). A coin nobody has checked gets a check started (`on_unchecked: check`), spending one of your daily credits (`max_checks_per_day`). The agent buys only once the coin passes. When the credits run out, a check doesn't finish in `pending_max_minutes`, LarpCheck is unreachable, or there's no API key, the coin isn't bought.
+- **Exits never depend on LarpCheck.** With `require_verdict: false` you can let the other checks decide instead (`on_unchecked: allow`, `fail_closed: false`).
+- **In the dashboard:** the Scanner shows blocked coins as *Unsafe: larpcheck …* with an **evidence** link to the check's page. Coins it couldn't get a verdict for show as *No LarpCheck verdict: …*.
 
-Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the gate switches off with a warning.
+Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the agent opens no positions and logs an error; exits still run.
 
 **Held coins.** LarpCheck keeps watching after a buy. Every 5 minutes it re-reads the verdict of each coin held (free). When a coin is flagged, the agent first reads LarpCheck's reasoning: the summary, the claim and whether it held up, each risk finding with its evidence, and what would change the picture. Then it sells:
 
 | LarpCheck's view of a held coin | Action |
 |---|---|
-| LARP or SCAM, or RIGGED on any other verdict | sell 100% |
-| LIKELY LARP (any stamp), or LIKELY REAL with a RIGGED stamp | sell 80%, keep 20% as dust |
-| LIKELY LARP or LIKELY REAL and **anything changes**: a new check, a different verdict or coin stamp | sell 80%, keep 20% as dust (100% if it changed into LARP/SCAM) |
-| REAL / PARTLY REAL / UNCLEAR, not RIGGED | hold |
+| LARP or SCAM | sell 100% |
+| stamped RIGGED (any verdict) | sell 100% |
+| LIKELY LARP stamped NEUTRAL or SKETCHY | sell 100% |
+| LIKELY LARP stamped **OK**, and **never stamped RIGGED** in any check | sell 80%, keep 20% as dust |
+| LIKELY LARP or LIKELY REAL and **anything changes** (a new check, a different verdict or coin stamp) | 80% + 20% dust if it's still LIKELY, stamped OK and never RIGGED; otherwise 100% |
+| REAL / PARTLY REAL / UNCLEAR, or LIKELY REAL unchanged, and not RIGGED | hold |
 
-- **Dust** is left alone: no stop loss, take-profit or time stop, and it doesn't use one of the open-position slots. Only a manual close (the dashboard's **Close**, or **Close all**) sells it.
+- **Dust** gets no stop loss, take-profit or time stop, and it doesn't use one of the open-position slots. It's sold when you close it (the dashboard's **Close**, or **Close all**), or when it stops qualifying: a later check stamps it RIGGED or anything other than OK, or its verdict is no longer LIKELY LARP/LIKELY REAL. That's re-checked every 5 minutes, for free.
 - **Where to read why:** the dashboard's positions table shows each coin's LarpCheck verdict, and the panel under it lays out why a coin was flagged. The trade journal records the verdict too.
 - **Full reports:** they're open for checks you ran. For someone else's check, the free plan spends a credit to open it (`max_report_opens_per_day`); after that the agent uses the free headline and stamp line.
-- **In check mode,** a held coin that was bought while unchecked gets one check started for it.
+- **A held coin bought before it was checked** gets one check started for it.
 
 The recorder keeps to RugCheck, so backtests don't replay LarpCheck verdicts yet.
 

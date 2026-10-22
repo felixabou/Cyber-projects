@@ -150,9 +150,12 @@ class LarpCheckConfig:
     # Coin stamps are OK / NEUTRAL / SKETCHY / RIGGED (how fair the coin is for a buyer).
     reject_coin_stamps: list[str] = field(default_factory=lambda: ["RIGGED"])
     min_coin_score: float | None = None
-    # A coin nobody has checked yet: "allow" (free; other checks decide), "check" (start one,
-    # spending a daily credit, and buy only once it passes), or "reject".
-    on_unchecked: str = "allow"
+    # Never buy a coin LarpCheck hasn't checked: no verdict means no buy, whatever the reason
+    # (unchecked and no credits left, a check that didn't finish, LarpCheck down, no API key).
+    require_verdict: bool = True
+    # A coin nobody has checked yet: "check" (start one, spending a daily credit, and buy only once
+    # it passes), "reject", or "allow" (free; other checks decide; only with require_verdict: false).
+    on_unchecked: str = "check"
     max_checks_per_day: int = 4
     # How long to hold off a buy while a check is running before falling back to on_unchecked.
     pending_max_minutes: float = 5.0
@@ -165,6 +168,8 @@ class LarpCheckConfig:
     exit_verdicts: list[str] = field(default_factory=lambda: ["LIKELY LARP", "LARP", "SCAM"])
     exit_coin_stamps: list[str] = field(default_factory=lambda: ["RIGGED"])
     dust_verdicts: list[str] = field(default_factory=lambda: ["LIKELY LARP", "LIKELY REAL"])
+    # ...and only if the coin stamp is one of these and no check has ever stamped it RIGGED.
+    dust_coin_stamps: list[str] = field(default_factory=lambda: ["OK"])
     exit_sell_fraction: float = 0.8
     # A held coin rated one of dust_verdicts whose LarpCheck view then changes (a new check, or a
     # different verdict or coin stamp) is sold the same way.
@@ -205,6 +210,9 @@ class Config:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
+        if self.larpcheck.require_verdict and self.larpcheck.on_unchecked == "allow":
+            raise ValueError("larpcheck.on_unchecked: allow contradicts require_verdict: true "
+                             "(use 'check' or 'reject', or set require_verdict: false)")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
 
