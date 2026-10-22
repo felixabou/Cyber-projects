@@ -100,6 +100,10 @@ def test_bare_command_opens_the_dashboard(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "cmd_ui", lambda args, cfg: seen.update(cmd=args.command, port=args.port))
     cli.main(["-c", str(write_cfg(tmp_path))])
     assert seen == {"cmd": "ui", "port": 8787}
+    cli.main(["-c", str(write_cfg(tmp_path)), "--no-browser", "--port", "9001"])
+    assert seen == {"cmd": "ui", "port": 9001}
+    assert cli._default_to_ui(["-v", "status"], {"status", "ui"}) == ["-v", "status"]
+    assert cli._default_to_ui(["--config=x.yaml", "--record"], {"ui"}) == ["--config=x.yaml", "ui", "--record"]
 
 
 def test_second_trading_process_is_refused(tmp_path):

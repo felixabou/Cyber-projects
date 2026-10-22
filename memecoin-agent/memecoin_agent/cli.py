@@ -309,6 +309,25 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> None:
     print_status(agent.pf, cfg.risk.starting_balance_usd)
 
 
+def _default_to_ui(argv: list[str], commands: set[str]) -> list[str]:
+    """Bare `memecoin-agent [-c cfg] [ui options]` means `memecoin-agent [-c cfg] ui [ui options]`."""
+    head: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-c", "--config") and i + 1 < len(argv):
+            head += argv[i:i + 2]
+            i += 2
+        elif tok.startswith("--config=") or tok in ("-v", "--verbose"):
+            head.append(tok)
+            i += 1
+        elif tok in commands or tok in ("-h", "--help"):
+            return argv  # an explicit command (or top-level help): leave untouched
+        else:
+            break
+    return [*head, "ui", *argv[i:]]
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="memecoin-agent", description=__doc__)
     parser.add_argument("-c", "--config", default=None, help="YAML config file (defaults are used if omitted)")
@@ -366,9 +385,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_demo)
 
     argv = sys.argv[1:] if argv is None else argv
-    args = parser.parse_args(argv)
-    if args.command is None:  # bare `memecoin-agent [-c cfg]` opens the dashboard
-        args = parser.parse_args([*argv, "ui"])
+    args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
     offline = args.command in ("status", "demo", "backtest") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
