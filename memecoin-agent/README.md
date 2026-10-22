@@ -13,7 +13,7 @@ default**. Live trading goes through Jupiter and has to be switched on explicitl
 
 ## How it works
 
-Each tick (15s by default):
+Each tick (10s by default):
 
 1. **Mark & exit.** Re-price every open position and apply the exit rules, in this order:
    - **Liquidity pulled.** Liquidity falls ≥40% below its level at entry, which is the classic rug signature. Sell everything at once.
@@ -21,7 +21,7 @@ Each tick (15s by default):
    - **Trailing stop.** Once the position has been +30% at its peak, exit if price falls 20% from that peak.
    - **Time stop.** Exit after 240 minutes.
    - **Staged take-profit.** Sell 40% at +50%, then 50% of what's left at +120%. A trailing stop rides the remainder.
-2. **Scan & enter** (every 4th tick):
+2. **Scan & enter** (every 2nd tick, so every 20s):
    - Discover mints from three sources:
      - **Pump.fun graduations, in real time.** A background websocket to PumpPortal sees each token the moment it moves from the bonding curve to a real AMM pool. These go first in the scan.
      - DexScreener's latest-profiles and boost feeds.

@@ -58,8 +58,8 @@ execution:
   max_roundtrip_loss_pct: 12
 
 agent:
-  tick_seconds: 15
-  scan_every_ticks: 4        # discovery scan once a minute
+  tick_seconds: 10           # open positions are re-priced and exits checked every tick
+  scan_every_ticks: 2        # discovery scan every 20s (tick_seconds x scan_every_ticks)
   max_candidates_per_scan: 150  # 30 mints per DexScreener request
   state_file: state/state.json
   trades_csv: state/trades.csv

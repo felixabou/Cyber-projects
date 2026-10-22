@@ -97,8 +97,8 @@ class ExecutionConfig:
 
 @dataclass
 class AgentConfig:
-    tick_seconds: float = 15.0
-    scan_every_ticks: int = 4
+    tick_seconds: float = 10.0  # exits are checked every tick
+    scan_every_ticks: int = 2  # discovery scan every 20s
     max_candidates_per_scan: int = 150
     state_file: str = "state/state.json"
     trades_csv: str = "state/trades.csv"
