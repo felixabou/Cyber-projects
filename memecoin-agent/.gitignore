@@ -1,0 +1,10 @@
+state/
+recordings/
+config.yaml
+.env
+*.tmp
+STOP
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/

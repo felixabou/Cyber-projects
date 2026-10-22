@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memecoin-agent"
+version = "0.1.0"
+description = "Momentum trading agent for Solana memecoins (paper trading by default, Jupiter live execution opt-in)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+    "websockets>=13",
+]
+
+[project.optional-dependencies]
+live = ["solders>=0.21"]
+dev = ["pytest>=8", "solders>=0.21"]
+
+[project.scripts]
+memecoin-agent = "memecoin_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["memecoin_agent*"]
+
+[tool.setuptools.package-data]
+"memecoin_agent.ui" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
