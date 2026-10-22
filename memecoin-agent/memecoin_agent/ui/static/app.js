@@ -105,9 +105,10 @@ function delta(v, text) {
 function duration(minutes) {
   if (minutes === null || minutes === undefined) return "—";
   if (minutes < 1) return "<1m";
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  const hrs = Math.floor(minutes / 60);
-  if (hrs < 48) return `${hrs}h ${Math.round(minutes % 60)}m`;
+  const total = Math.round(minutes);  // round once, so 119.6 min is "2h 0m", never "1h 60m"
+  if (total < 60) return `${total}m`;
+  const hrs = Math.floor(total / 60);
+  if (hrs < 48) return `${hrs}h ${total % 60}m`;
   return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
 }
 function ago(iso, now) {
