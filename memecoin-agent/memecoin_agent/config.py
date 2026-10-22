@@ -139,6 +139,28 @@ class RecorderConfig:
 
 
 @dataclass
+class LarpCheckConfig:
+    """LarpCheck (larpcheck.app) verdicts as a last gate before a buy, after the filters and RugCheck."""
+
+    enabled: bool = True
+    url: str = "https://larpcheck.app/mcp"
+    # The LARPCHECK_API_KEY environment variable wins over this file.
+    api_key_file: str | None = "~/.config/larpcheck/api_key"
+    reject_verdicts: list[str] = field(default_factory=lambda: ["LARP", "LIKELY LARP", "SCAM"])
+    # Coin stamps are OK / NEUTRAL / SKETCHY / RIGGED (how fair the coin is for a buyer).
+    reject_coin_stamps: list[str] = field(default_factory=lambda: ["RIGGED"])
+    min_coin_score: float | None = None
+    # A coin nobody has checked yet: "allow" (free; other checks decide), "check" (start one,
+    # spending a daily credit, and buy only once it passes), or "reject".
+    on_unchecked: str = "allow"
+    max_checks_per_day: int = 4
+    # How long to hold off a buy while a check is running before falling back to on_unchecked.
+    pending_max_minutes: float = 5.0
+    # LarpCheck unreachable: false = let the other checks decide, true = skip the buy.
+    fail_closed: bool = False
+
+
+@dataclass
 class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
@@ -147,6 +169,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     feeds: FeedConfig = field(default_factory=FeedConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
+    larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -164,6 +187,8 @@ class Config:
             raise ValueError("risk.min_position_usd cannot exceed risk.max_position_usd")
         if self.agent.scan_every_ticks < 1:
             raise ValueError("agent.scan_every_ticks must be >= 1")
+        if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
+            raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
 
@@ -176,6 +201,7 @@ _SECTIONS: dict[str, type] = {
     "agent": AgentConfig,
     "feeds": FeedConfig,
     "recorder": RecorderConfig,
+    "larpcheck": LarpCheckConfig,
 }
 
 

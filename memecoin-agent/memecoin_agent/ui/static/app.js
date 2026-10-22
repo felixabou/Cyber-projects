@@ -344,6 +344,10 @@ function renderHeader(v) {
   if (v.synthetic) bits.push(`sim time ${timeLabel(v.now, true)} (${v.speed}× speed)`);
   if (v.feed) bits.push(v.feed.connected ? `launch feed connected · ${v.feed.buffered} tokens` : "launch feed reconnecting");
   if (v.recorder && v.recorder.active) bits.push(`recording · ${v.recorder.tracked} tokens`);
+  if (v.larpcheck) {
+    bits.push(v.larpcheck.on_unchecked === "check"
+      ? `LarpCheck gate · ${v.larpcheck.checks_left_today} checks left today` : "LarpCheck gate on");
+  }
   if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
   $("#meta").textContent = bits.join(" · ");
 
@@ -479,8 +483,14 @@ function renderScanner(v) {
 
 function verdict(c) {
   let cls = "v-fail", icon = "✗", text;
+  let evidence = null;
   if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
-  else if (c.outcome.startsWith("unsafe")) { cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: "); }
+  else if (c.outcome === "unsafe: larpcheck check running") { cls = "v-pass"; icon = "…"; text = "Waiting for LarpCheck verdict"; }
+  else if (c.outcome.startsWith("unsafe")) {
+    cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: ");
+    const m = text.match(/\s\((https:\/\/[^\s)]+)\)$/);  // LarpCheck appends its evidence page
+    if (m && safeUrl(m[1])) { text = text.slice(0, m.index); evidence = m[1]; }
+  }
   else if (c.outcome) { text = c.outcome.charAt(0).toUpperCase() + c.outcome.slice(1); }
   else if (c.passed) { cls = "v-pass"; icon = "✓"; text = "Passed filters"; }
   else {
@@ -488,7 +498,8 @@ function verdict(c) {
     if (c.reasons.length > 2) text += ` · +${c.reasons.length - 2} more`;
   }
   return h("span", { class: `verdict ${cls}`, title: c.reasons.join("\n") || null },
-    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), h("span", { text }));
+    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), h("span", { text }),
+    evidence ? h("a", { href: evidence, target: "_blank", rel: "noopener noreferrer", class: "pill", text: "evidence" }) : null);
 }
 
 // ---------------------------------------------------------------- trades

@@ -449,6 +449,7 @@ class AgentRunner:
                      "candidates": a.last_scan},
             "feed": feed,
             "recorder": self._recorder_view(),
+            "larpcheck": self._larpcheck_view(),
             "backtest_status": self.backtest.state.get("status"),
         }
 
@@ -469,3 +470,13 @@ class AgentRunner:
             "records_written": rec.writer.records_written if rec is not None else 0,
             "on_disk": on_disk,
         }
+
+    def _larpcheck_view(self) -> dict[str, Any] | None:
+        from ..data.larpcheck import CompositeSafety, LarpCheckGate
+
+        safety = self.agent.safety
+        gate = safety.find(LarpCheckGate) if isinstance(safety, CompositeSafety) else None
+        if gate is None:
+            return None
+        return {"on_unchecked": gate.cfg.on_unchecked, "checks_left_today": gate.checks_left_today(),
+                "verdicts_seen": len(gate.last_verdicts)}

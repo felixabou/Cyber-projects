@@ -92,6 +92,26 @@ The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
 performance.
 
+## LarpCheck gate
+
+The last check before any buy is [LarpCheck](https://larpcheck.app). It investigates a coin's story (site, X account, claims) and its holders, and gives two verdicts:
+
+- a story verdict: REAL … LIKELY LARP / LARP / SCAM;
+- a coin stamp: OK / NEUTRAL / SKETCHY / **RIGGED**, a call on how fair the coin is for a buyer.
+
+These catch what market data and RugCheck's summary miss. In the first live paper session, both tokens the agent bought had already been stamped RIGGED (linked wallets held 82% of supply; a 230-wallet farm held 30%). One dumped 99% three minutes after the buy. RugCheck had passed both.
+
+- **Where it runs:** only on tokens that already passed every filter and RugCheck, so a few lookups a day. Looking up existing verdicts is free.
+- **What it blocks:** a story verdict of LARP, LIKELY LARP or SCAM, or a RIGGED stamp (configurable). Bad verdicts block even when out of date: a rigged holder base stays rigged.
+- **If a check is running:** the buy waits for the verdict (up to `pending_max_minutes`).
+- **Never-checked coins:** `on_unchecked: allow` (the default) lets the other checks decide and spends nothing. `check` starts a check, spending one of your daily credits (`max_checks_per_day` caps it), and buys only once the coin passes. `reject` skips the coin.
+- **If LarpCheck is down:** the other checks decide (`fail_closed: true` skips the buy instead). Exits never depend on it.
+- **In the dashboard:** the Scanner shows blocked coins as *Unsafe: larpcheck …* with an **evidence** link to the check's page.
+
+Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the gate switches off with a warning.
+
+The recorder keeps to RugCheck, so backtests don't replay LarpCheck verdicts yet.
+
 ## Dashboard
 
 `memecoin-agent -c config.yaml ui` runs the same trading loop as `run`, plus a

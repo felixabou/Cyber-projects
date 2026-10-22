@@ -53,12 +53,26 @@ def build_market(cfg: Config, with_feed: bool = True):
     return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd), feed
 
 
-def build_safety(cfg: Config):
+def build_safety(cfg: Config, with_larpcheck: bool = True):
+    """RugCheck, then LarpCheck (the agent's pre-buy gate). The recorder passes with_larpcheck=False:
+    it vets hundreds of tokens, and LarpCheck verdicts are for the few the agent would actually buy."""
     f = cfg.filters
-    if not f.require_rugcheck:
-        return NoSafetyCheck()
-    return RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
-                          min_lp_locked_pct=f.min_lp_locked_pct)
+    rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
+                          min_lp_locked_pct=f.min_lp_locked_pct) if f.require_rugcheck else NoSafetyCheck())
+    if not (with_larpcheck and cfg.larpcheck.enabled):
+        return rug
+    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, load_api_key
+
+    key = load_api_key(cfg.larpcheck)
+    if not key:
+        log.warning("LarpCheck is enabled but no API key was found (set LARPCHECK_API_KEY or "
+                    "larpcheck.api_key_file); continuing without it")
+        return rug
+    gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
+    log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s",
+             "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
+             cfg.larpcheck.on_unchecked)
+    return CompositeSafety(rug, gate)
 
 
 def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalFeed | None]:
@@ -126,8 +140,8 @@ class Engine:
         self.runner = AgentRunner(
             agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
             record=record, max_ticks=getattr(args, "max_ticks", None),
-            make_recorder=lambda: Recorder(cfg, agent.market, agent.safety, RecordingWriter(cfg.recorder.dir),
-                                           clock=agent.clock),
+            make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
+                                           RecordingWriter(cfg.recorder.dir), clock=agent.clock),
         )
 
     def start(self) -> None:

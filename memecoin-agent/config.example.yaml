@@ -86,3 +86,16 @@ recorder:
   max_tracked: 400         # ~100-150 MB/day of gzipped data at this size
   record_safety: true      # store RugCheck verdicts so backtests can apply them
   record_while_trading: false  # true = `run`/`ui` also record (same as --record)
+
+larpcheck:
+  # LarpCheck (larpcheck.app) verdicts as the last gate before a buy, after the filters and
+  # RugCheck. Key: LARPCHECK_API_KEY env var, or this file. Looking up verdicts is free.
+  enabled: true
+  api_key_file: ~/.config/larpcheck/api_key
+  reject_verdicts: [LARP, LIKELY LARP, SCAM]
+  reject_coin_stamps: [RIGGED]    # stamps: OK / NEUTRAL / SKETCHY / RIGGED
+  min_coin_score: null
+  on_unchecked: allow             # allow (free) | check (spends a daily credit, buys only if it passes) | reject
+  max_checks_per_day: 4           # free plan: 5 credits a day
+  pending_max_minutes: 5
+  fail_closed: false              # LarpCheck down: false = other checks decide
