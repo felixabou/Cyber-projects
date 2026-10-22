@@ -168,7 +168,7 @@ automatically; `--no-browser` and `--port` change that.
   - how close you are to each risk limit;
   - recent trades.
 - **Scanner**: every token from the last scan, with its score, key metrics and verdict. The verdict is *Bought*, *Passed filters*, *Unsafe: …* (the RugCheck reason) or the exact filters it failed. This is the place to tune your filters.
-- **Trades**: the trade journal, with transaction links in live mode and a CSV download.
+- **Trades**: the trade journal, with transaction links in live mode, a CSV download of the full history, and the saved hourly trade files.
 - **Activity**: the agent's log, live, filterable to trades or to warnings.
 - **Backtest**: pick a recording, enter `section.key=value` overrides, and get the report, equity curve, exit breakdown and every round trip. It runs on a copy of the config and never touches the live agent.
 - **Settings**: the active config, read-only, with API keys masked.
@@ -190,6 +190,103 @@ history is saved to `state/equity.csv`, so the chart survives restarts.
 - Other sites can't embed it in a frame (blocking clickjacking).
 
 To reach it from another device, set `MEMECOIN_UI_PASSWORD` and pass `--host 0.0.0.0`. It refuses to bind publicly without a password. Put it behind HTTPS (for example, an SSH tunnel or a reverse proxy) before exposing it beyond your LAN.
+
+## Trade files
+
+Every fill is appended to `state/trades.csv` as it happens; that's the full history
+(the dashboard's **Download CSV**, or `/csv` in Telegram). On top of that, every hour
+the agent saves that hour's trades as their own file:
+
+```
+exports/trades_2026-10-22_1300-1400_UTC.csv
+exports/trades_2026-10-22_1500-1600_UTC.csv     # no file for 14:00-15:00: no trades then
+```
+
+- Hours are UTC clock hours. An hour without trades gets no file.
+- Hours missed while the agent was off are filled in on the next start (up to two days back).
+- Download them from the dashboard (**Trades → Saved trade files**), or get each one in Telegram as it's written.
+- Columns: time, side, mint, symbol, token amount, USD value, price, fee, reason, realized PnL, transaction signature (live mode).
+- `export.every_minutes` changes the period (30 = half-hour files); `export.enabled: false` turns it off.
+
+## Telegram bot
+
+The agent can report to a Telegram chat and take commands from it: trade alerts as they happen,
+each hourly trade file, and control from your phone.
+
+**Set up** (once):
+
+1. In Telegram, open **@BotFather**, send `/newbot`, pick a name and a username ending in `bot`.
+   It replies with a bot token. Treat it like a password.
+2. Give the agent the token: the `TELEGRAM_BOT_TOKEN` environment variable, or put it in
+   `~/.config/memecoin-agent/telegram_token`.
+3. Start the agent and send your bot any message. Until you're on its allowed list it answers only
+   with your chat id. Set `TELEGRAM_CHAT_ID` to that number (several: comma-separated), or list it
+   under `telegram.allowed_chat_ids`, and restart. The bot says "Agent started" in your chat.
+
+**Commands:**
+
+| Command | What it does |
+|---|---|
+| `/status` | Equity, today's PnL, positions used, whether entries are open, LarpCheck checks left |
+| `/positions` | Each open position: value, PnL, time held, LarpCheck verdict, chart link |
+| `/trades` | The last 10 trades |
+| `/csv` | The full trade history as a CSV file |
+| `/pause`, `/resume` | Stop or allow new buys (exits always keep running) |
+| `/scan` | Scan for entries now |
+| `/close SYMBOL` | Sell one position (the mint address works too) |
+| `/closeall yes` | Sell everything, dust included |
+
+**Safety:**
+
+- Only allowed chats can use the bot; anyone else is told their own chat id and nothing more.
+- Commands sent while the agent was off are dropped on start, so an old `/closeall` never fires later.
+- `telegram.allow_controls: false` turns the bot into reports only.
+- Messages are plain text, so token names from the market can't format or fake anything.
+- The bot token never appears in logs.
+- If Telegram is down or rejects the token, the agent keeps trading without it.
+
+One bot token belongs to one running agent. If two copies use the same token (say, your PC and a server), only one
+of them gets each command. The log then warns that another program is reading the bot's messages.
+
+## Run it 24/7 in the cloud
+
+To keep paper trading while your computer is off, run the agent on a server. The
+[`Dockerfile`](Dockerfile) packages it for that:
+
+- It runs headless (`run`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
+- Everything it keeps is written to `/data`: `state/` (portfolio, `trades.csv`, equity curve) and `exports/`.
+- Keys come from environment variables; see [`.env.example`](.env.example).
+- It shuts down cleanly when the host stops or redeploys it, saving its state first.
+
+Telegram is your window into it: there's no web dashboard on the server.
+
+**Railway** (no command line needed):
+
+1. Sign in at railway.com with GitHub. Create a project with **Deploy from GitHub repo** and pick this repository.
+2. In the service's settings, set **Root Directory** to `memecoin-agent` and the branch to deploy.
+   Railway finds the Dockerfile.
+3. Under **Variables**, add `TELEGRAM_BOT_TOKEN`, `LARPCHECK_API_KEY` and, optionally, `GMGN_API_KEY`.
+4. Add a **Volume** to the service with mount path `/data`. Without it, every deploy starts a new paper wallet.
+5. Deploy. Message your bot, add the chat id it replies with as `TELEGRAM_CHAT_ID`, and redeploy.
+
+The service needs no public domain or port: the bot polls Telegram outward. Railway charges for a service that runs
+all the time; check its current pricing.
+
+**Any Linux VPS with Docker:**
+
+```bash
+git clone <this repo> && cd <repo>/memecoin-agent
+cp .env.example .env && nano .env      # fill in the keys
+docker compose up -d --build           # restarts by itself after crashes and reboots
+docker compose logs -f                 # watch it
+```
+
+The server keeps its own paper portfolio, separate from your PC's. Two more things are shared between the copies:
+
+- **LarpCheck's daily checks** come from the same key, so they're shared.
+- **A Telegram bot token** belongs to one copy. Stop the agent on your PC, or give it its own bot.
+
+To change the strategy on the server, copy settings from `config.example.yaml` into `deploy/server.yaml` and redeploy.
 
 ## Going live
 
@@ -292,10 +389,13 @@ memecoin_agent/
   recording.py       market-data recorder (gzipped JSONL)
   backtest.py        point-in-time replay + performance report
   simulation.py      offline synthetic market for demo/tests
-  ui/runner.py       the session engine for run + ui: agent loop, recorder, controls, views
+  ui/runner.py       the session engine for run + ui: agent loop, recorder, exports, controls, views
+  export.py          hourly trade CSVs (exports/)
+  telegram_bot.py    Telegram alerts, hourly CSVs and commands (Bot API long polling)
   statelock.py       one trader per state/ directory
   ui/server.py       stdlib HTTP server + auth; ui/static/ is the page (vanilla JS, no build)
 tests/               pytest suite (HTTP and RPC mocked; real tx signing)
+deploy/server.yaml   config for the Docker image (Dockerfile, docker-compose.yml)
 ```
 
 Run the tests with `pytest`.

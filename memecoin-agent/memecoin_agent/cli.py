@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -129,8 +130,22 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     return Agent(cfg, market, safety, executor, pf, guard=guard), feed
 
 
+def build_telegram(cfg: Config, runner):
+    """The Telegram bot if enabled and a bot token is configured, else None."""
+    if not cfg.telegram.enabled:
+        return None
+    from .telegram_bot import TelegramBot, TelegramClient, allowed_chats, load_token
+
+    token = load_token(cfg.telegram)
+    if not token:
+        log.info("Telegram not configured (set TELEGRAM_BOT_TOKEN to get alerts and control from your phone)")
+        return None
+    return TelegramBot(cfg.telegram, TelegramClient(token), runner, allowed_chats(cfg.telegram))
+
+
 class Engine:
-    """Everything a trading session runs in one process: agent, launch feed, recorder, state lock."""
+    """Everything a trading session runs in one process: agent, launch feed, recorder, hourly trade
+    exports, Telegram bot, state lock."""
 
     def __init__(self, cfg: Config, args: argparse.Namespace) -> None:
         from .recording import Recorder, RecordingWriter
@@ -138,6 +153,7 @@ class Engine:
 
         self.feed: PumpPortalFeed | None = None
         self.lock: StateLock | None = None
+        self.bot = None
         record = bool(getattr(args, "record", False)) or cfg.recorder.record_while_trading
         if getattr(args, "synthetic", False):
             from .simulation import SimClock, SyntheticMarket, SyntheticSafety
@@ -171,20 +187,33 @@ class Engine:
         except BaseException:
             self.lock.release()
             raise
+        exporter = None
+        if cfg.export.enabled:
+            from .export import TradeExporter
+
+            exporter = TradeExporter(cfg.export, cfg.agent.trades_csv, agent.clock())
         self.runner = AgentRunner(
             agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
-            record=record, max_ticks=getattr(args, "max_ticks", None),
+            record=record, max_ticks=getattr(args, "max_ticks", None), exporter=exporter,
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
                                            RecordingWriter(cfg.recorder.dir), clock=agent.clock),
         )
+        self.bot = build_telegram(cfg, self.runner)
+        if self.bot is not None:
+            self.runner.listeners.append(self.bot)
+            self.runner.telegram = self.bot
 
     def start(self) -> None:
         if self.feed is not None:
             self.feed.start()
         self.runner.start()
+        if self.bot is not None:
+            self.bot.start()
 
     def stop(self) -> None:
         self.runner.stop()
+        if self.bot is not None:
+            self.bot.stop()
         if self.feed is not None:
             self.feed.stop()
         if self.lock is not None:
@@ -357,6 +386,10 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> None:
     print_status(agent.pf, cfg.risk.starting_balance_usd)
 
 
+def _raise_interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
 def _default_to_ui(argv: list[str], commands: set[str]) -> list[str]:
     """Bare `memecoin-agent [-c cfg] [ui options]` means `memecoin-agent [-c cfg] ui [ui options]`."""
     head: list[str] = []
@@ -440,6 +473,9 @@ def main(argv: list[str] | None = None) -> None:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
     setup_logging(None if offline else cfg.agent.log_file, args.verbose)
+    if args.command in ("run", "ui"):
+        # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
+        signal.signal(signal.SIGTERM, _raise_interrupt)
     quiet = args.command in ("status", "scan", "demo", "backtest") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.

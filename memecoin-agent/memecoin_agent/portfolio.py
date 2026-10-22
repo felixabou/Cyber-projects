@@ -5,11 +5,53 @@ from __future__ import annotations
 import csv
 import json
 import os
-from dataclasses import dataclass, field
-from datetime import datetime
+from collections import deque
+from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import ClosedTrade, Fill, Position, TokenSnapshot, TradeRecord
+
+TRADE_COLUMNS = [f.name for f in fields(TradeRecord)]
+
+
+def read_trades_csv(csv_path: str | Path, limit: int | None = None) -> list[TradeRecord]:
+    """The trade journal (the last `limit` rows if given); unreadable rows are skipped."""
+    path = Path(csv_path)
+    if not path.exists():
+        return []
+    rows: deque[dict[str, str]] = deque(maxlen=limit)
+    try:
+        with path.open(newline="") as fh:
+            rows.extend(csv.DictReader(fh))
+    except OSError:
+        return []
+    out = []
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r["time"])
+            out.append(TradeRecord(
+                time=t if t.tzinfo else t.replace(tzinfo=timezone.utc), side=r["side"], mint=r["mint"],
+                symbol=r["symbol"], token_amount=float(r["token_amount"]), usd_value=float(r["usd_value"]),
+                price_usd=float(r["price_usd"]), fee_usd=float(r["fee_usd"]), reason=r["reason"],
+                realized_pnl_usd=float(r.get("realized_pnl_usd") or 0), signature=r.get("signature") or None,
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def write_trades_csv(csv_path: str | Path, trades: list[TradeRecord]) -> None:
+    """Write a complete trade CSV atomically (readers never see a half-written file)."""
+    path = Path(csv_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=TRADE_COLUMNS)
+        writer.writeheader()
+        for t in trades:
+            writer.writerow(t.to_row())
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -122,7 +164,7 @@ class Portfolio:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         new_file = not csv_path.exists()
         with csv_path.open("a", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(self.trades[0].to_row()))
+            writer = csv.DictWriter(fh, fieldnames=TRADE_COLUMNS)
             if new_file:
                 writer.writeheader()
             for t in self.trades:

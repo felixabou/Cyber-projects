@@ -139,3 +139,21 @@ gmgn:
   max_creator_launches: null       # e.g. 20 to skip serial deployers
   min_smart_wallets: 0             # e.g. 1 to require at least one smart-money holder
   fail_closed: false               # GMGN down / rate limited: false = the other checks decide
+
+export:
+  # Trade CSVs for downloading later: each finished period (UTC clock hour) that had trades gets its
+  # own file, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv. state/trades.csv stays the full history.
+  enabled: true
+  dir: exports
+  every_minutes: 60                # must divide a day evenly (15, 30, 60, 120, ...)
+
+telegram:
+  # Alerts, the hourly CSVs and remote control from your phone. On when a bot token is set:
+  # TELEGRAM_BOT_TOKEN env var, or this file. Only the chats below (plus TELEGRAM_CHAT_ID,
+  # comma-separated) can use the bot; anyone else who messages it is told their chat id, nothing more.
+  enabled: true
+  token_file: ~/.config/memecoin-agent/telegram_token
+  allowed_chat_ids: []
+  notify_trades: true              # a message for every buy and sell
+  send_exports: true               # post each hourly trade CSV to the chat
+  allow_controls: true             # /pause /resume /scan /close /closeall (false = report only)

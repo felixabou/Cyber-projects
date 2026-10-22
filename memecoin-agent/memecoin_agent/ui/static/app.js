@@ -16,6 +16,7 @@ const state = {
   logs: [],
   configLoaded: false,
   backtest: null,
+  exportsAt: 0,
   failures: 0,
   lastTicks: -1,
   lastTickWall: Date.now(),  // browser time when the tick counter last advanced
@@ -349,6 +350,7 @@ function renderHeader(v) {
     bits.push(v.larpcheck.on_unchecked === "check"
       ? `LarpCheck gate · ${v.larpcheck.checks_left_today} checks left today` : "LarpCheck gate on");
   }
+  if (v.telegram) bits.push(v.telegram.state === "ok" ? `Telegram ${v.telegram.bot || "bot"}` : `Telegram: ${v.telegram.state}`);
   if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
   $("#meta").textContent = bits.join(" · ");
 
@@ -552,6 +554,27 @@ function renderTrades(v) {
   $("#trades-summary").textContent = `${v.trades.length} most recent trades · ${sells.length} sells · realized ${usd(realized, { sign: true })}`;
   $("#trades-download").href = `/api/trades.csv?token=${encodeURIComponent(TOKEN)}`;
   replace($("#trades-table"), tradesTable(v.trades, true));
+  $("#exports-card").hidden = !v.export;
+  if (v.export && Date.now() - state.exportsAt > 60000) loadExports(v.export);
+}
+
+async function loadExports(exp) {
+  state.exportsAt = Date.now();
+  const every = exp.every_minutes === 60 ? "hour" : `${exp.every_minutes} minutes`;
+  $("#exports-note").textContent = `One CSV per ${every} that had trades (UTC), saved in ${exp.dir}/`;
+  try {
+    const { files } = await api("/api/exports");
+    const label = (name) => {
+      const m = name.match(/^trades_(\d{4}-\d{2}-\d{2})_(\d\d)(\d\d)-(\d\d)(\d\d)_UTC\.csv$/);
+      return m ? `${m[1]} ${m[2]}:${m[3]}–${m[4]}:${m[5]} UTC` : name;
+    };
+    replace($("#exports-list"), files.length ? files.map((f) => h("a", {
+      class: "btn btn-small", download: f.name, text: label(f.name), title: f.name,
+      href: `/api/exports/${encodeURIComponent(f.name)}?token=${encodeURIComponent(TOKEN)}`,
+    })) : h("div", { class: "empty", text: "No saved files yet: the first appears after an hour with trades." }));
+  } catch (e) {
+    state.exportsAt = 0;
+  }
 }
 
 // ---------------------------------------------------------------- activity

@@ -216,6 +216,32 @@ class GmgnConfig:
 
 
 @dataclass
+class ExportConfig:
+    """Trade CSVs saved on a schedule for downloading later: one file per period (UTC clock hours by
+    default) that had trades, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv."""
+
+    enabled: bool = True
+    dir: str = "exports"
+    every_minutes: int = 60
+
+
+@dataclass
+class TelegramConfig:
+    """Telegram bot: trade alerts, the hourly CSVs and remote control from your phone.
+    On whenever a bot token is configured (TELEGRAM_BOT_TOKEN, or token_file)."""
+
+    enabled: bool = True
+    token_file: str | None = "~/.config/memecoin-agent/telegram_token"
+    # Only these chats can use the bot; the TELEGRAM_CHAT_ID environment variable (comma-separated)
+    # adds to the list. Message the bot from a chat that isn't listed and it replies with its id.
+    allowed_chat_ids: list[int] = field(default_factory=list)
+    notify_trades: bool = True
+    send_exports: bool = True  # post each hourly trade CSV to the chat
+    # /pause, /resume, /scan, /close and /closeall. Off = the bot only reports.
+    allow_controls: bool = True
+
+
+@dataclass
 class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
@@ -226,6 +252,8 @@ class Config:
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -254,6 +282,8 @@ class Config:
                              "(use 'check' or 'reject', or set require_verdict: false)")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
+        if not 0 < self.export.every_minutes <= 1440 or 1440 % self.export.every_minutes:
+            raise ValueError("export.every_minutes must divide a day evenly (e.g. 15, 30, 60, 120, 1440)")
 
 
 _SECTIONS: dict[str, type] = {
@@ -266,6 +296,8 @@ _SECTIONS: dict[str, type] = {
     "recorder": RecorderConfig,
     "larpcheck": LarpCheckConfig,
     "gmgn": GmgnConfig,
+    "export": ExportConfig,
+    "telegram": TelegramConfig,
 }
 
 

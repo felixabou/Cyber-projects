@@ -50,6 +50,7 @@ class Agent:
         self.last_scan: list[dict] = []
         self.entry_block: str | None = None
         self.recent_trades: deque[TradeRecord] = deque(maxlen=500)
+        self.trades_made = 0  # this session; lets listeners (the Telegram bot) find new trades
         self.tick_errors = 0
         self._trades_mirrored = 0
 
@@ -72,7 +73,9 @@ class Agent:
         # Mirror new trades for the dashboard; pf.trades is cleared once flushed to CSV.
         if self._trades_mirrored > len(self.pf.trades):  # someone else cleared it
             self._trades_mirrored = 0
-        self.recent_trades.extend(self.pf.trades[self._trades_mirrored:])
+        new = self.pf.trades[self._trades_mirrored:]
+        self.recent_trades.extend(new)
+        self.trades_made += len(new)
         self._trades_mirrored = len(self.pf.trades)
         if not self.persist:
             return

@@ -1,0 +1,9 @@
+# On a VPS with Docker: copy .env.example to .env, fill it in, then `docker compose up -d --build`.
+# Logs: `docker compose logs -f`. Trade files: ./data/state/trades.csv and ./data/exports/.
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
