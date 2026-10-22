@@ -183,6 +183,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = csv_path.read_bytes() if csv_path.exists() else b""
             self._send(200, body, "text/csv; charset=utf-8",
                        {"Content-Disposition": 'attachment; filename="trades.csv"'})
+        elif path == "/api/exports":
+            files = runner.exporter.files() if runner.exporter is not None else []
+            self._json({"files": [{"name": p.name, "bytes": p.stat().st_size} for p in files]})
+        elif path.startswith("/api/exports/"):
+            from ..export import FILE_RE
+
+            name = path[len("/api/exports/"):]
+            file = runner.exporter.dir / name if runner.exporter is not None and FILE_RE.match(name) else None
+            if file is None or not file.is_file():
+                self._error(HTTPStatus.NOT_FOUND, "No such export")
+                return
+            self._send(200, file.read_bytes(), "text/csv; charset=utf-8",
+                       {"Content-Disposition": f'attachment; filename="{name}"'})
         else:
             self._error(HTTPStatus.NOT_FOUND, "Not found")
 

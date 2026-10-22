@@ -1,0 +1,26 @@
+# Config baked into the Docker image (see Dockerfile). The agent runs in /data, so the relative
+# paths below (state/, exports/) land on the volume. Anything not set here uses the defaults in
+# config.example.yaml; copy settings over from there to change them, then redeploy.
+#
+# Paper trading only: this setup holds no wallet key.
+
+execution:
+  mode: paper
+
+agent:
+  state_file: state/state.json
+  trades_csv: state/trades.csv
+  log_file: null   # the host keeps the console log; a log file on the volume would grow forever
+  kill_switch_file: state/STOP
+
+export:
+  dir: exports
+  every_minutes: 60
+
+recorder:
+  record_while_trading: false   # market recordings take a lot of disk; record on your PC instead
+
+telegram:
+  notify_trades: true
+  send_exports: true
+  allow_controls: true

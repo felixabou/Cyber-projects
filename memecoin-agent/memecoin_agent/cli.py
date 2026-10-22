@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -40,9 +41,28 @@ def setup_logging(log_file: str | None, verbose: bool = False) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def build_market(cfg: Config, with_feed: bool = True):
-    """DexScreener market data, with the real-time launch feed in front of discovery if enabled."""
+def build_gmgn(cfg: Config):
+    """A GMGN client if GMGN is enabled and a key is configured, else None (with one log line)."""
+    if not (cfg.gmgn.enabled and (cfg.gmgn.discovery or cfg.gmgn.safety)):
+        return None
+    from .data.gmgn import GmgnClient, load_api_key
+
+    key = load_api_key(cfg.gmgn)
+    if not key:
+        log.info("GMGN not configured (set GMGN_API_KEY or gmgn.api_key_file); running without it")
+        return None
+    return GmgnClient(key, cfg.gmgn.host)
+
+
+def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
+    """DexScreener market data. Discovery order: pump.fun graduations (launch feed), GMGN trending,
+    then DexScreener's own lists. Prices always come from DexScreener."""
     base = DexScreenerClient(cfg.filters.quote_symbols)
+    if gmgn is not None and cfg.gmgn.discovery:
+        from .data.gmgn import ExtraDiscoveryMarket, GmgnDiscovery
+
+        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, cfg.filters, gmgn))
+        log.info("GMGN discovery on: %s trending, every %.0fs", cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None
@@ -53,34 +73,42 @@ def build_market(cfg: Config, with_feed: bool = True):
     return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd), feed
 
 
-def build_safety(cfg: Config, with_larpcheck: bool = True):
-    """RugCheck, then LarpCheck (the agent's pre-buy gate). The recorder passes with_larpcheck=False:
-    it vets hundreds of tokens, and LarpCheck verdicts are for the few the agent would actually buy."""
+def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
+    """The agent's pre-buy checks, cheapest first: RugCheck, then GMGN, then LarpCheck (which can spend
+    credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False and no
+    GMGN client: it vets hundreds of tokens, and these checks are for the few the agent would buy."""
+    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+
     f = cfg.filters
     rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
                           min_lp_locked_pct=f.min_lp_locked_pct) if f.require_rugcheck else NoSafetyCheck())
-    if not (with_larpcheck and cfg.larpcheck.enabled):
-        return rug
-    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+    checks: list = [rug]
+    if gmgn is not None and cfg.gmgn.safety:
+        from .data.gmgn import GmgnSafety
 
+        checks.append(GmgnSafety(cfg.gmgn, gmgn))
+        log.info("GMGN safety check on (rug ratio, wash trading, holder concentration, bundlers/insiders)")
+    if not (with_larpcheck and cfg.larpcheck.enabled):
+        return CompositeSafety(*checks) if len(checks) > 1 else rug
     key = load_api_key(cfg.larpcheck)
     if not key:
         if cfg.larpcheck.require_verdict:
             log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
                       "larpcheck.api_key_file): the agent will open no positions; exits still run")
-            return CompositeSafety(rug, RequireLarpCheck("no LarpCheck API key configured"))
+            return CompositeSafety(*checks, RequireLarpCheck("no LarpCheck API key configured"))
         log.warning("LarpCheck is enabled but no API key was found; continuing without it")
-        return rug
+        return CompositeSafety(*checks) if len(checks) > 1 else rug
     gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
     log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
              "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
              cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
-    return CompositeSafety(rug, gate)
+    return CompositeSafety(*checks, gate)
 
 
 def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalFeed | None]:
-    market, feed = build_market(cfg, with_feed)
-    safety = build_safety(cfg)
+    gmgn = build_gmgn(cfg)
+    market, feed = build_market(cfg, with_feed, gmgn=gmgn)
+    safety = build_safety(cfg, gmgn=gmgn)
     if cfg.execution.mode == "live":
         if os.environ.get(LIVE_CONFIRM_ENV) != "yes":
             raise SystemExit(
@@ -102,8 +130,22 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     return Agent(cfg, market, safety, executor, pf, guard=guard), feed
 
 
+def build_telegram(cfg: Config, runner):
+    """The Telegram bot if enabled and a bot token is configured, else None."""
+    if not cfg.telegram.enabled:
+        return None
+    from .telegram_bot import TelegramBot, TelegramClient, allowed_chats, load_token
+
+    token = load_token(cfg.telegram)
+    if not token:
+        log.info("Telegram not configured (set TELEGRAM_BOT_TOKEN to get alerts and control from your phone)")
+        return None
+    return TelegramBot(cfg.telegram, TelegramClient(token), runner, allowed_chats(cfg.telegram))
+
+
 class Engine:
-    """Everything a trading session runs in one process: agent, launch feed, recorder, state lock."""
+    """Everything a trading session runs in one process: agent, launch feed, recorder, hourly trade
+    exports, Telegram bot, state lock."""
 
     def __init__(self, cfg: Config, args: argparse.Namespace) -> None:
         from .recording import Recorder, RecordingWriter
@@ -111,6 +153,7 @@ class Engine:
 
         self.feed: PumpPortalFeed | None = None
         self.lock: StateLock | None = None
+        self.bot = None
         record = bool(getattr(args, "record", False)) or cfg.recorder.record_while_trading
         if getattr(args, "synthetic", False):
             from .simulation import SimClock, SyntheticMarket, SyntheticSafety
@@ -144,20 +187,33 @@ class Engine:
         except BaseException:
             self.lock.release()
             raise
+        exporter = None
+        if cfg.export.enabled:
+            from .export import TradeExporter
+
+            exporter = TradeExporter(cfg.export, cfg.agent.trades_csv, agent.clock())
         self.runner = AgentRunner(
             agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
-            record=record, max_ticks=getattr(args, "max_ticks", None),
+            record=record, max_ticks=getattr(args, "max_ticks", None), exporter=exporter,
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
                                            RecordingWriter(cfg.recorder.dir), clock=agent.clock),
         )
+        self.bot = build_telegram(cfg, self.runner)
+        if self.bot is not None:
+            self.runner.listeners.append(self.bot)
+            self.runner.telegram = self.bot
 
     def start(self) -> None:
         if self.feed is not None:
             self.feed.start()
         self.runner.start()
+        if self.bot is not None:
+            self.bot.start()
 
     def stop(self) -> None:
         self.runner.stop()
+        if self.bot is not None:
+            self.bot.stop()
         if self.feed is not None:
             self.feed.stop()
         if self.lock is not None:
@@ -247,7 +303,7 @@ def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
         Recorder(cfg, market, SyntheticSafety(market), writer, clock=clock, sleep=advance).run(args.hours or 12)
         print(f"Wrote {writer.records_written:,} synthetic records to {writer.dir}")
         return
-    market, feed = build_market(cfg)
+    market, feed = build_market(cfg, gmgn=build_gmgn(cfg))
     if feed is not None:
         feed.start()
     try:
@@ -328,6 +384,10 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> None:
     hours = args.ticks * cfg.agent.tick_seconds / 3600
     print(f"\n--- Synthetic demo: {hours:.1f} simulated hours, {sells} sells ---")
     print_status(agent.pf, cfg.risk.starting_balance_usd)
+
+
+def _raise_interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 def _default_to_ui(argv: list[str], commands: set[str]) -> list[str]:
@@ -413,6 +473,9 @@ def main(argv: list[str] | None = None) -> None:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
     setup_logging(None if offline else cfg.agent.log_file, args.verbose)
+    if args.command in ("run", "ui"):
+        # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
+        signal.signal(signal.SIGTERM, _raise_interrupt)
     quiet = args.command in ("status", "scan", "demo", "backtest") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.

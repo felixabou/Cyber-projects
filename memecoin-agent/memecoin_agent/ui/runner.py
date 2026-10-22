@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 from ..agent import Agent
 from ..models import TradeRecord
+from ..portfolio import read_trades_csv
 from ..recording import summarize_recordings
 
 log = logging.getLogger(__name__)
@@ -128,27 +129,7 @@ def trade_view(t: TradeRecord) -> dict[str, Any]:
 
 
 def load_recent_trades(csv_path: str | Path, limit: int = 500) -> list[TradeRecord]:
-    path = Path(csv_path)
-    if not path.exists():
-        return []
-    rows: deque[dict[str, str]] = deque(maxlen=limit)
-    try:
-        with path.open(newline="") as fh:
-            rows.extend(csv.DictReader(fh))
-    except OSError:
-        return []
-    out = []
-    for r in rows:
-        try:
-            out.append(TradeRecord(
-                time=datetime.fromisoformat(r["time"]), side=r["side"], mint=r["mint"], symbol=r["symbol"],
-                token_amount=float(r["token_amount"]), usd_value=float(r["usd_value"]),
-                price_usd=float(r["price_usd"]), fee_usd=float(r["fee_usd"]), reason=r["reason"],
-                realized_pnl_usd=float(r.get("realized_pnl_usd") or 0), signature=r.get("signature") or None,
-            ))
-        except (KeyError, ValueError):
-            continue
-    return out
+    return read_trades_csv(csv_path, limit)
 
 
 class BacktestJob:
@@ -214,8 +195,14 @@ class AgentRunner:
         make_recorder: Callable[[], Any] | None = None,
         record: bool = False,
         max_ticks: int | None = None,
+        exporter: Any = None,
     ) -> None:
         self.agent = agent
+        self.exporter = exporter  # export.TradeExporter: the hourly trade CSVs
+        # Told about new trades and exports on the agent thread (the Telegram bot only queues messages).
+        self.listeners: list[Any] = []
+        self.telegram: Any = None  # the bot, for the dashboard's status line
+        self._trades_notified = agent.trades_made
         # The recorder shares the agent's market/safety clients (and so its launch-feed
         # connection) and runs on the agent thread right after each tick.
         self.make_recorder = make_recorder
@@ -278,7 +265,9 @@ class AgentRunner:
                         log.exception("Tick failed")
                     self.equity.add(a.clock(), a.pf.equity_usd())
                     self._record()  # after trading, inside the sleep budget: never delays exits
+                    exported = self._export()
                     self._publish()
+                    self._notify(exported)
                     if self.max_ticks is not None and a.ticks >= self.max_ticks:
                         break
                 self._wake.wait(timeout=max(0.0, next_tick - time.monotonic()))
@@ -306,6 +295,29 @@ class AgentRunner:
         except Exception:
             log.exception("Recorder tick failed")
 
+    # -- exports and listeners ------------------------------------------------------
+    def _export(self) -> list[Any]:
+        if self.exporter is None or not self.exporter.due(self.agent.clock()):
+            return []
+        try:
+            return self.exporter.run(self.agent.clock())
+        except Exception:
+            log.exception("Trade export failed")
+            return []
+
+    def _notify(self, exported: list[Any]) -> None:
+        a = self.agent
+        n = min(a.trades_made - self._trades_notified, len(a.recent_trades))
+        self._trades_notified = a.trades_made
+        trades = list(a.recent_trades)[-n:] if n > 0 else []
+        if not (trades or exported):
+            return
+        for listener in self.listeners:
+            try:
+                listener.notify(trades, exported)
+            except Exception:
+                log.exception("Listener %s failed", type(listener).__name__)
+
     # -- controls -------------------------------------------------------------------
     def submit(self, action: str, timeout: float = 120.0, **kwargs: Any) -> Any:
         fut: Future = Future()
@@ -324,26 +336,28 @@ class AgentRunner:
             except Exception as exc:
                 fut.set_exception(exc)
             self._publish()
+            self._notify([])  # manual sells get their alerts now, not after the next tick
 
     def _execute(self, action: str, **kw: Any) -> dict[str, Any]:
         a = self.agent
+        where = kw.get("source") or "dashboard"
         if action == "pause":
             a.entries_paused = True
-            log.info("Entries paused from the dashboard")
+            log.info("Entries paused (%s)", where)
         elif action == "resume":
             a.entries_paused = False
-            log.info("Entries resumed from the dashboard")
+            log.info("Entries resumed (%s)", where)
         elif action == "close":
             mint = str(kw.get("mint") or "")
             if mint not in a.pf.positions:
                 raise ValueError("No open position for that token")
             symbol = a.pf.positions[mint].symbol
-            if not a.close_position(mint, "manual close (dashboard)"):
+            if not a.close_position(mint, f"manual close ({where})"):
                 raise RuntimeError(f"Sell of {symbol} failed; see the activity log")
             return {"ok": True, "message": f"Closed {symbol}"}
         elif action == "close_all":
             n = len(a.pf.positions)
-            a.close_all("manual close-all (dashboard)")
+            a.close_all(f"manual close-all ({where})")
             left = len(a.pf.positions)
             if left:
                 raise RuntimeError(f"{left} of {n} position(s) could not be sold; see the activity log")
@@ -451,6 +465,10 @@ class AgentRunner:
             "feed": feed,
             "recorder": self._recorder_view(),
             "larpcheck": self._larpcheck_view(),
+            "gmgn": self._gmgn_view(),
+            "export": {"dir": str(self.exporter.dir), "every_minutes": int(self.exporter.period.total_seconds() // 60)}
+            if self.exporter is not None else None,
+            "telegram": self.telegram.status() if self.telegram is not None else None,
             "backtest_status": self.backtest.state.get("status"),
         }
 
@@ -471,6 +489,15 @@ class AgentRunner:
             "records_written": rec.writer.records_written if rec is not None else 0,
             "on_disk": on_disk,
         }
+
+    def _gmgn_view(self) -> dict[str, Any] | None:
+        from ..data.gmgn import ExtraDiscoveryMarket, GmgnSafety
+        from ..data.larpcheck import CompositeSafety
+
+        market = getattr(self.agent.market, "base", self.agent.market)  # under the launch-feed wrapper
+        discovery = isinstance(market, ExtraDiscoveryMarket)
+        safety = isinstance(self.agent.safety, CompositeSafety) and self.agent.safety.find(GmgnSafety) is not None
+        return {"discovery": discovery, "safety": safety} if (discovery or safety) else None
 
     def _larpcheck_view(self) -> dict[str, Any] | None:
         from ..data.larpcheck import CompositeSafety, LarpCheckGate

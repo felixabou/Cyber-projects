@@ -163,6 +163,8 @@ main { padding: 20px 24px 48px; max-width: 1440px; margin: 0 auto; }
 .card-tools { display: flex; gap: 8px; align-items: center; }
 .grid-2 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
 .filter-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.export-list { display: flex; gap: 8px; flex-wrap: wrap; max-height: 240px; overflow-y: auto; }
+.export-list .btn { font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
 
 /* Hero + tiles */
