@@ -90,7 +90,8 @@ class PumpPortalFeed:
                 self._events.popitem(last=False)
             self.events_received += 1
         if kind == "migration":
-            log.info("Pump.fun graduation: %s %s", ev.symbol or "", ev.mint)
+            # Migration events usually carry no symbol; DexScreener supplies it once the pool is indexed.
+            log.info("Pump.fun graduation: %s", f"{ev.symbol} {ev.mint}" if ev.symbol else ev.mint)
         return ev
 
     def _prune(self) -> None:
