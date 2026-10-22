@@ -258,6 +258,11 @@ td.nowrap { white-space: nowrap; }
 .lvl-ERROR, .lvl-CRITICAL { color: var(--critical); }
 .lvl-INFO { color: var(--text-2); }
 
+/* Recording panel */
+.rec-status p { margin: 0 0 6px; font-size: 13px; }
+.rec-status p:last-child { margin-bottom: 0; }
+.rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--critical); margin-right: 8px; vertical-align: 1px; }
+
 /* Backtest form, report, settings */
 .form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px 16px; align-items: start; }
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-2); }

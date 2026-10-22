@@ -342,6 +342,7 @@ function renderHeader(v) {
   const bits = [`Last tick ${v.last_tick_at ? ago(new Date(state.lastTickWall).toISOString()) : "pending"}`];
   if (v.synthetic) bits.push(`sim time ${timeLabel(v.now, true)} (${v.speed}× speed)`);
   if (v.feed) bits.push(v.feed.connected ? `launch feed connected · ${v.feed.buffered} tokens` : "launch feed reconnecting");
+  if (v.recorder && v.recorder.active) bits.push(`recording · ${v.recorder.tracked} tokens`);
   if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
   $("#meta").textContent = bits.join(" · ");
 
@@ -576,7 +577,10 @@ async function loadSettings() {
   try {
     const cfg = await api("/api/config");
     state.configLoaded = true;
-    if (!$("#bt-dir").value) $("#bt-dir").value = (cfg.recorder && cfg.recorder.dir) || "recordings";
+    if (!$("#bt-dir").value) {
+      $("#bt-dir").value = (state.view && state.view.recorder && state.view.recorder.dir)
+        || (cfg.recorder && cfg.recorder.dir) || "recordings";
+    }
     const fmt = (v) => (Array.isArray(v) ? (v.length ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join(", ") : "[]")
       : v === null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v));
     replace($("#settings"), Object.entries(cfg).filter(([, sec]) => sec && typeof sec === "object").map(([name, sec]) =>
@@ -620,6 +624,33 @@ async function control(action, extra = {}) {
 }
 
 // ---------------------------------------------------------------- loop & wiring
+function bytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1e3))} KB`;
+}
+
+function renderRecorder(v) {
+  const r = v.recorder;
+  if (!r) return;
+  const btn = $("#rec-toggle");
+  btn.hidden = !r.available;
+  btn.textContent = r.active ? "Stop recording" : "Start recording";
+  btn.className = r.active ? "btn btn-small" : "btn btn-small btn-primary";
+  const now = r.active
+    ? h("p", {}, h("span", { class: "rec-dot", "aria-hidden": "true" }),
+      `Recording every ${r.interval_s}s since ${timeLabel(r.since, true)} — tracking ${r.tracked} tokens, `
+      + `${r.records_written.toLocaleString()} records this session. Shares this session's market connections.`)
+    : h("p", { class: "muted", text: "Not recording. Start it to collect real market data for backtests; it runs inside this "
+      + "session (same data connections, no second process)." });
+  const d = r.on_disk;
+  const disk = d
+    ? h("p", { text: `On disk in ${r.dir}: ${d.files} hourly file${d.files === 1 ? "" : "s"} (${bytes(d.bytes)}), `
+      + `${timeLabel(d.first_hour, true)} → ${timeLabel(d.last_hour, true)}. Aim for several days before trusting a backtest.` })
+    : h("p", { class: "muted", text: `No recordings in ${r.dir} yet.` });
+  replace($("#rec-status"), now, disk);
+}
+
 function render() {
   const v = state.view;
   if (!v) return;
@@ -627,6 +658,7 @@ function render() {
   if (state.tab === "overview") renderOverview(v);
   else if (state.tab === "scanner") renderScanner(v);
   else if (state.tab === "trades") renderTrades(v);
+  else if (state.tab === "backtest") renderRecorder(v);
 }
 
 async function pollView() {
@@ -695,6 +727,8 @@ function init() {
   });
   $("#btn-pause").addEventListener("click", () => control(state.view && state.view.entries_paused ? "resume" : "pause"));
   $("#btn-scan").addEventListener("click", () => control("scan_now"));
+  $("#rec-toggle").addEventListener("click", () =>
+    control(state.view && state.view.recorder && state.view.recorder.active ? "record_stop" : "record_start"));
   $("#btn-close-all").addEventListener("click", async () => {
     const v = state.view;
     if (!v || !v.positions.length) return;

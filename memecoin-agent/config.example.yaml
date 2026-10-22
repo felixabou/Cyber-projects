@@ -85,3 +85,4 @@ recorder:
   track_hours: 12          # keep sampling each discovered token this long
   max_tracked: 400         # ~100-150 MB/day of gzipped data at this size
   record_safety: true      # store RugCheck verdicts so backtests can apply them
+  record_while_trading: false  # true = `run`/`ui` also record (same as --record)

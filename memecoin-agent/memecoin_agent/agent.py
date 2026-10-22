@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +28,6 @@ class Agent:
         executor: Executor,
         portfolio: Portfolio,
         clock: Callable[[], datetime] = utcnow,
-        sleep: Callable[[float], None] = time.sleep,
         persist: bool = True,
     ) -> None:
         self.cfg = cfg
@@ -39,7 +37,6 @@ class Agent:
         self.pf = portfolio
         self.risk = RiskManager(cfg.risk)
         self.clock = clock
-        self.sleep = sleep
         self.persist = persist
         self.ticks = 0
         # State surfaced by the dashboard (memecoin_agent/ui).
@@ -53,24 +50,7 @@ class Agent:
         self.tick_errors = 0
         self._trades_mirrored = 0
 
-    # -- loop -----------------------------------------------------------------------
-    def run(self, max_ticks: int | None = None) -> None:
-        log.info("Agent started in %s mode. Equity $%.2f, %d open position(s).",
-                 self.cfg.execution.mode.upper(), self.pf.equity_usd(), len(self.pf.positions))
-        try:
-            while max_ticks is None or self.ticks < max_ticks:
-                started = time.monotonic()
-                try:
-                    self.tick()
-                except Exception:  # one bad tick (API hiccup, bad data) must not kill the loop
-                    self.tick_errors += 1
-                    log.exception("Tick failed")
-                self.sleep(max(0.0, self.cfg.agent.tick_seconds - (time.monotonic() - started)))
-        except KeyboardInterrupt:
-            log.info("Interrupted; saving state.")
-        finally:
-            self.save()
-
+    # -- loop (driven by ui.runner.AgentRunner for both `run` and `ui`) -------------
     def tick(self) -> None:
         now = self.clock()
         try:

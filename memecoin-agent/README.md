@@ -51,19 +51,42 @@ cd memecoin-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-memecoin-agent ui --synthetic        # dashboard on an offline simulated market (no network)
-memecoin-agent demo                  # same market, text-only summary
-memecoin-agent scan --safety         # what would it buy right now? (no trading)
+memecoin-agent ui --synthetic --record   # try everything offline on a simulated market
 cp config.example.yaml config.yaml
-memecoin-agent -c config.yaml ui     # paper trading with the web dashboard
-memecoin-agent -c config.yaml run    # paper trading, terminal only
-memecoin-agent -c config.yaml status # equity, PnL, open positions
-memecoin-agent -c config.yaml record # record market data for backtests (see below)
+memecoin-agent -c config.yaml --record   # paper trade + record data + dashboard, one process
+```
+
+The bare command opens the dashboard (`memecoin-agent` is short for
+`memecoin-agent ui`). One process runs the whole session:
+
+```
+                ┌──────────────── memecoin-agent (ui | run) ────────────────┐
+ PumpPortal ws ─┤► launch feed ─┐                                          │
+ DexScreener  ──┤► market data ─┼─► agent: exits → scan → RugCheck → buy ──┼─► paper fills / Jupiter swaps
+ RugCheck     ──┤►──────────────┘        │                                 │
+                │                 recorder (--record) ──► recordings/ ─────┼─► backtests (dashboard or CLI)
+                │                 dashboard (ui only) ◄── views / controls │
+                └───────────────────────────────────────────────────────────┘
+```
+
+- The trading loop, launch feed, recorder and dashboard share one set of data connections. The recorder samples right after each trading tick, inside the idle time, so it never delays an exit.
+- `run` is the same engine without the web server. Use it on a server you only SSH into.
+- A lock file stops a second trading process from starting on the same `state/`. That would double every order. A running dashboard therefore also blocks `close-all`; use its **Close all** button instead.
+
+Other commands:
+
+```bash
+memecoin-agent -c config.yaml run --record   # same session, headless
+memecoin-agent -c config.yaml status         # equity, PnL, open positions (read-only, safe anytime)
+memecoin-agent -c config.yaml scan --safety  # what would it buy right now? (no trading)
+memecoin-agent -c config.yaml backtest       # replay recordings (also in the dashboard)
+memecoin-agent -c config.yaml record         # record only, without trading
+memecoin-agent demo                          # synthetic market, text summary
 ```
 
 State is written to `state/state.json` and every fill is appended to
 `state/trades.csv`. Restarting picks up where the agent left off, including the
-launch-feed buffer (`state/feed.json`).
+launch-feed buffer (`state/feed.json`) and the equity chart (`state/equity.csv`).
 
 The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
@@ -134,7 +157,10 @@ Known live-mode limitations:
 ## Backtesting
 
 Backtests replay real recorded market data through the exact production code
-(agent, strategy, risk rules and paper fill model). So first, record:
+(agent, strategy, risk rules and paper fill model). So first, record. The easiest
+way is to record while you paper trade: pass `--record`, set
+`recorder.record_while_trading: true`, or click **Start recording** on the
+dashboard's Backtest tab. To record without trading, use the standalone recorder:
 
 ```bash
 memecoin-agent -c config.yaml record              # runs until Ctrl-C; --hours N to stop
@@ -166,7 +192,8 @@ Backtest 2026-01-01 00:00 -> 2026-01-01 23:59 UTC (24.0h, 283,215 records)
   Exits           trailing stop: 31, stop loss: 22, time stop: 7, end of backtest: 5, liquidity pulled: 3
 ```
 
-(That output is from the *synthetic* market, `record --synthetic`. Use it to try the
+(That output is from the *synthetic* market, `record --synthetic`. Synthetic
+sessions always write to `recordings-synthetic/`, so they never mix with real data. Use it to try the
 workflow offline; its numbers mean nothing.)
 
 **How faithful the replay is.** At simulated time T the agent sees only data
@@ -202,7 +229,8 @@ memecoin_agent/
   recording.py       market-data recorder (gzipped JSONL)
   backtest.py        point-in-time replay + performance report
   simulation.py      offline synthetic market for demo/tests
-  ui/runner.py       agent thread, command queue, published views, equity history
+  ui/runner.py       the session engine for run + ui: agent loop, recorder, controls, views
+  statelock.py       one trader per state/ directory
   ui/server.py       stdlib HTTP server + auth; ui/static/ is the page (vanilla JS, no build)
 tests/               pytest suite (HTTP and RPC mocked; real tx signing)
 ```

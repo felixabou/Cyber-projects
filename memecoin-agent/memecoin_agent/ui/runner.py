@@ -1,4 +1,6 @@
-"""Runs the agent on a background thread and publishes read-only views for the dashboard.
+"""Runs the agent (and optionally the market recorder) and publishes read-only views.
+
+This is the engine behind both `memecoin-agent run` (headless) and `memecoin-agent ui`.
 
 The agent thread is the only one that touches the agent and portfolio. HTTP
 handlers read `runner.view`, a plain dict rebuilt after every tick and
@@ -24,6 +26,7 @@ from typing import Any, Callable
 
 from ..agent import Agent
 from ..models import TradeRecord
+from ..recording import summarize_recordings
 
 log = logging.getLogger(__name__)
 
@@ -208,8 +211,17 @@ class AgentRunner:
         advance: Callable[[float], None] | None = None,
         speed: float = 1.0,
         synthetic: bool = False,
+        make_recorder: Callable[[], Any] | None = None,
+        record: bool = False,
+        max_ticks: int | None = None,
     ) -> None:
         self.agent = agent
+        # The recorder shares the agent's market/safety clients (and so its launch-feed
+        # connection) and runs on the agent thread right after each tick.
+        self.make_recorder = make_recorder
+        self.recorder: Any = None
+        self.max_ticks = max_ticks
+        self.done = threading.Event()
         self.feed = feed
         self.equity = equity or EquityHistory()
         self.advance = advance  # synthetic mode: move simulated time forward each tick
@@ -226,6 +238,8 @@ class AgentRunner:
         if not agent.recent_trades:
             agent.recent_trades.extend(load_recent_trades(agent.cfg.agent.trades_csv))
         self.view: dict[str, Any] = {}
+        if record:
+            self._start_recording()
         self._publish()
 
     # -- lifecycle ------------------------------------------------------------------
@@ -239,30 +253,58 @@ class AgentRunner:
         if self._thread:
             self._thread.join(timeout)
 
+    def wait(self) -> None:
+        """Block until the loop ends (max_ticks reached or stop()); Ctrl-C friendly."""
+        while not self.done.wait(0.5):
+            pass
+
     def _loop(self) -> None:
         a = self.agent
         log.info("Agent started in %s mode. Equity $%.2f, %d open position(s).",
                  a.cfg.execution.mode.upper(), a.pf.equity_usd(), len(a.pf.positions))
         next_tick = 0.0
-        while not self._stop.is_set():
+        try:
+            while not self._stop.is_set():
+                self._drain_commands()
+                if self._force_tick or time.monotonic() >= next_tick:
+                    self._force_tick = False
+                    next_tick = time.monotonic() + a.cfg.agent.tick_seconds / self.speed
+                    if self.advance:
+                        self.advance(a.cfg.agent.tick_seconds)
+                    try:
+                        a.tick()
+                    except Exception:
+                        a.tick_errors += 1
+                        log.exception("Tick failed")
+                    self.equity.add(a.clock(), a.pf.equity_usd())
+                    self._record()  # after trading, inside the sleep budget: never delays exits
+                    self._publish()
+                    if self.max_ticks is not None and a.ticks >= self.max_ticks:
+                        break
+                self._wake.wait(timeout=max(0.0, next_tick - time.monotonic()))
+                self._wake.clear()
             self._drain_commands()
-            if self._force_tick or time.monotonic() >= next_tick:
-                self._force_tick = False
-                if self.advance:
-                    self.advance(a.cfg.agent.tick_seconds)
-                try:
-                    a.tick()
-                except Exception:
-                    a.tick_errors += 1
-                    log.exception("Tick failed")
-                self.equity.add(a.clock(), a.pf.equity_usd())
-                self._publish()
-                next_tick = time.monotonic() + a.cfg.agent.tick_seconds / self.speed
-            self._wake.wait(timeout=max(0.0, next_tick - time.monotonic()))
-            self._wake.clear()
-        self._drain_commands()
-        a.save()
-        log.info("Agent stopped; state saved.")
+        finally:
+            a.save()
+            log.info("Agent stopped; state saved.")
+            self.done.set()
+
+    # -- recording ------------------------------------------------------------------
+    def _start_recording(self) -> None:
+        if self.make_recorder is None:
+            raise RuntimeError("Recording isn't available in this mode")
+        if self.recorder is None:
+            self.recorder = self.make_recorder()
+            log.info("Recording market data to %s every %.0fs", self.recorder.writer.dir, self.recorder.rc.interval_s)
+
+    def _record(self) -> None:
+        rec = self.recorder
+        if rec is None or not rec.due(self.agent.clock()):
+            return
+        try:
+            rec.tick()
+        except Exception:
+            log.exception("Recorder tick failed")
 
     # -- controls -------------------------------------------------------------------
     def submit(self, action: str, timeout: float = 120.0, **kwargs: Any) -> Any:
@@ -306,6 +348,15 @@ class AgentRunner:
             if left:
                 raise RuntimeError(f"{left} of {n} position(s) could not be sold; see the activity log")
             return {"ok": True, "message": f"Closed {n} position(s)"}
+        elif action == "record_start":
+            self._start_recording()
+            self._record()
+            return {"ok": True, "message": "Recording market data"}
+        elif action == "record_stop":
+            if self.recorder is not None:
+                log.info("Recording stopped (%d records written)", self.recorder.writer.records_written)
+            self.recorder = None
+            return {"ok": True, "message": "Recording stopped"}
         elif action == "scan_now":
             a.scan_and_enter(a.clock())
             a.save()
@@ -397,5 +448,24 @@ class AgentRunner:
             "scan": {"at": _iso(a.last_scan_at), "every_s": cfg.agent.tick_seconds * cfg.agent.scan_every_ticks,
                      "candidates": a.last_scan},
             "feed": feed,
+            "recorder": self._recorder_view(),
             "backtest_status": self.backtest.state.get("status"),
+        }
+
+    def _recorder_view(self) -> dict[str, Any]:
+        rec = self.recorder
+        directory = rec.writer.dir if rec is not None else self.agent.cfg.recorder.dir
+        try:
+            on_disk = summarize_recordings(directory)
+        except OSError:
+            on_disk = None
+        return {
+            "available": self.make_recorder is not None,
+            "active": rec is not None,
+            "dir": str(directory),
+            "interval_s": self.agent.cfg.recorder.interval_s,
+            "since": _iso(rec.started_at) if rec is not None else None,
+            "tracked": len(rec.tracked) if rec is not None else 0,
+            "records_written": rec.writer.records_written if rec is not None else 0,
+            "on_disk": on_disk,
         }

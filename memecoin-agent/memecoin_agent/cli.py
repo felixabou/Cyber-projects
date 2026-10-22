@@ -1,4 +1,7 @@
-"""Command-line entry point: run, ui, scan, status, close-all, record, backtest, demo."""
+"""memecoin-agent: run `memecoin-agent` (or `memecoin-agent ui`) to trade with the dashboard.
+
+Commands: ui, run, scan, status, close-all, record, backtest, demo.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from .data.rugcheck import NoSafetyCheck, RugCheckClient
 from .execution.paper import PaperExecutor
 from .models import utcnow
 from .portfolio import Portfolio
+from .statelock import StateLock, StateLocked
 
 LIVE_CONFIRM_ENV = "MEMECOIN_AGENT_CONFIRM_LIVE"
 
@@ -77,15 +81,77 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     return Agent(cfg, market, safety, executor, pf), feed
 
 
+class Engine:
+    """Everything a trading session runs in one process: agent, launch feed, recorder, state lock."""
+
+    def __init__(self, cfg: Config, args: argparse.Namespace) -> None:
+        from .recording import Recorder, RecordingWriter
+        from .ui.runner import AgentRunner, EquityHistory
+
+        self.feed: PumpPortalFeed | None = None
+        self.lock: StateLock | None = None
+        record = bool(getattr(args, "record", False)) or cfg.recorder.record_while_trading
+        if getattr(args, "synthetic", False):
+            from .simulation import SimClock, SyntheticMarket, SyntheticSafety
+
+            cfg.execution.mode = "paper"
+            clock = SimClock(utcnow())
+            market = SyntheticMarket(clock, seed=args.seed)
+
+            def advance(seconds: float) -> None:
+                clock.advance(seconds)
+                market.step(seconds)
+
+            agent = Agent(cfg, market, SyntheticSafety(market), PaperExecutor(cfg.execution),
+                          Portfolio(cash_usd=cfg.risk.starting_balance_usd), clock=clock, persist=False)
+            # Synthetic recordings go to their own folder so they never mix with real market data.
+            rec_dir = str(Path(cfg.recorder.dir).with_name(Path(cfg.recorder.dir).name + "-synthetic"))
+            cfg.recorder.dir = rec_dir
+            self.runner = AgentRunner(
+                agent, advance=advance, speed=args.speed, synthetic=True, record=record,
+                max_ticks=getattr(args, "max_ticks", None),
+                make_recorder=lambda: Recorder(cfg, market, SyntheticSafety(market), RecordingWriter(rec_dir),
+                                               clock=clock),
+            )
+            return
+        try:
+            self.lock = StateLock(cfg.agent.state_file).acquire()
+        except StateLocked as exc:
+            raise SystemExit(str(exc)) from None
+        try:
+            agent, self.feed = build_agent(cfg)
+        except BaseException:
+            self.lock.release()
+            raise
+        self.runner = AgentRunner(
+            agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
+            record=record, max_ticks=getattr(args, "max_ticks", None),
+            make_recorder=lambda: Recorder(cfg, agent.market, agent.safety, RecordingWriter(cfg.recorder.dir),
+                                           clock=agent.clock),
+        )
+
+    def start(self) -> None:
+        if self.feed is not None:
+            self.feed.start()
+        self.runner.start()
+
+    def stop(self) -> None:
+        self.runner.stop()
+        if self.feed is not None:
+            self.feed.stop()
+        if self.lock is not None:
+            self.lock.release()
+
+
 def cmd_run(args: argparse.Namespace, cfg: Config) -> None:
-    agent, feed = build_agent(cfg)
-    if feed is not None:
-        feed.start()
+    engine = Engine(cfg, args)
+    engine.start()
     try:
-        agent.run(max_ticks=args.max_ticks)
+        engine.runner.wait()
+    except KeyboardInterrupt:
+        log.info("Interrupted; shutting down.")
     finally:
-        if feed is not None:
-            feed.stop()
+        engine.stop()
 
 
 def cmd_scan(args: argparse.Namespace, cfg: Config) -> None:
@@ -127,12 +193,19 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
 
 
 def cmd_close_all(args: argparse.Namespace, cfg: Config) -> None:
-    agent, _ = build_agent(cfg, with_feed=False)
-    if not agent.pf.positions:
-        print("No open positions.")
-        return
-    agent.close_all()
-    print_status(agent.pf, cfg.risk.starting_balance_usd)
+    try:
+        lock = StateLock(cfg.agent.state_file).acquire()
+    except StateLocked as exc:
+        raise SystemExit(f"{exc}\nIf the dashboard is running, use its Close all button instead.") from None
+    try:
+        agent, _ = build_agent(cfg, with_feed=False)
+        if not agent.pf.positions:
+            print("No open positions.")
+            return
+        agent.close_all()
+        print_status(agent.pf, cfg.risk.starting_balance_usd)
+    finally:
+        lock.release()
 
 
 def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
@@ -181,7 +254,7 @@ def cmd_backtest(args: argparse.Namespace, cfg: Config) -> None:
 
 def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
     from .ui import redacted_config
-    from .ui.runner import AgentRunner, EquityHistory, LogBuffer
+    from .ui.runner import LogBuffer
     from .ui.server import DashboardServer
 
     logs = LogBuffer()
@@ -190,32 +263,16 @@ def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
     for handler in root.handlers:
         # A dashboard-launched backtest replays thousands of simulated trades; keep them out of the live log.
         handler.addFilter(lambda record: record.threadName != "backtest")
-    feed = None
-    if args.synthetic:
-        from .simulation import SimClock, SyntheticMarket, SyntheticSafety
-
-        cfg.execution.mode = "paper"
-        clock = SimClock(utcnow())
-        market = SyntheticMarket(clock, seed=args.seed)
-
-        def advance(seconds: float) -> None:
-            clock.advance(seconds)
-            market.step(seconds)
-
-        agent = Agent(cfg, market, SyntheticSafety(market), PaperExecutor(cfg.execution),
-                      Portfolio(cash_usd=cfg.risk.starting_balance_usd), clock=clock, persist=False)
-        runner = AgentRunner(agent, advance=advance, speed=args.speed, synthetic=True)
-    else:
-        agent, feed = build_agent(cfg)
-        equity = EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv")
-        runner = AgentRunner(agent, feed=feed, equity=equity)
-    server = DashboardServer(runner, logs, host=args.host, port=args.port,
-                             password=os.environ.get("MEMECOIN_UI_PASSWORD"), config_dict=redacted_config(cfg))
-    if feed is not None:
-        feed.start()
-    runner.start()
-    print(f"Dashboard: {server.url}  ({'synthetic market' if args.synthetic else cfg.execution.mode + ' mode'}; Ctrl-C to stop)",
-          flush=True)
+    engine = Engine(cfg, args)
+    try:
+        server = DashboardServer(engine.runner, logs, host=args.host, port=args.port,
+                                 password=os.environ.get("MEMECOIN_UI_PASSWORD"), config_dict=redacted_config(cfg))
+    except BaseException:
+        engine.stop()
+        raise
+    engine.start()
+    mode = "synthetic market" if args.synthetic else f"{cfg.execution.mode} mode"
+    print(f"Dashboard: {server.url}  ({mode}; Ctrl-C to stop)", flush=True)
     if not args.no_browser:
         try:
             import webbrowser
@@ -229,9 +286,7 @@ def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
         pass
     finally:
         server.server_close()
-        runner.stop()
-        if feed is not None:
-            feed.stop()
+        engine.stop()
 
 
 def cmd_demo(args: argparse.Namespace, cfg: Config) -> None:
@@ -258,21 +313,27 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="memecoin-agent", description=__doc__)
     parser.add_argument("-c", "--config", default=None, help="YAML config file (defaults are used if omitted)")
     parser.add_argument("-v", "--verbose", action="store_true")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("run", help="run the trading loop")
-    p.add_argument("--max-ticks", type=int, default=None)
-    p.set_defaults(func=cmd_run)
+    def session_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--record", action="store_true",
+                       help="also record market data for backtests (same as recorder.record_while_trading)")
+        p.add_argument("--synthetic", action="store_true", help="use the offline synthetic market (no network)")
+        p.add_argument("--speed", type=float, default=20.0, help="synthetic mode: simulated seconds per real second")
+        p.add_argument("--seed", type=int, default=7)
 
-    p = sub.add_parser("ui", help="run the trading loop with a local web dashboard")
+    p = sub.add_parser("ui", help="trade with the local web dashboard (the default command)")
     p.add_argument("--host", default="127.0.0.1",
                    help="bind address (non-local addresses require MEMECOIN_UI_PASSWORD)")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument("--no-browser", action="store_true", help="don't open a browser window")
-    p.add_argument("--synthetic", action="store_true", help="drive the dashboard with the offline synthetic market")
-    p.add_argument("--speed", type=float, default=20.0, help="synthetic mode: simulated seconds per real second")
-    p.add_argument("--seed", type=int, default=7)
+    session_args(p)
     p.set_defaults(func=cmd_ui)
+
+    p = sub.add_parser("run", help="trade headless (no dashboard)")
+    p.add_argument("--max-ticks", type=int, default=None)
+    session_args(p)
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("scan", help="one-shot: discover and score tokens, no trading")
     p.add_argument("--limit", type=int, default=30)
@@ -304,9 +365,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=7)
     p.set_defaults(func=cmd_demo)
 
+    argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(argv)
+    if args.command is None:  # bare `memecoin-agent [-c cfg]` opens the dashboard
+        args = parser.parse_args([*argv, "ui"])
     cfg = load_config(args.config)
     offline = args.command in ("status", "demo", "backtest") or getattr(args, "synthetic", False)
+    if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
+        log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
+                    "recording your trading session already does")
     setup_logging(None if offline else cfg.agent.log_file, args.verbose)
     quiet = args.command in ("status", "scan", "demo", "backtest") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:

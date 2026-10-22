@@ -52,6 +52,21 @@ class RecordingWriter:
         self.records_written += len(records)
 
 
+def summarize_recordings(directory: str | Path) -> dict[str, Any] | None:
+    """Cheap overview from file names and sizes (no decompression), for the dashboard."""
+    files = sorted(Path(directory).glob(FILE_GLOB))
+    if not files:
+        return None
+    hours = [datetime.strptime(f.name[len("snapshots-"):-len(".jsonl.gz")], "%Y%m%d-%H") for f in files]
+    return {
+        "files": len(files),
+        "bytes": sum(f.stat().st_size for f in files),
+        "first_hour": hours[0].isoformat(),
+        "last_hour": hours[-1].isoformat(),
+        "hours_with_data": len(files),
+    }
+
+
 def record_time(rec: dict[str, Any]) -> datetime:
     return datetime.fromisoformat(rec["fetched_at"] if rec.get("type") == "snap" else rec["t"])
 
@@ -94,9 +109,16 @@ class Recorder:
         self.seen: dict[str, datetime] = {}  # mint -> first seen; never re-track an expired mint
         self.safety_done: set[str] = set()
         self.ticks = 0
+        self.started_at: datetime | None = None
+        self.last_tick_at: datetime | None = None
+
+    def due(self, now: datetime) -> bool:
+        return self.last_tick_at is None or (now - self.last_tick_at).total_seconds() >= self.rc.interval_s - 1e-6
 
     def tick(self) -> None:
         now = self.clock()
+        self.started_at = self.started_at or now
+        self.last_tick_at = now
         records: list[dict[str, Any]] = []
         if self.ticks % self.rc.discover_every_ticks == 0:
             try:

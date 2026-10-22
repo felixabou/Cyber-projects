@@ -126,6 +126,13 @@
     <!-- Backtest -->
     <section id="tab-backtest" class="tab-panel" role="tabpanel" hidden>
       <section class="card">
+        <div class="card-head">
+          <h2>Market data recording</h2>
+          <button id="rec-toggle" class="btn btn-small" type="button" hidden>Start recording</button>
+        </div>
+        <div id="rec-status" class="rec-status"></div>
+      </section>
+      <section class="card">
         <div class="card-head"><h2>Run a backtest</h2></div>
         <form id="bt-form" class="form" novalidate>
           <label class="field">
@@ -142,7 +149,7 @@
             <span id="bt-status" class="muted" role="status" aria-live="polite"></span>
           </div>
         </form>
-        <p class="hint">Record data first with <code>memecoin-agent record</code>. Replays use the same strategy, risk and fill code as live trading, but can't model slippage between samples, MEV or failed transactions — treat results as an upper bound.</p>
+        <p class="hint">Backtests replay data recorded by this session (above), by <code>--record</code>, or by <code>memecoin-agent record</code>. Replays use the same strategy, risk and fill code as live trading, but can't model slippage between samples, MEV or failed transactions — treat results as an upper bound.</p>
       </section>
       <div id="bt-results" hidden>
         <div id="bt-tiles" class="tiles tiles-wide"></div>

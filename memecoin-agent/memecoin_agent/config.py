@@ -134,6 +134,8 @@ class RecorderConfig:
     track_hours: float = 12.0
     max_tracked: int = 400
     record_safety: bool = True
+    # Record from inside `run`/`ui`, sharing the agent's data clients and launch-feed connection.
+    record_while_trading: bool = False
 
 
 @dataclass
