@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 ENV_KEY = "LARPCHECK_API_KEY"
 UNAVAILABLE = "larpcheck unavailable"
 PENDING = "larpcheck check running"
+REASON_KINDS = ("risk", "missing")  # LarpCheck finding kinds that explain a LARP call
 
 
 class LarpCheckError(RuntimeError):
@@ -244,8 +245,11 @@ class LarpCheckGate:
                 summary=str(report.get("summary") or report.get("eli5") or out["summary"])[:600],
                 claim=str(core.get("claim") or "")[:300] or None,
                 claim_status=core.get("status"),
-                risks=[pick(f) for f in findings if f.get("kind") == "risk"],
-                other_findings=[pick(f) for f in findings if f.get("kind") != "risk"],
+                # Why it's a LARP: what's risky and what's missing (no community, no product...).
+                # "works" / "info" findings are context, kept separately.
+                risks=[{**pick(f), "kind": f.get("kind")} for f in findings if f.get("kind") in REASON_KINDS],
+                other_findings=[{**pick(f), "kind": f.get("kind")} for f in findings
+                                if f.get("kind") not in REASON_KINDS],
                 watch=str(report.get("watch") or "")[:300] or None,
             )
         return out

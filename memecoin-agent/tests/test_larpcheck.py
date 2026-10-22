@@ -199,7 +199,9 @@ REPORT = {  # shape of a real full report (MrBeast check), trimmed
         {"kind": "risk", "title": "Impersonates a real person", "detail": "No official link mentions the coin.",
          "evidence": "https://x.com/someone"},
         {"kind": "risk", "title": "One crew holds 80%", "detail": "611 identical wallets.", "evidence": "javascript:alert(1)"},
-        {"kind": "good", "title": "LP burned", "detail": "", "evidence": None},
+        {"kind": "missing", "title": "No community outside the launch", "detail": "Only the coin's own pages.",
+         "evidence": "https://example.com/site"},
+        {"kind": "works", "title": "LP burned", "detail": "", "evidence": None},
     ],
     "watch": "A post from the person naming this contract would change the picture.",
 }
@@ -253,7 +255,9 @@ def test_likely_larp_sells_80_keeps_dust_and_parses_reasoning():
     assert "20% kept as dust" in d.reason
     r = d.larp["reasoning"]
     assert r["source"] == "full report" and r["claim_status"] == "contradicted"
-    assert [f["title"] for f in r["risks"]] == ["Impersonates a real person", "One crew holds 80%"]
+    assert [f["title"] for f in r["risks"]] == ["Impersonates a real person", "One crew holds 80%",
+                                                "No community outside the launch"]
+    assert r["risks"][2]["kind"] == "missing"
     assert r["risks"][1]["evidence"] is None  # only https evidence links are kept
     assert r["other_findings"][0]["title"] == "LP burned"
     assert r["watch"].startswith("A post from") and r["coin_line"] == "dev + 611 wallets hold 79.5%"
