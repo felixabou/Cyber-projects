@@ -344,6 +344,7 @@ function renderHeader(v) {
   if (v.synthetic) bits.push(`sim time ${timeLabel(v.now, true)} (${v.speed}× speed)`);
   if (v.feed) bits.push(v.feed.connected ? `launch feed connected · ${v.feed.buffered} tokens` : "launch feed reconnecting");
   if (v.recorder && v.recorder.active) bits.push(`recording · ${v.recorder.tracked} tokens`);
+  if (v.gmgn) bits.push(`GMGN ${[v.gmgn.discovery && "discovery", v.gmgn.safety && "safety"].filter(Boolean).join(" + ")}`);
   if (v.larpcheck) {
     bits.push(v.larpcheck.on_unchecked === "check"
       ? `LarpCheck gate · ${v.larpcheck.checks_left_today} checks left today` : "LarpCheck gate on");

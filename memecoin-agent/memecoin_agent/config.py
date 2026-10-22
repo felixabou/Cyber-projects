@@ -180,6 +180,42 @@ class LarpCheckConfig:
 
 
 @dataclass
+class GmgnConfig:
+    """GMGN OpenAPI (gmgn.ai): extra token discovery (trending) and a pre-buy safety check.
+    Read-only data endpoints only need the API key; nothing here trades."""
+
+    enabled: bool = True
+    host: str = "https://openapi.gmgn.ai"
+    # The GMGN_API_KEY environment variable wins; otherwise a GMGN_API_KEY=... line in this file
+    # (the file `gmgn-cli config --apply` writes).
+    api_key_file: str | None = "~/.config/gmgn/.env"
+
+    discovery: bool = True
+    trending_interval: str = "1h"  # 1m / 5m / 1h / 6h / 24h
+    trending_limit: int = 100
+    trending_order_by: str = "volume"
+    # Server-side tags; GMGN's SOL defaults are renounced + frozen, sent explicitly here.
+    trending_filters: list[str] = field(default_factory=lambda: ["renounced", "frozen", "not_wash_trading"])
+    discover_every_s: float = 120.0
+
+    safety: bool = True
+    max_rug_ratio: float | None = 0.3
+    reject_wash_trading: bool = True
+    max_top10_holder_rate: float | None = 0.35
+    max_dev_team_hold_rate: float | None = 0.10
+    max_creator_hold_rate: float | None = 0.10
+    max_insider_hold_rate: float | None = 0.15
+    max_bundler_rate: float | None = 0.30
+    max_rat_trader_rate: float | None = 0.30
+    max_sell_tax: float | None = 0.10
+    max_fresh_wallet_rate: float | None = None
+    max_creator_launches: int | None = None  # creator's previous launches (serial deployers)
+    min_smart_wallets: int = 0  # require this many smart-money holders (0 = off)
+    # GMGN unreachable / rate limited: false = the other checks decide, true = skip the buy.
+    fail_closed: bool = False
+
+
+@dataclass
 class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
@@ -189,6 +225,7 @@ class Config:
     feeds: FeedConfig = field(default_factory=FeedConfig)
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
+    gmgn: GmgnConfig = field(default_factory=GmgnConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -206,6 +243,8 @@ class Config:
             raise ValueError("risk.min_position_usd cannot exceed risk.max_position_usd")
         if self.agent.scan_every_ticks < 1:
             raise ValueError("agent.scan_every_ticks must be >= 1")
+        if self.gmgn.trending_interval not in ("1m", "5m", "1h", "6h", "24h"):
+            raise ValueError("gmgn.trending_interval must be 1m, 5m, 1h, 6h or 24h")
         if not 0 < self.larpcheck.exit_sell_fraction <= 1:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
@@ -226,6 +265,7 @@ _SECTIONS: dict[str, type] = {
     "feeds": FeedConfig,
     "recorder": RecorderConfig,
     "larpcheck": LarpCheckConfig,
+    "gmgn": GmgnConfig,
 }
 
 

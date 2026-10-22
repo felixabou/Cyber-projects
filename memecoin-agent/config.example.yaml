@@ -112,3 +112,30 @@ larpcheck:
   sell_on_change: true            # a LIKELY coin whose LarpCheck view changes (new check/verdict/stamp) sells too
   held_recheck_minutes: 5
   max_report_opens_per_day: 1     # opening someone else's full report costs a credit (free plan)
+
+gmgn:
+  # GMGN OpenAPI (gmgn.ai): extra discovery (trending) and a pre-buy safety check. Read-only data
+  # endpoints only; nothing here trades. Key: GMGN_API_KEY env var, or the .env file that
+  # `gmgn-cli config --apply` writes. Without a key the agent runs without GMGN.
+  enabled: true
+  api_key_file: ~/.config/gmgn/.env
+  discovery: true
+  trending_interval: 1h            # 1m / 5m / 1h / 6h / 24h
+  trending_limit: 100
+  trending_order_by: volume
+  trending_filters: [renounced, frozen, not_wash_trading]
+  discover_every_s: 120
+  safety: true                     # runs after RugCheck, before LarpCheck (no credits spent on GMGN rejects)
+  max_rug_ratio: 0.3
+  reject_wash_trading: true
+  max_top10_holder_rate: 0.35
+  max_dev_team_hold_rate: 0.10
+  max_creator_hold_rate: 0.10
+  max_insider_hold_rate: 0.15
+  max_bundler_rate: 0.30
+  max_rat_trader_rate: 0.30
+  max_sell_tax: 0.10
+  max_fresh_wallet_rate: null      # e.g. 0.5 to skip coins held mostly by brand-new wallets
+  max_creator_launches: null       # e.g. 20 to skip serial deployers
+  min_smart_wallets: 0             # e.g. 1 to require at least one smart-money holder
+  fail_closed: false               # GMGN down / rate limited: false = the other checks decide

@@ -451,6 +451,7 @@ class AgentRunner:
             "feed": feed,
             "recorder": self._recorder_view(),
             "larpcheck": self._larpcheck_view(),
+            "gmgn": self._gmgn_view(),
             "backtest_status": self.backtest.state.get("status"),
         }
 
@@ -471,6 +472,15 @@ class AgentRunner:
             "records_written": rec.writer.records_written if rec is not None else 0,
             "on_disk": on_disk,
         }
+
+    def _gmgn_view(self) -> dict[str, Any] | None:
+        from ..data.gmgn import ExtraDiscoveryMarket, GmgnSafety
+        from ..data.larpcheck import CompositeSafety
+
+        market = getattr(self.agent.market, "base", self.agent.market)  # under the launch-feed wrapper
+        discovery = isinstance(market, ExtraDiscoveryMarket)
+        safety = isinstance(self.agent.safety, CompositeSafety) and self.agent.safety.find(GmgnSafety) is not None
+        return {"discovery": discovery, "safety": safety} if (discovery or safety) else None
 
     def _larpcheck_view(self) -> dict[str, Any] | None:
         from ..data.larpcheck import CompositeSafety, LarpCheckGate

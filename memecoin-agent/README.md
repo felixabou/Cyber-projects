@@ -92,6 +92,31 @@ The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
 performance.
 
+## GMGN: discovery and safety
+
+With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only calls GMGN's read-only data endpoints; nothing here trades through GMGN.
+
+- **Discovery:** GMGN's trending Solana tokens, refreshed every 2 minutes. They're pre-filtered on GMGN's side to the agent's own liquidity, market-cap and age window, and exclude wash-traded and non-renounced tokens. They're scanned after the pump.fun graduations and before DexScreener's lists. Prices still come from DexScreener, so filters, recordings and backtests use one data source.
+- **Safety check:** runs after RugCheck and before LarpCheck, so a GMGN reject spends no LarpCheck credit. A token is skipped if any of these is true:
+
+  | GMGN data | Skipped when |
+  |---|---|
+  | rug ratio | above 30% |
+  | wash trading | detected |
+  | top 10 holders | hold more than 35% |
+  | dev team / creator | hold more than 10% |
+  | suspected insiders | hold more than 15% |
+  | bundler / insider trading volume | above 30% |
+  | sell tax | above 10% |
+
+  Optional rules, off by default: fresh-wallet share, serial deployers, and a minimum smart-money holder count. All are in the `gmgn:` section of the config.
+
+**Setup** (on the machine that runs the agent; GMGN ties each key to a key pair made there):
+1. `npx gmgn-cli config` prints a link. Open it and create the API key. Read-only access is enough.
+2. `npx gmgn-cli config --apply <your key>` saves it to `~/.config/gmgn/.env`, which the agent reads. Or set `GMGN_API_KEY`.
+
+Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
+
 ## LarpCheck gate
 
 The last check before any buy is [LarpCheck](https://larpcheck.app). It investigates a coin's story (site, X account, claims) and its holders, and gives two verdicts:
@@ -259,6 +284,8 @@ memecoin_agent/
   risk.py            sizing, exposure caps, daily loss halt, cooldowns
   portfolio.py       ledger, JSON state, CSV journal
   data/dexscreener.py, data/rugcheck.py
+  data/gmgn.py       GMGN trending discovery + safety check (read-only API)
+  data/larpcheck.py  LarpCheck pre-buy gate and held-coin reviews
   data/pumpportal.py real-time pump.fun graduation/launch websocket feed
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py

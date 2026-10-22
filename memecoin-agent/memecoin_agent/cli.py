@@ -40,9 +40,28 @@ def setup_logging(log_file: str | None, verbose: bool = False) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def build_market(cfg: Config, with_feed: bool = True):
-    """DexScreener market data, with the real-time launch feed in front of discovery if enabled."""
+def build_gmgn(cfg: Config):
+    """A GMGN client if GMGN is enabled and a key is configured, else None (with one log line)."""
+    if not (cfg.gmgn.enabled and (cfg.gmgn.discovery or cfg.gmgn.safety)):
+        return None
+    from .data.gmgn import GmgnClient, load_api_key
+
+    key = load_api_key(cfg.gmgn)
+    if not key:
+        log.info("GMGN not configured (set GMGN_API_KEY or gmgn.api_key_file); running without it")
+        return None
+    return GmgnClient(key, cfg.gmgn.host)
+
+
+def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
+    """DexScreener market data. Discovery order: pump.fun graduations (launch feed), GMGN trending,
+    then DexScreener's own lists. Prices always come from DexScreener."""
     base = DexScreenerClient(cfg.filters.quote_symbols)
+    if gmgn is not None and cfg.gmgn.discovery:
+        from .data.gmgn import ExtraDiscoveryMarket, GmgnDiscovery
+
+        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, cfg.filters, gmgn))
+        log.info("GMGN discovery on: %s trending, every %.0fs", cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None
@@ -53,34 +72,42 @@ def build_market(cfg: Config, with_feed: bool = True):
     return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd), feed
 
 
-def build_safety(cfg: Config, with_larpcheck: bool = True):
-    """RugCheck, then LarpCheck (the agent's pre-buy gate). The recorder passes with_larpcheck=False:
-    it vets hundreds of tokens, and LarpCheck verdicts are for the few the agent would actually buy."""
+def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
+    """The agent's pre-buy checks, cheapest first: RugCheck, then GMGN, then LarpCheck (which can spend
+    credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False and no
+    GMGN client: it vets hundreds of tokens, and these checks are for the few the agent would buy."""
+    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+
     f = cfg.filters
     rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
                           min_lp_locked_pct=f.min_lp_locked_pct) if f.require_rugcheck else NoSafetyCheck())
-    if not (with_larpcheck and cfg.larpcheck.enabled):
-        return rug
-    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+    checks: list = [rug]
+    if gmgn is not None and cfg.gmgn.safety:
+        from .data.gmgn import GmgnSafety
 
+        checks.append(GmgnSafety(cfg.gmgn, gmgn))
+        log.info("GMGN safety check on (rug ratio, wash trading, holder concentration, bundlers/insiders)")
+    if not (with_larpcheck and cfg.larpcheck.enabled):
+        return CompositeSafety(*checks) if len(checks) > 1 else rug
     key = load_api_key(cfg.larpcheck)
     if not key:
         if cfg.larpcheck.require_verdict:
             log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
                       "larpcheck.api_key_file): the agent will open no positions; exits still run")
-            return CompositeSafety(rug, RequireLarpCheck("no LarpCheck API key configured"))
+            return CompositeSafety(*checks, RequireLarpCheck("no LarpCheck API key configured"))
         log.warning("LarpCheck is enabled but no API key was found; continuing without it")
-        return rug
+        return CompositeSafety(*checks) if len(checks) > 1 else rug
     gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
     log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
              "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
              cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
-    return CompositeSafety(rug, gate)
+    return CompositeSafety(*checks, gate)
 
 
 def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalFeed | None]:
-    market, feed = build_market(cfg, with_feed)
-    safety = build_safety(cfg)
+    gmgn = build_gmgn(cfg)
+    market, feed = build_market(cfg, with_feed, gmgn=gmgn)
+    safety = build_safety(cfg, gmgn=gmgn)
     if cfg.execution.mode == "live":
         if os.environ.get(LIVE_CONFIRM_ENV) != "yes":
             raise SystemExit(
@@ -247,7 +274,7 @@ def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
         Recorder(cfg, market, SyntheticSafety(market), writer, clock=clock, sleep=advance).run(args.hours or 12)
         print(f"Wrote {writer.records_written:,} synthetic records to {writer.dir}")
         return
-    market, feed = build_market(cfg)
+    market, feed = build_market(cfg, gmgn=build_gmgn(cfg))
     if feed is not None:
         feed.start()
     try:
