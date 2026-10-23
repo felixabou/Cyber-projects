@@ -167,7 +167,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if rng in RANGES:
                 now = datetime.fromisoformat(runner.view["now"]) if runner.view.get("now") else None
                 since = now - RANGES[rng] if now else None
-            self._json({"range": rng, "points": runner.equity.series(since)})
+            try:  # the chart resamples on its side; candles need enough samples for real highs and lows
+                max_points = min(5000, max(50, int(q.get("points", ["600"])[0])))
+            except ValueError:
+                max_points = 600
+            self._json({"range": rng, "points": runner.equity.series(since, max_points)})
         elif path == "/api/log":
             try:
                 after = int(q.get("after", ["0"])[0])

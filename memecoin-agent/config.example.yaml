@@ -38,7 +38,7 @@ risk:
   position_size_pct: 5
   max_position_usd: 100
   min_position_usd: 10
-  max_open_positions: 5
+  max_open_positions: 20      # at 5% each, 20 positions put all the cash to work (dust doesn't count)
   max_daily_loss_pct: 15
   token_cooldown_minutes: 180
   max_entries_per_hour: 6

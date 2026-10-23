@@ -23,9 +23,11 @@ from memecoin_agent.telegram_bot import (
     TelegramClient,
     TelegramError,
     allowed_chats,
+    format_positions,
     format_trade,
     load_token,
     price,
+    split_text,
 )
 from memecoin_agent.ui.runner import AgentRunner, EquityHistory
 
@@ -262,6 +264,19 @@ def test_token_and_chat_loading(monkeypatch, tmp_path):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
     (tmp_path / "token").unlink()
     assert cli.build_telegram(full, FakeRunner(full)) is None
+
+
+def test_twenty_positions_split_across_messages_instead_of_being_cut():
+    positions = [{**POSITIONS[0], "mint": f"MINT_{i}", "symbol": f"LONGNAMEDTOKEN{i:02d}" * 2,
+                  "url": f"https://dexscreener.com/solana/{'P' * 44}{i}"} for i in range(20)]
+    text = format_positions({"positions": positions})
+    parts = split_text(text, 1500)
+    assert len(parts) > 1 and all(len(p) <= 1500 for p in parts)
+    assert "\n\n".join(parts) == text  # nothing lost, nothing cut mid-position
+    assert split_text("x" * 25, 10) == ["x" * 10, "x" * 10, "x" * 5] and split_text("") == []
+    bot = make_bot(FakeTelegram(), FakeRunner(Config()))
+    bot.send(OWNER, text + "\n\n" + "y" * 5000)
+    assert bot.outbox.qsize() >= 3
 
 
 def test_price_and_trade_formatting():
