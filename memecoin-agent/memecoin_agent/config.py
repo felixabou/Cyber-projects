@@ -61,7 +61,8 @@ class ExitConfig:
     # then exits if price falls `trailing_stop_pct` from its peak.
     trailing_activation_pct: float = 30.0
     trailing_stop_pct: float = 20.0
-    max_hold_minutes: float = 240.0
+    # Time stop: sell whatever is still held after this long (12 hours).
+    max_hold_minutes: float = 720.0
     # A sharp liquidity drop versus entry is the classic rug signature: get out at once.
     liquidity_drop_exit_pct: float = 40.0
 

@@ -30,7 +30,7 @@ exits:
     - {at_pct: 120, sell_fraction: 0.5}
   trailing_activation_pct: 30
   trailing_stop_pct: 20
-  max_hold_minutes: 240
+  max_hold_minutes: 720       # time stop: sell after 12 hours (stops and trailing stop still apply)
   liquidity_drop_exit_pct: 40
 
 risk:

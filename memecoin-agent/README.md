@@ -19,7 +19,7 @@ Each tick (10s by default):
    - **Liquidity pulled.** Liquidity falls ≥40% below its level at entry, which is the classic rug signature. Sell everything at once.
    - **Stop loss.** −25% from the effective entry price.
    - **Trailing stop.** Once the position has been +30% at its peak, exit if price falls 20% from that peak.
-   - **Time stop.** Exit after 240 minutes.
+   - **Time stop.** Exit after 12 hours (`max_hold_minutes: 720`). Losers are still cut by the stop loss and winners protected by the trailing stop; this only clears out tokens that went nowhere.
    - **Staged take-profit.** Sell 40% at +50%, then 50% of what's left at +120%. A trailing stop rides the remainder.
 2. **Scan & enter** (every 2nd tick, so every 20s):
    - Discover mints from three sources:

@@ -73,10 +73,11 @@ def test_exit_rules(snap):
     assert "trailing" in trail.reason and trail.fraction == 1.0
 
     pos.peak_price_usd = 0.0011
-    assert "time stop" in evaluate_exit(pos, make_snap(price_usd=0.0011), e, NOW + timedelta(hours=5)).reason
+    assert evaluate_exit(pos, make_snap(price_usd=0.0011), e, NOW + timedelta(hours=5)) is None  # 12h hold
+    assert "time stop" in evaluate_exit(pos, make_snap(price_usd=0.0011), e, NOW + timedelta(hours=12)).reason
     # Without market data only the time stop can fire.
     assert evaluate_exit(pos, None, e, later) is None
-    assert evaluate_exit(pos, None, e, NOW + timedelta(hours=5)).fraction == 1.0
+    assert evaluate_exit(pos, None, e, NOW + timedelta(hours=12)).fraction == 1.0
 
 
 # -- portfolio & risk -------------------------------------------------------------------
