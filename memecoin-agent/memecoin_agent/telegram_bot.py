@@ -84,6 +84,26 @@ def clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def split_text(text: str, limit: int = MAX_TEXT) -> list[str]:
+    """Telegram-sized parts of a long message, split at blank lines (between positions or trades)."""
+    parts: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        joined = f"{current}\n\n{block}" if current else block
+        if len(joined) <= limit:
+            current = joined
+            continue
+        if current:
+            parts.append(current)
+        while len(block) > limit:  # one block too long on its own: cut it
+            parts.append(block[:limit])
+            block = block[limit:]
+        current = block
+    if current:
+        parts.append(current)
+    return parts
+
+
 def one_line(s: Any) -> str:
     return " ".join(str(s or "?").split())  # untrusted names: no line breaks or padding tricks
 
@@ -327,7 +347,8 @@ class TelegramBot:
             self._warn("full", "Telegram outbox full; dropping messages")
 
     def send(self, chat: int, text: str) -> None:
-        self._queue(("text", chat, text))
+        for part in split_text(text):
+            self._queue(("text", chat, part))
 
     def broadcast(self, text: str) -> None:
         for chat in sorted(self.chats):

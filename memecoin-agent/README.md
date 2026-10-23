@@ -36,7 +36,7 @@ Each tick (10s by default):
    - **Live only:** quote the buy, then quote selling the tokens straight back. Skip the token if that round trip loses more than 12%. This catches honeypots and thin routes.
    - Size the position: 5% of equity, capped at $100.
 3. **Risk limits:**
-   - at most 5 open positions;
+   - at most 20 open positions (dust left after a LarpCheck exit doesn't count);
    - at most 6 entries per hour;
    - a 3-hour cooldown per token after an exit;
    - new entries stop for the rest of the day once realized plus unrealized losses reach 15% of the day's starting equity;
