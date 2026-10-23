@@ -7,6 +7,7 @@ const state = {
   view: null,
   tab: "overview",
   range: "24h",
+  chartMode: "line",
   equity: [],
   equityTable: false,
   scanFilter: "all",
@@ -191,92 +192,220 @@ function axisUsd(ticks) {
   return (v) => (whole ? `${v < 0 ? "−" : ""}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : usd(v, { compact: true }));
 }
 
-function lineChart(container, points, { valueFmt = (v) => usd(v), emptyText = "No data yet" } = {}) {
+// Equity chart, styled like a trading app: a readout above the plot (value, change since the start
+// of the range) and either a smooth line or candles. The line is a monotone cubic through the last
+// real sample of each time bucket, so it flows without inventing values: flat stretches stay flat
+// and the curve never overshoots a real high or low. Hovering scrubs: the readout follows the
+// pointer and the line is colored up to it, gray after.
+const RANGE_LABELS = { "1h": "past hour", "24h": "past 24 hours", "7d": "past 7 days", all: "all time" };
+const CANDLE_STEPS = [1, 5, 15, 30, 60, 120, 240, 720, 1440].map((min) => min * 60000);
+let chartSeq = 0;
+
+function smoothPath(pts) {
+  const n = pts.length;
+  const f = (v) => v.toFixed(1);
+  if (n < 3) return pts.map((p, i) => `${i ? "L" : "M"}${f(p[0])},${f(p[1])}`).join("");
+  const dx = [], sl = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = pts[i + 1][0] - pts[i][0];
+    sl[i] = dx[i] ? (pts[i + 1][1] - pts[i][1]) / dx[i] : 0;
+  }
+  // Fritsch-Carlson tangents: zero at flats and turning points, which is what keeps it monotone.
+  const tan = [sl[0]];
+  for (let i = 1; i < n - 1; i++) {
+    tan[i] = sl[i - 1] * sl[i] <= 0 ? 0
+      : (3 * (dx[i - 1] + dx[i])) / ((2 * dx[i] + dx[i - 1]) / sl[i - 1] + (dx[i] + 2 * dx[i - 1]) / sl[i]);
+  }
+  tan[n - 1] = sl[n - 2];
+  let d = `M${f(pts[0][0])},${f(pts[0][1])}`;
+  for (let i = 0; i < n - 1; i++) {
+    const k = dx[i] / 3;
+    d += `C${f(pts[i][0] + k)},${f(pts[i][1] + k * tan[i])} ${f(pts[i + 1][0] - k)},${f(pts[i + 1][1] - k * tan[i + 1])} `
+      + `${f(pts[i + 1][0])},${f(pts[i + 1][1])}`;
+  }
+  return d;
+}
+
+function resample(xs, ys, buckets) {
+  // The last real sample in each time bucket (plus the very first): exact values, few enough to flow.
+  if (xs.length <= buckets) return xs.map((x, i) => [x, ys[i]]);
+  const x0 = xs[0], span = xs[xs.length - 1] - x0 || 1;
+  const out = [[xs[0], ys[0]]];
+  let cur = -1;
+  for (let i = 1; i < xs.length; i++) {
+    const b = Math.min(buckets - 1, Math.floor(((xs[i] - x0) / span) * buckets));
+    if (b === cur) out[out.length - 1] = [xs[i], ys[i]];
+    else { out.push([xs[i], ys[i]]); cur = b; }
+  }
+  return out;
+}
+
+function toCandles(xs, ys, step) {
+  // Each candle opens at the previous close, so consecutive candles connect.
+  const out = [];
+  let c = null;
+  for (let i = 0; i < xs.length; i++) {
+    const t = Math.floor(xs[i] / step) * step;
+    if (!c || c.t !== t) {
+      if (c) out.push(c);
+      const o = c ? c.c : ys[i];
+      c = { t, o, h: Math.max(o, ys[i]), l: Math.min(o, ys[i]), c: ys[i] };
+    } else {
+      c.h = Math.max(c.h, ys[i]); c.l = Math.min(c.l, ys[i]); c.c = ys[i];
+    }
+  }
+  if (c) out.push(c);
+  return out;
+}
+
+function trendOf(d) {
+  return d > 0.005 ? "up" : d < -0.005 ? "down" : "flat";
+}
+
+function equityChart(container, points, { mode = "line", rangeLabel = "", emptyText = "No data yet" } = {}) {
   container.replaceChildren();
   if (!points || points.length < 2) {
     container.append(h("div", { class: "chart-empty", text: emptyText }));
     return;
   }
-  const W = Math.max(container.clientWidth, 280);
-  const H = W < 560 ? 200 : 260;
-  const m = { top: 12, right: 72, bottom: 26, left: 52 };
+  const uid = ++chartSeq;
   const xs = points.map((p) => new Date(p[0]).getTime());
   const ys = points.map((p) => p[1]);
-  const x0 = xs[0], x1 = xs[xs.length - 1];
-  let yMin = Math.min(...ys), yMax = Math.max(...ys);
-  const pad = (yMax - yMin) * 0.08 || Math.abs(yMax) * 0.01 || 1;
-  const ticks = niceTicks(yMin - pad, yMax + pad, 4);
-  yMin = ticks[0]; yMax = ticks[ticks.length - 1];
-  const tickFmt = axisUsd(ticks);
-  const X = (t) => m.left + ((t - x0) / Math.max(x1 - x0, 1)) * (W - m.left - m.right);
-  const Y = (v) => m.top + (1 - (v - yMin) / (yMax - yMin)) * (H - m.top - m.bottom);
+  const base = ys[0], last = ys[ys.length - 1];
+  const withDate = (xs[xs.length - 1] - xs[0]) / 36e5 > 20;
 
-  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
-    "aria-label": `Line chart, ${points.length} points, latest ${valueFmt(ys[ys.length - 1])}` });
+  const W = Math.max(container.clientWidth, 280);
+  const H = W < 560 ? 210 : 270;
+  const m = { top: 10, right: 12, bottom: 26, left: 52 };
+  const plotW = W - m.left - m.right, bottom = H - m.bottom;
+
+  const candles = mode === "candles";
+  const step = CANDLE_STEPS.find((st) => (xs[xs.length - 1] - xs[0]) / st <= 100) || CANDLE_STEPS[CANDLE_STEPS.length - 1];
+  const bars = candles ? toCandles(xs, ys, step) : null;
+  const line = candles ? null : resample(xs, ys, Math.max(30, Math.round(plotW / 12)));
+  const lows = candles ? bars.map((b) => b.l) : line.map((p) => p[1]);
+  const highs = candles ? bars.map((b) => b.h) : lows;
+  const lo = Math.min(base, ...lows), hi = Math.max(base, ...highs);
+  const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.005 || 1;
+  const ticks = niceTicks(lo - pad, hi + pad, 4);
+  const yMin = ticks[0], yMax = ticks[ticks.length - 1];
+  const tx0 = candles ? bars[0].t : xs[0];
+  const tx1 = candles ? bars[bars.length - 1].t + step : xs[xs.length - 1];
+  const X = (t) => m.left + ((t - tx0) / Math.max(tx1 - tx0, 1)) * plotW;
+  const Y = (v) => m.top + (1 - (v - yMin) / (yMax - yMin)) * (bottom - m.top);
+
+  // Readout: value, then change since the start of the range (arrow + sign, not color alone).
+  const readValue = h("div", { class: "readout-value" });
+  const readDelta = h("div", { class: "readout-delta" });
+  function setReadout(value, label) {
+    const d = value - base;
+    readValue.textContent = usd(value);
+    replace(readDelta, delta(d, `${usd(d, { sign: true })} (${pct(base ? (d / base) * 100 : 0, 2)})`),
+      h("span", { class: "muted", text: ` · ${label}` }));
+  }
+
+  const overall = trendOf(last - base);
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", class: `trend-${overall}`,
+    "aria-label": `Equity ${candles ? "candlestick" : "line"} chart, ${rangeLabel}: ${usd(base)} to ${usd(last)}` });
   for (const t of ticks) {
     svg.append(s("line", { class: "grid", x1: m.left, x2: W - m.right, y1: Y(t), y2: Y(t) }));
-    svg.append(s("text", { x: m.left - 8, y: Y(t) + 4, "text-anchor": "end", text: tickFmt(t) }));
+    svg.append(s("text", { x: m.left - 8, y: Y(t) + 4, "text-anchor": "end", text: axisUsd(ticks)(t) }));
   }
-  svg.append(s("line", { class: "baseline", x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom }));
-  const spanH = (x1 - x0) / 36e5;
-  const nX = Math.max(1, Math.min(5, Math.floor((W - m.left - m.right) / 110)));
+  const nX = Math.max(1, Math.min(5, Math.floor(plotW / 110)));
   for (let i = 0; i <= nX; i++) {
-    const t = x0 + ((x1 - x0) * i) / nX;
-    const iso = new Date(t).toISOString();
+    const t = tx0 + ((tx1 - tx0) * i) / nX;
     svg.append(s("text", { x: X(t), y: H - 8, "text-anchor": i === 0 ? "start" : i === nX ? "end" : "middle",
-      text: timeLabel(iso, spanH > 20) }));
+      text: timeLabel(new Date(t).toISOString(), withDate) }));
   }
-  const d = points.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
-  const base = Y(yMin);
-  svg.append(s("path", { class: "series-area", d: `${d}L${X(x1).toFixed(1)},${base}L${X(x0).toFixed(1)},${base}Z` }));
-  svg.append(s("path", { class: "series-line", d }));
-  const lastY = Y(ys[ys.length - 1]);
-  svg.append(s("circle", { class: "series-dot", cx: X(x1), cy: lastY, r: 4 }));
-  svg.append(s("text", { class: "end-label", x: X(x1) + 8, y: lastY + 4, text: valueFmt(ys[ys.length - 1]) }));
+  // Where the range started: above it is a gain for the period, below it a loss.
+  svg.append(s("line", { class: "ref-line", x1: m.left, x2: W - m.right, y1: Y(base), y2: Y(base) }));
 
-  // Hover layer: crosshair snaps to the nearest sample; keyboard arrows move it too.
-  const cross = s("line", { class: "crosshair", y1: m.top, y2: H - m.bottom, visibility: "hidden" });
-  const dot = s("circle", { class: "series-dot", r: 4, visibility: "hidden" });
-  const hit = s("rect", { x: m.left, y: 0, width: W - m.left - m.right, height: H, fill: "transparent" });
-  svg.append(cross, dot, hit);
-  const tip = h("div", { class: "tooltip", hidden: true });
-  container.append(svg, tip);
+  const cross = s("line", { class: "crosshair", y1: m.top, y2: bottom, visibility: "hidden" });
+  const hoverDot = s("circle", { class: "series-dot", r: 4, visibility: "hidden" });
+  let marks, show, hide;
+
+  if (!candles) {
+    const pts = line.map(([t, v]) => [X(t), Y(v)]);
+    const d = smoothPath(pts);
+    const area = `${d}L${pts[pts.length - 1][0].toFixed(1)},${bottom}L${pts[0][0].toFixed(1)},${bottom}Z`;
+    const clip = s("rect", { x: 0, y: 0, width: W, height: H });
+    svg.append(
+      s("defs", {},
+        s("linearGradient", { id: `eq-fill-${uid}`, x1: 0, y1: 0, x2: 0, y2: 1 },
+          s("stop", { offset: "0%", class: "fill-top" }), s("stop", { offset: "100%", class: "fill-bottom" })),
+        s("clipPath", { id: `eq-clip-${uid}` }, clip)),
+      s("path", { class: "series-line series-rest", d }),
+      s("g", { "clip-path": `url(#eq-clip-${uid})` },
+        s("path", { class: "series-wash", d: area, fill: `url(#eq-fill-${uid})` }),
+        s("path", { class: "series-line", d })),
+      s("circle", { class: "series-dot", cx: pts[pts.length - 1][0], cy: pts[pts.length - 1][1], r: 4 }));
+    marks = line;
+    show = (i) => {
+      const [t, v] = line[i];
+      const cx = X(t), cy = Y(v);
+      clip.setAttribute("width", cx);
+      svg.setAttribute("class", `trend-${trendOf(v - base)}`);
+      hoverDot.setAttribute("cx", cx); hoverDot.setAttribute("cy", cy); hoverDot.setAttribute("visibility", "visible");
+      setReadout(v, timeLabel(new Date(t).toISOString(), withDate));
+      return cx;
+    };
+    hide = () => { clip.setAttribute("width", W); svg.setAttribute("class", `trend-${overall}`); };
+  } else {
+    const slot = plotW / Math.max(1, (tx1 - tx0) / step);
+    const bw = Math.max(1, Math.min(12, slot - 2)); // a 2px surface gap between neighbours
+    const groups = bars.map((b) => {
+      const cx = X(b.t + step / 2);
+      const top = Y(Math.max(b.o, b.c)), height = Math.max(1, Math.abs(Y(b.o) - Y(b.c)));
+      return s("g", { class: `candle candle-${trendOf(b.c - b.o)}` },
+        s("line", { class: "candle-wick", x1: cx, x2: cx, y1: Y(b.h), y2: Y(b.l) }),
+        s("rect", { class: "candle-body", x: cx - bw / 2, y: top, width: bw, height, rx: Math.min(1.5, bw / 4) }));
+    });
+    svg.append(...groups);
+    marks = bars.map((b) => [b.t + step / 2, b.c]);
+    let lit = null;
+    show = (i) => {
+      const b = bars[i];
+      if (lit) lit.classList.remove("hover");
+      lit = groups[i]; lit.classList.add("hover");
+      const range = `${timeLabel(new Date(b.t).toISOString(), withDate)}–${timeLabel(new Date(b.t + step).toISOString())}`;
+      setReadout(b.c, `${range} · O ${usd(b.o)} H ${usd(b.h)} L ${usd(b.l)}`);
+      return X(b.t + step / 2);
+    };
+    hide = () => { if (lit) lit.classList.remove("hover"); lit = null; };
+  }
+
+  // Hover / keyboard layer: the crosshair snaps to the nearest point or candle.
+  const hit = s("rect", { x: m.left, y: 0, width: plotW, height: H, fill: "transparent" });
+  svg.append(cross, hoverDot, hit);
+  const readout = h("div", { class: "chart-readout" }, readValue, readDelta);
+  container.append(readout, svg);
   container.tabIndex = 0;
-  let idx = points.length - 1;
-
-  function show(i) {
-    idx = Math.max(0, Math.min(points.length - 1, i));
-    const cx = X(xs[idx]), cy = Y(ys[idx]);
-    for (const el of [cross]) { el.setAttribute("x1", cx); el.setAttribute("x2", cx); el.setAttribute("visibility", "visible"); }
-    dot.setAttribute("cx", cx); dot.setAttribute("cy", cy); dot.setAttribute("visibility", "visible");
-    replace(tip,
-      h("div", { class: "tooltip-value" }, h("span", { class: "tooltip-key" }), valueFmt(ys[idx])),
-      h("div", { class: "tooltip-label", text: timeLabel(points[idx][0], true) }));
-    tip.hidden = false;
-    const scale = container.clientWidth / W;
-    const left = cx * scale;
-    tip.style.left = `${Math.min(Math.max(left - tip.offsetWidth / 2, 0), container.clientWidth - tip.offsetWidth)}px`;
-    tip.style.top = `${Math.max(cy * scale - tip.offsetHeight - 12, 0)}px`;
+  setReadout(last, rangeLabel);
+  let idx = marks.length - 1;
+  function focusOn(i) {
+    idx = Math.max(0, Math.min(marks.length - 1, i));
+    const cx = show(idx);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
   }
-  function hide() {
-    cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); tip.hidden = true;
+  function release() {
+    hide();
+    cross.setAttribute("visibility", "hidden"); hoverDot.setAttribute("visibility", "hidden");
+    setReadout(last, rangeLabel);
   }
   function nearest(clientX) {
     const r = svg.getBoundingClientRect();
-    const t = x0 + ((((clientX - r.left) * W) / r.width - m.left) / (W - m.left - m.right)) * (x1 - x0);
-    let lo = 0, hi = xs.length - 1;
-    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid] < t) lo = mid; else hi = mid; }
-    return t - xs[lo] < xs[hi] - t ? lo : hi;
+    const t = tx0 + ((((clientX - r.left) * W) / r.width - m.left) / plotW) * (tx1 - tx0);
+    let a = 0, z = marks.length - 1;
+    while (z - a > 1) { const mid = (a + z) >> 1; if (marks[mid][0] < t) a = mid; else z = mid; }
+    return t - marks[a][0] < marks[z][0] - t ? a : z;
   }
-  hit.addEventListener("pointermove", (e) => show(nearest(e.clientX)));
-  hit.addEventListener("pointerleave", hide);
-  container.onfocus = () => show(idx);
-  container.onblur = hide;
+  hit.addEventListener("pointermove", (e) => focusOn(nearest(e.clientX)));
+  hit.addEventListener("pointerleave", release);
+  container.onfocus = () => focusOn(idx);
+  container.onblur = release;
   container.onkeydown = (e) => {
-    if (e.key === "ArrowLeft") { show(idx - 1); e.preventDefault(); }
-    else if (e.key === "ArrowRight") { show(idx + 1); e.preventDefault(); }
-    else if (e.key === "Home") { show(0); e.preventDefault(); }
-    else if (e.key === "End") { show(points.length - 1); e.preventDefault(); }
+    const keys = { ArrowLeft: idx - 1, ArrowRight: idx + 1, Home: 0, End: marks.length - 1 };
+    if (e.key in keys) { focusOn(keys[e.key]); e.preventDefault(); }
   };
 }
 
@@ -632,7 +761,7 @@ function renderBacktest() {
     tile("Profit factor", st.profit_factor === null ? "∞" : num(st.profit_factor), "gross wins ÷ gross losses"),
     tile("Fees", usd(st.fees_usd), `realized ${usd(st.realized_pnl_usd, { sign: true })}`));
   $("#bt-period").textContent = `${timeLabel(b.start, true)} → ${timeLabel(b.end, true)} · ${st.period_hours.toFixed(1)}h`;
-  lineChart($("#bt-chart"), b.equity, { emptyText: "Not enough data" });
+  equityChart($("#bt-chart"), b.equity, { rangeLabel: "over the backtest", emptyText: "Not enough data" });
   const exits = Object.entries(st.exit_reasons).map(([label, value]) => ({
     label, value, detail: `${label}: ${value} of ${st.round_trips} round trips` }));
   barChart($("#bt-exits"), exits);
@@ -659,26 +788,33 @@ async function loadSettings() {
       $("#bt-dir").value = (state.view && state.view.recorder && state.view.recorder.dir)
         || (cfg.recorder && cfg.recorder.dir) || "recordings";
     }
-    const fmt = (v) => (Array.isArray(v) ? (v.length ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join(", ") : "[]")
-      : v === null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v));
+    const obj = (o) => Object.entries(o).map(([k, v]) => `${k}: ${v}`).join(", ");
+    const fmt = (v) => (Array.isArray(v) ? (v.length ? v.map((x) => (x && typeof x === "object" ? obj(x) : x))
+      .join(v.some((x) => x && typeof x === "object") ? "\n" : ", ") : "none")
+      : v === null ? "—" : typeof v === "object" ? obj(v) : String(v));
+    const row = ([k, v]) => {
+      const text = fmt(v);
+      return [h("dt", { text: k }), h("dd", { class: text.length > 14 || text.includes("\n") ? "wide" : null, text })];
+    };
     replace($("#settings"), Object.entries(cfg).filter(([, sec]) => sec && typeof sec === "object").map(([name, sec]) =>
       h("section", { class: "card" },
         h("div", { class: "card-head" }, h("h2", { text: name })),
-        h("dl", {}, Object.entries(sec).flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: fmt(v) })])))));
+        h("dl", {}, Object.entries(sec).flatMap(row)))));
   } catch (e) { toast(`Could not load settings: ${e.message}`, true); }
 }
 
 // ---------------------------------------------------------------- equity
 async function pollEquity() {
   try {
-    const { points } = await api(`/api/equity?range=${state.range}`);
+    const { points } = await api(`/api/equity?range=${state.range}&points=2000`);
     state.equity = points;
     if (state.tab === "overview") renderEquity();
   } catch { /* ignore */ }
 }
 
 function renderEquity() {
-  lineChart($("#equity-chart"), state.equity, { emptyText: "Collecting equity samples…" });
+  equityChart($("#equity-chart"), state.equity, { mode: state.chartMode, rangeLabel: RANGE_LABELS[state.range] || "",
+    emptyText: "Collecting equity samples…" });
   const tableEl = $("#equity-table");
   tableEl.hidden = !state.equityTable;
   if (state.equityTable) {
@@ -795,6 +931,10 @@ function init() {
   document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => selectTab(t.dataset.tab)));
   document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => selectTab(b.dataset.goto)));
   segmented("#range-select", "range", (r) => { state.range = r; pollEquity(); });
+  state.chartMode = store("chartMode") === "candles" ? "candles" : "line";
+  document.querySelectorAll("#chart-mode button").forEach((b) =>
+    b.setAttribute("aria-pressed", b.dataset.mode === state.chartMode ? "true" : "false"));
+  segmented("#chart-mode", "mode", (mode) => { state.chartMode = mode; store("chartMode", mode); renderEquity(); });
   segmented("#scan-filter", "filter", (f) => { state.scanFilter = f; render(); });
   segmented("#log-filter", "filter", (f) => { state.logFilter = f; renderLog(); });
   $("#scan-search").addEventListener("input", (e) => { state.scanSearch = e.target.value; render(); });
