@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from .config import ExitConfig, FilterConfig
+from .config import ExitConfig, FilterConfig, LaunchConfig
 from .models import Position, TokenSnapshot
 
 
@@ -25,6 +25,7 @@ class EntryEvaluation:
     passed: bool
     score: float
     reasons: list[str]
+    lane: str = "momentum"  # or "launch": passed on launch volume (see launch_reasons)
 
 
 @dataclass
@@ -89,6 +90,29 @@ def evaluate_entry(s: TokenSnapshot, f: FilterConfig, now: datetime) -> EntryEva
     score = momentum_score(s)
     need(score >= f.min_score, f"score {score:.2f} < {f.min_score:.2f}")
     return EntryEvaluation(snapshot=s, passed=not reasons, score=score, reasons=reasons)
+
+
+def launch_reasons(s: TokenSnapshot, lc: LaunchConfig, f: FilterConfig, now: datetime,
+                   qualified: bool = False) -> list[str]:
+    """Why a token doesn't make the launch lane (empty: it does). A launch qualifies by trading
+    lc.min_volume_usd while its pool is at most lc.max_age_minutes old. A token that already
+    qualified (`qualified`) stays in the lane during its buy window while it isn't crashing."""
+    if not qualified:
+        age = s.age_minutes(now)
+        if age is None or age > lc.max_age_minutes:
+            return ["not a fresh launch"]
+        if s.volume_h1 < lc.min_volume_usd:  # a pool under an hour old: h1 volume is all of it
+            return [f"launch volume ${s.volume_h1:,.0f} < ${lc.min_volume_usd:,.0f}"]
+    reasons: list[str] = []
+    if s.mint in f.blacklist:
+        reasons.append("blacklisted")
+    if s.quote_symbol.upper() not in {q.upper() for q in f.quote_symbols}:
+        reasons.append(f"quote {s.quote_symbol} not allowed")
+    if s.liquidity_usd < lc.min_liquidity_usd:
+        reasons.append(f"liquidity ${s.liquidity_usd:,.0f} < ${lc.min_liquidity_usd:,.0f}")
+    if lc.min_price_change_m5 is not None and s.price_change_m5 < lc.min_price_change_m5:
+        reasons.append(f"crashing: {s.price_change_m5:+.0f}% in 5m")
+    return reasons
 
 
 def evaluate_exit(pos: Position, s: TokenSnapshot | None, e: ExitConfig, now: datetime) -> ExitDecision | None:

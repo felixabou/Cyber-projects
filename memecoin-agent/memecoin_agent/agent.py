@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -14,7 +14,7 @@ from .execution import Executor
 from .models import TokenSnapshot, TradeRecord, utcnow
 from .portfolio import Portfolio
 from .risk import RiskManager
-from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit
+from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit, launch_reasons
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class Agent:
         clock: Callable[[], datetime] = utcnow,
         persist: bool = True,
         guard: object | None = None,
+        launch_scan: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -41,6 +42,10 @@ class Agent:
         self.persist = persist
         # Optional held-position reviewer (LarpCheckGate.review_position): exits on outside verdicts.
         self.guard = guard
+        # Launch lane (strategy.launch_reasons): data.wallets.WalletScanner clears each candidate first.
+        self.launch_scan = launch_scan
+        self.launch_qualified: dict[str, datetime] = {}  # mint -> when it first qualified
+        self._launch_skips: dict[str, str] = {}  # mint -> last rejection logged
         self.ticks = 0
         # State surfaced by the dashboard (memecoin_agent/ui).
         self.entries_paused = False
@@ -167,8 +172,48 @@ class Agent:
         mints = [m for m in dict.fromkeys([*f.watchlist, *discovered])
                  if m not in f.blacklist and not self.risk.token_blocked(self.pf, m, now)]
         mints = mints[: self.cfg.agent.max_candidates_per_scan]
-        evals = [evaluate_entry(s, f, now) for s in self._fetch(mints).values()]
-        return sorted(evals, key=lambda e: (e.passed, e.score), reverse=True)
+        evals = []
+        for s in self._fetch(mints).values():
+            ev = evaluate_entry(s, f, now)
+            if not ev.passed and self.cfg.launch.enabled:
+                ev = self._launch_lane(ev, now) or ev
+            evals.append(ev)
+        window = timedelta(minutes=self.cfg.launch.buy_window_minutes)
+        self.launch_qualified = {m: t for m, t in self.launch_qualified.items() if now - t <= window}
+        self._launch_skips = {m: r for m, r in self._launch_skips.items() if m in self.launch_qualified}
+        return sorted(evals, key=lambda e: (e.passed, e.lane == "launch", e.score), reverse=True)
+
+    def _launch_lane(self, ev: EntryEvaluation, now: datetime) -> EntryEvaluation | None:
+        s, lc = ev.snapshot, self.cfg.launch
+        since = self.launch_qualified.get(s.mint)
+        if since is not None and now - since > timedelta(minutes=lc.buy_window_minutes):
+            since = None  # its buy window has passed; it would have to qualify afresh
+        if launch_reasons(s, lc, self.cfg.filters, now, qualified=since is not None):
+            return None
+        if since is None:
+            self.launch_qualified[s.mint] = now
+            log.info("Launch lane: %s traded $%.0f in its first %.0fm (liq $%.0f) | %s", s.symbol, s.volume_h1,
+                     s.age_minutes(now) or 0, s.liquidity_usd, s.url)
+        return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="launch")
+
+    def _launch_check(self, snap: TokenSnapshot) -> tuple[bool, str]:
+        """(ok, note): the wallet scan for a launch-lane buy. The note is the trade journal reason,
+        or why not to buy (yet)."""
+        from .data.wallets import SCANNING
+
+        if self.launch_scan is None:
+            return False, "skipped: the launch lane needs the live wallet scan"
+        rep = self.launch_scan.check(snap.mint, self.launch_qualified.get(snap.mint))
+        if not rep.ok:
+            if rep.reasons == [SCANNING]:
+                return False, f"waiting: {SCANNING}"
+            why = "; ".join(rep.reasons)
+            if self._launch_skips.get(snap.mint) != why:  # once per verdict, not every scan of its window
+                self._launch_skips[snap.mint] = why
+                log.info("Skip %s (launch lane): %s", snap.symbol, why)
+            return False, "unsafe: " + why
+        res = self.launch_scan.result(snap.mint)
+        return True, f"launch lane: ${snap.volume_h1:,.0f} volume; {res.summary() if res else 'wallet scan passed'}"
 
     def _entry_block_reason(self, now: datetime) -> str | None:
         if self.entries_paused:
@@ -202,6 +247,12 @@ class Agent:
             if block := self._entry_block_reason(now):
                 self._set_entry_block(block)
                 break
+            note = None
+            if ev.lane == "launch":  # wallet scan first: free, and it spares a LarpCheck credit on bundles
+                ok, note = self._launch_check(snap)
+                if not ok:
+                    outcomes[snap.mint] = note
+                    continue
             report = self.safety.check(snap.mint)
             if not report.ok:
                 outcomes[snap.mint] = "unsafe: " + "; ".join(report.reasons)
@@ -221,11 +272,11 @@ class Agent:
                 outcomes[snap.mint] = f"buy failed: {exc}"
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
-            self.pf.open(snap, fill, now, ev.score)
+            self.pf.open(snap, fill, now, ev.score, reason=note)
             outcomes[snap.mint] = "bought"
-            log.info("BUY %s $%.2f @ %.10g | score %.2f liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
-                     snap.symbol, size, fill.price_usd, ev.score, snap.liquidity_usd, snap.market_cap_usd,
-                     snap.price_change_h1, snap.url)
+            log.info("BUY %s $%.2f @ %.10g | %s liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
+                     snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,
+                     snap.market_cap_usd, snap.price_change_h1, snap.url)
         self._record_scan(now, evals, outcomes)
 
     def _record_scan(self, now: datetime, evals: list[EntryEvaluation], outcomes: dict[str, str]) -> None:
@@ -233,7 +284,8 @@ class Agent:
         self.last_scan = [
             {
                 "mint": e.snapshot.mint, "symbol": e.snapshot.symbol, "url": e.snapshot.url,
-                "score": e.score, "passed": e.passed, "reasons": e.reasons,
+                "score": e.score, "passed": e.passed, "reasons": e.reasons, "lane": e.lane,
+                "volume_h1": e.snapshot.volume_h1,
                 "outcome": outcomes.get(e.snapshot.mint, ""),
                 "liquidity_usd": e.snapshot.liquidity_usd, "market_cap_usd": e.snapshot.market_cap_usd,
                 "price_change_m5": e.snapshot.price_change_m5, "price_change_h1": e.snapshot.price_change_h1,

@@ -117,6 +117,52 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
 
 Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
 
+## Launch lane
+
+A second way in, next to the momentum filters: a token whose pool trades **$400k or more within
+its first 30 minutes** is bought, skipping the momentum filters (minimum age, the "too extended"
+cap and so on), once a **wallet scan** clears it. The usual RugCheck, GMGN and LarpCheck checks
+still run after the scan, so no coin is ever bought without a LarpCheck verdict.
+
+**The wallet scan** uses two free sources, no API keys:
+
+1. **The blockchain** (your `execution.rpc_url`). The agent walks the token's transactions back to
+   its very first block. That gives the real launch time (for a pump.fun coin, its creation, not its
+   later move to PumpSwap) and every wallet that bought in that block: the creator's own buy plus
+   anything bundled with it, including bundles that pack several wallets into one transaction.
+   It then checks what those wallets still hold.
+2. **RugCheck's full report:** clusters of wallets linked by transfers (its "insider networks"),
+   holders it flags as insiders, the creator's balance, rug flags, and the top holders with pools
+   and lockers labelled.
+
+The launch is skipped if any of these is true:
+
+| Check | Default limit |
+|---|---|
+| Launched more than 30 minutes before it reached $400k (true launch time, from the chain) | 30 min |
+| Wallets that bought in the launch block took, or still hold, more than this share of supply | 30% |
+| Linked or insider wallets hold more than | 30% |
+| Top 10 holders, pools and lockers left out, hold more than | 35% |
+| The creator still holds more than | 10% |
+| RugCheck marks it rugged, or the creator has a history of rugged tokens | any |
+| Falling more than 20% in the last 5 minutes | −20% |
+
+A bundle that already sold still counts: on a launch where bundles took most of the supply and then
+sold, the early "volume" was mostly them selling to later buyers. With GMGN configured, its
+bundler, insider and sniper checks apply on top.
+
+A scan takes 10–60 seconds on the free public Solana RPC, so it runs in the background and never
+delays an exit. Meanwhile the Scanner tab shows "Waiting: wallet scan running" next to a **Launch**
+tag. A qualified launch stays buyable for 15 minutes while its scan and LarpCheck finish. Each buy
+records the scan in the trade journal and the Telegram alert, e.g. *launch lane: $437,737 volume;
+bundles hold 0.0% (6.6% bought in the launch block by 1 wallet), linked wallets 0.0%, top 10 2.8%,
+creator 0.0%*.
+
+All of it is under `launch:` in [`config.example.yaml`](config.example.yaml); `enabled: false` turns
+it off. A paid RPC (Helius, QuickNode…) in `execution.rpc_url` makes scans faster. Solscan's API needs
+a paid key, so the scan doesn't use it. Backtests don't take launch-lane trades, because the wallet
+scan needs live chain data.
+
 ## LarpCheck gate
 
 The last check before any buy is [LarpCheck](https://larpcheck.app). It investigates a coin's story (site, X account, claims) and its holders, and gives two verdicts:
@@ -383,6 +429,7 @@ memecoin_agent/
   data/dexscreener.py, data/rugcheck.py
   data/gmgn.py       GMGN trending discovery + safety check (read-only API)
   data/larpcheck.py  LarpCheck pre-buy gate and held-coin reviews
+  data/wallets.py    launch-lane wallet scan: launch-block bundles (on-chain) + RugCheck holder report
   data/pumpportal.py real-time pump.fun graduation/launch websocket feed
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py

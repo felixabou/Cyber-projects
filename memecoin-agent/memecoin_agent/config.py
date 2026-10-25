@@ -217,6 +217,29 @@ class GmgnConfig:
 
 
 @dataclass
+class LaunchConfig:
+    """Launch lane: a token that trades $400k+ within its first 30 minutes is bought without the
+    momentum filters, once a wallet scan clears it. RugCheck, GMGN and LarpCheck still apply."""
+
+    enabled: bool = True
+    max_age_minutes: float = 30.0
+    min_volume_usd: float = 400_000.0
+    min_liquidity_usd: float = 15_000.0
+    # Skip a launch that is crashing right now (5-minute price change below this); null = off.
+    min_price_change_m5: float | None = -20.0
+    # A launch that qualified stays buyable this long while its wallet scan and LarpCheck finish.
+    buy_window_minutes: float = 15.0
+    # Wallet scan: the chain (execution.rpc_url) back to the launch block, plus RugCheck's holder report.
+    # % of supply the wallets that bought in the launch block (bundles, plus the creator's own buy) took
+    # then, or still hold now: the higher of the two must stay at or under this.
+    max_bundle_pct: float = 30.0
+    max_cluster_pct: float = 30.0  # % held by linked wallets (RugCheck insider networks / insider holders)
+    max_creator_pct: float = 10.0
+    max_top10_pct: float = 35.0  # top 10 holders, pools and lockers left out
+    max_signature_pages: int = 150  # 1,000 transactions a page when walking back to the launch
+
+
+@dataclass
 class ExportConfig:
     """Trade CSVs saved on a schedule for downloading later: one file per period (UTC clock hours by
     default) that had trades, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv."""
@@ -253,6 +276,7 @@ class Config:
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
+    launch: LaunchConfig = field(default_factory=LaunchConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
@@ -283,6 +307,10 @@ class Config:
                              "(use 'check' or 'reject', or set require_verdict: false)")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
+        if self.launch.max_age_minutes <= 0 or self.launch.buy_window_minutes < 0:
+            raise ValueError("launch.max_age_minutes must be > 0 and launch.buy_window_minutes >= 0")
+        if self.launch.max_signature_pages < 1:
+            raise ValueError("launch.max_signature_pages must be >= 1")
         if not 0 < self.export.every_minutes <= 1440 or 1440 % self.export.every_minutes:
             raise ValueError("export.every_minutes must divide a day evenly (e.g. 15, 30, 60, 120, 1440)")
 
@@ -297,6 +325,7 @@ _SECTIONS: dict[str, type] = {
     "recorder": RecorderConfig,
     "larpcheck": LarpCheckConfig,
     "gmgn": GmgnConfig,
+    "launch": LaunchConfig,
     "export": ExportConfig,
     "telegram": TelegramConfig,
 }

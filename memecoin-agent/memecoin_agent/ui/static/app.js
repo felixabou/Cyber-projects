@@ -656,6 +656,7 @@ function verdict(c) {
   let evidence = null;
   if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
   else if (c.outcome === "unsafe: larpcheck check running") { cls = "v-pass"; icon = "…"; text = "Waiting for LarpCheck verdict"; }
+  else if (c.outcome.startsWith("waiting: ")) { cls = "v-pass"; icon = "…"; text = "Waiting: " + c.outcome.slice(9); }
   else if (/^unsafe: larpcheck( unavailable|:| required:)/.test(c.outcome)) {
     // No verdict to go on: never bought (require_verdict).
     icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck( required)?:? ?/, "");
@@ -671,8 +672,10 @@ function verdict(c) {
     text = c.reasons.slice(0, 2).join(" · ");
     if (c.reasons.length > 2) text += ` · +${c.reasons.length - 2} more`;
   }
+  const launch = c.lane === "launch"
+    ? h("span", { class: "pill", title: `Launch lane: ${usd(c.volume_h1, { compact: true })} traded in its first minutes`, text: "Launch" }) : null;
   return h("span", { class: `verdict ${cls}`, title: c.reasons.join("\n") || null },
-    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), h("span", { text }),
+    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), launch, h("span", { text }),
     evidence ? h("a", { href: evidence, target: "_blank", rel: "noopener noreferrer", class: "pill", text: "evidence" }) : null);
 }
 
