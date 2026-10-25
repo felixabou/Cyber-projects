@@ -88,7 +88,7 @@ class Portfolio:
         pos.last_liquidity_usd = snap.liquidity_usd
         pos.peak_price_usd = max(pos.peak_price_usd, snap.price_usd)
 
-    def open(self, snap: TokenSnapshot, fill: Fill, now: datetime, score: float) -> Position:
+    def open(self, snap: TokenSnapshot, fill: Fill, now: datetime, score: float, reason: str | None = None) -> Position:
         if snap.mint in self.positions:
             raise ValueError(f"Already holding {snap.symbol}")
         pos = Position(
@@ -111,7 +111,7 @@ class Portfolio:
         self.entry_times.append(now.isoformat())
         self.trades.append(
             TradeRecord(now, "buy", snap.mint, snap.symbol, fill.token_amount, fill.usd_value,
-                        fill.price_usd, fill.fee_usd, f"entry score {score:.2f}", 0.0, fill.signature)
+                        fill.price_usd, fill.fee_usd, reason or f"entry score {score:.2f}", 0.0, fill.signature)
         )
         return pos
 

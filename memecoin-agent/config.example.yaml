@@ -140,6 +140,22 @@ gmgn:
   min_smart_wallets: 0             # e.g. 1 to require at least one smart-money holder
   fail_closed: false               # GMGN down / rate limited: false = the other checks decide
 
+launch:
+  # Launch lane: a token whose pool traded $400k+ within its first 30 minutes is bought without the
+  # momentum filters above, once a wallet scan clears it. RugCheck, GMGN and LarpCheck still apply.
+  enabled: true
+  max_age_minutes: 30
+  min_volume_usd: 400000
+  min_liquidity_usd: 15000
+  min_price_change_m5: -20         # skip a launch that is crashing right now; null = off
+  buy_window_minutes: 15           # a qualified launch stays buyable this long while its checks finish
+  # Wallet scan: the chain (execution.rpc_url) back to the launch block, plus RugCheck's holder report.
+  max_bundle_pct: 30               # bought in the launch block (bundles + creator's buy), or still held by those wallets
+  max_cluster_pct: 30              # linked wallets (RugCheck insider networks and insider-flagged holders)
+  max_creator_pct: 10
+  max_top10_pct: 35                # top 10 holders, pools and lockers left out
+  max_signature_pages: 150         # 1,000 transactions a page when walking back to the launch block
+
 export:
   # Trade CSVs for downloading later: each finished period (UTC clock hour) that had trades gets its
   # own file, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv. state/trades.csv stays the full history.

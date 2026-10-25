@@ -59,9 +59,15 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
     then DexScreener's own lists. Prices always come from DexScreener."""
     base = DexScreenerClient(cfg.filters.quote_symbols)
     if gmgn is not None and cfg.gmgn.discovery:
+        from dataclasses import replace
+
         from .data.gmgn import ExtraDiscoveryMarket, GmgnDiscovery
 
-        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, cfg.filters, gmgn))
+        window = cfg.filters
+        if cfg.launch.enabled:  # trending launches younger than the momentum lane's minimum age too
+            window = replace(window, min_age_minutes=1,
+                             min_liquidity_usd=min(window.min_liquidity_usd, cfg.launch.min_liquidity_usd))
+        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, window, gmgn))
         log.info("GMGN discovery on: %s trending, every %.0fs", cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
@@ -127,7 +133,17 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
 
     # The LarpCheck gate also reviews held coins and exits when it flags them.
     guard = safety.find(LarpCheckGate) if isinstance(safety, CompositeSafety) else None
-    return Agent(cfg, market, safety, executor, pf, guard=guard), feed
+    launch_scan = None
+    if cfg.launch.enabled:
+        from .data.wallets import WalletScanner
+
+        launch_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
+        lc = cfg.launch
+        log.info("Launch lane on: $%.0fK+ volume within %.0fm of launch, then a wallet scan (bundles <= %.0f%%, "
+                 "linked wallets <= %.0f%%, top 10 <= %.0f%%, creator <= %.0f%%) before the usual checks",
+                 lc.min_volume_usd / 1000, lc.max_age_minutes, lc.max_bundle_pct, lc.max_cluster_pct,
+                 lc.max_top10_pct, lc.max_creator_pct)
+    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan), feed
 
 
 def build_telegram(cfg: Config, runner):
