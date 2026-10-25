@@ -31,6 +31,7 @@ class Agent:
         persist: bool = True,
         guard: object | None = None,
         launch_scan: object | None = None,
+        analytics: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -44,6 +45,8 @@ class Agent:
         self.guard = guard
         # Launch lane (strategy.launch_reasons): data.wallets.WalletScanner clears each candidate first.
         self.launch_scan = launch_scan
+        # analytics.Analytics: per-buy details and after-sale tracking (state/entries.csv, after_exit.csv).
+        self.analytics = analytics
         self.launch_qualified: dict[str, datetime] = {}  # mint -> when it first qualified
         self._launch_skips: dict[str, str] = {}  # mint -> last rejection logged
         self.ticks = 0
@@ -67,6 +70,11 @@ class Agent:
             self.risk.start_day(self.pf, now)
             self.risk.prune(self.pf, now)
             self.manage_positions(now)
+            if self.analytics is not None:
+                try:
+                    self.analytics.update(now, self._fetch)
+                except Exception as exc:
+                    log.warning("After-sale tracking failed: %s", exc)
             if self.ticks % self.cfg.agent.scan_every_ticks == 0:
                 self.scan_and_enter(now)
         finally:
@@ -139,6 +147,8 @@ class Agent:
                                   cooldown_until=self.risk.cooldown_until(now))
         log.info("SELL %s %.0f%% -> $%.2f | %s | realized %+.2f | equity $%.2f",
                  pos.symbol, decision.fraction * 100, fill.usd_value, decision.reason, realized, self.pf.equity_usd())
+        if mint not in self.pf.positions and self.analytics is not None:
+            self.analytics.watch(mint, pos.symbol, fill.price_usd, now, decision.reason)
         if mint in self.pf.positions:
             if decision.larp is not None:
                 self.pf.positions[mint].larp = decision.larp
@@ -273,6 +283,9 @@ class Agent:
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
             self.pf.open(snap, fill, now, ev.score, reason=note)
+            if self.analytics is not None:
+                verdicts = getattr(self.guard, "last_verdicts", {}) or {}
+                self.analytics.log_entry(snap, ev.lane, ev.score, size, fill.price_usd, now, verdicts.get(snap.mint))
             outcomes[snap.mint] = "bought"
             log.info("BUY %s $%.2f @ %.10g | %s liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
                      snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,

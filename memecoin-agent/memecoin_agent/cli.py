@@ -1,6 +1,6 @@
 """memecoin-agent: run `memecoin-agent` (or `memecoin-agent ui`) to trade with the dashboard.
 
-Commands: ui, run, scan, status, close-all, record, backtest, demo.
+Commands: ui, run, scan, status, report, close-all, record, backtest, demo.
 """
 
 from __future__ import annotations
@@ -143,7 +143,10 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
                  "linked wallets <= %.0f%%, top 10 <= %.0f%%, creator <= %.0f%%) before the usual checks",
                  lc.min_volume_usd / 1000, lc.max_age_minutes, lc.max_bundle_pct, lc.max_cluster_pct,
                  lc.max_top10_pct, lc.max_creator_pct)
-    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan), feed
+    from .analytics import Analytics
+
+    analytics = Analytics(Path(cfg.agent.state_file).parent)
+    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics), feed
 
 
 def build_telegram(cfg: Config, runner):
@@ -279,6 +282,13 @@ def print_status(pf: Portfolio, starting: float) -> None:
         peak = (p.peak_price_usd / p.entry_price_usd - 1) * 100
         print(f"{p.symbol[:12]:<12} {p.cost_basis_usd:>9.2f} {p.market_value_usd():>9.2f} "
               f"{p.pnl_pct():>+7.1f} {peak:>+7.1f}  {p.opened_at:%Y-%m-%d %H:%M}")
+
+
+def cmd_report(args: argparse.Namespace, cfg: Config) -> None:
+    from .analytics import build_report
+
+    state = Path(cfg.agent.state_file).parent
+    print(build_report(args.trades or cfg.agent.trades_csv, state / "entries.csv", state / "after_exit.csv"))
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
@@ -456,6 +466,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--safety", action="store_true", help="also run RugCheck on tokens that pass filters")
     p.set_defaults(func=cmd_scan)
 
+    p = sub.add_parser("report", help="win rate and profit by exit reason, lane, liquidity, age... from the trade files")
+    p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. the hourly exports (default: agent.trades_csv)")
+    p.set_defaults(func=cmd_report)
+
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)
     sub.add_parser("close-all", help="sell every open position now").set_defaults(func=cmd_close_all)
 
@@ -484,7 +498,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
-    offline = args.command in ("status", "demo", "backtest") or getattr(args, "synthetic", False)
+    offline = args.command in ("status", "demo", "backtest", "report") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
@@ -492,7 +506,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in ("run", "ui"):
         # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
         signal.signal(signal.SIGTERM, _raise_interrupt)
-    quiet = args.command in ("status", "scan", "demo", "backtest") or (args.command == "record" and args.synthetic)
+    quiet = args.command in ("status", "scan", "demo", "backtest", "report") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)
