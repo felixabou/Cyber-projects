@@ -199,6 +199,20 @@ Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`
 
 The recorder keeps to RugCheck, so backtests don't replay LarpCheck verdicts yet.
 
+## Learning from your trades
+
+Besides `state/trades.csv`, the agent now writes two files that turn trades into lessons:
+
+- `state/entries.csv`: one row per buy with the token's numbers at that moment: lane (momentum or launch), score, liquidity, market cap, age, volume, buy/sell ratios, 1h and 5m change, LarpCheck verdict and coin stamp.
+- `state/after_exit.csv`: after a position is fully sold, the coin is watched for 12 hours. Its highest and lowest price versus the sale price are written when the window ends. This is how you see "it went up after we sold".
+
+```bash
+memecoin-agent -c config.yaml report                        # state/trades.csv
+memecoin-agent -c config.yaml report --trades exports/*.csv  # or the hourly exports
+```
+
+The report shows win rate, average result and profit for each way a trade ended (stop loss, trailing stop, time stop, take profit, LarpCheck flag, liquidity pulled, manual), and, for trades bought after this update, by lane, liquidity, token age, 1h change at entry, score and LarpCheck verdict. The "after the sale" table shows, per exit kind, the average high and low in the next 12 hours and the share of coins that rose more than 50%. Use it to see whether the stop loss is too tight or the hold too short, and which kinds of tokens lose. Below about 30 trades per row it's an anecdote, not a pattern.
+
 ## Dashboard
 
 `memecoin-agent -c config.yaml ui` runs the same trading loop as `run`, plus a
@@ -438,6 +452,7 @@ memecoin_agent/
   simulation.py      offline synthetic market for demo/tests
   ui/runner.py       the session engine for run + ui: agent loop, recorder, exports, controls, views
   export.py          hourly trade CSVs (exports/)
+  analytics.py       entry details, after-sale tracking, `report`
   telegram_bot.py    Telegram alerts, hourly CSVs and commands (Bot API long polling)
   statelock.py       one trader per state/ directory
   ui/server.py       stdlib HTTP server + auth; ui/static/ is the page (vanilla JS, no build)
