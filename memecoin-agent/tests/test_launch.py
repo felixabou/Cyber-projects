@@ -111,7 +111,7 @@ def test_rejected_or_unscanned_launches_are_not_bought(tmp_path, caplog):
     assert sum("Skip LNCH (launch lane)" in r.getMessage() for r in caplog.records) == 1
     agent, _ = launch_agent(tmp_path, None)  # e.g. a backtest: no live wallet scan, no launch-lane buys
     agent.scan_and_enter(NOW)
-    assert not agent.pf.positions and "needs the live wallet scan" in agent.last_scan[0]["outcome"]
+    assert not agent.pf.positions and "need the live wallet scan" in agent.last_scan[0]["outcome"]
 
 
 def test_buy_window_and_lanes_side_by_side(tmp_path):
@@ -292,4 +292,6 @@ def test_wiring(tmp_path):
     agent, _ = cli.build_agent(cfg, with_feed=False)
     assert isinstance(agent.launch_scan, WalletScanner)
     cfg.launch.enabled = False
+    assert isinstance(cli.build_agent(cfg, with_feed=False)[0].launch_scan, WalletScanner)  # early buys use it
+    cfg.filters.wallet_scan_below_age_minutes = cfg.filters.wallet_scan_below_market_cap_usd = 0
     assert cli.build_agent(cfg, with_feed=False)[0].launch_scan is None

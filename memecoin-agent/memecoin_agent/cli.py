@@ -134,19 +134,38 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     # The LarpCheck gate also reviews held coins and exits when it flags them.
     guard = safety.find(LarpCheckGate) if isinstance(safety, CompositeSafety) else None
     launch_scan = None
-    if cfg.launch.enabled:
+    f = cfg.filters
+    early_scans = f.wallet_scan_below_age_minutes > 0 or f.wallet_scan_below_market_cap_usd > 0
+    if cfg.launch.enabled or early_scans:
         from .data.wallets import WalletScanner
 
         launch_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
         lc = cfg.launch
-        log.info("Launch lane on: $%.0fK+ volume within %.0fm of launch, then a wallet scan (bundles <= %.0f%%, "
-                 "linked wallets <= %.0f%%, top 10 <= %.0f%%, creator <= %.0f%%) before the usual checks",
-                 lc.min_volume_usd / 1000, lc.max_age_minutes, lc.max_bundle_pct, lc.max_cluster_pct,
-                 lc.max_top10_pct, lc.max_creator_pct)
+        scan = (f"wallet scan (bundles <= {lc.max_bundle_pct:.0f}%, linked wallets <= {lc.max_cluster_pct:.0f}%, "
+                f"top 10 <= {lc.max_top10_pct:.0f}%, creator <= {lc.max_creator_pct:.0f}%)")
+        if cfg.launch.enabled:
+            log.info("Launch lane on: $%.0fK+ volume within %.0fm of launch, then a %s before the usual checks",
+                     lc.min_volume_usd / 1000, lc.max_age_minutes, scan)
+        if early_scans:
+            log.info("Early or small buys (under %.0fm old or $%.0fK market cap) need the %s too",
+                     f.wallet_scan_below_age_minutes, f.wallet_scan_below_market_cap_usd / 1000, scan)
     from .analytics import Analytics
 
     analytics = Analytics(Path(cfg.agent.state_file).parent)
-    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics), feed
+    from .data.profile import TokenProfiler
+
+    profiler = TokenProfiler(cfg.classify)
+    if cfg.larpcheck.enabled and cfg.classify.enabled:
+        log.info("Tech vs meme on: tech tokens get the full LarpCheck gate; memes get %s",
+                 {"lookup": "its free lookup only (no credits)", "full": "the full gate too",
+                  "off": "no LarpCheck"}[cfg.larpcheck.memes])
+    if cfg.authenticity.enabled:
+        a = cfg.authenticity
+        log.info("Fake-chart check on: volume <= %gx liquidity/hour, <= $%.0f per holder, <= %g trades/holder/hour, "
+                 ">= %d holders", a.max_turnover_per_hour, a.max_volume_per_holder_usd, a.max_trades_per_holder_h1,
+                 a.min_holders)
+    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 profiler=profiler), feed
 
 
 def build_telegram(cfg: Config, runner):

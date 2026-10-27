@@ -37,6 +37,7 @@ class TokenSnapshot:
     pair_created_at: datetime | None
     url: str = ""
     fetched_at: datetime = field(default_factory=utcnow)
+    links: list[str] = field(default_factory=list)  # the token's website and social links (DexScreener)
 
     def age_minutes(self, now: datetime) -> float | None:
         if self.pair_created_at is None:
@@ -116,6 +117,7 @@ class Position:
     dust: bool = False
     # LarpCheck's view of the coin while held: verdict, stamp, parsed reasoning (see data/larpcheck.py).
     larp: dict[str, Any] | None = None
+    kind: str = ""  # "tech" or "meme" (data/profile.py); memes get LarpCheck's free lookup only
 
     def pnl_pct(self, price: float | None = None) -> float:
         p = self.last_price_usd if price is None else price

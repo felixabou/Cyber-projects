@@ -163,6 +163,43 @@ it off. A paid RPC (Helius, QuickNode…) in `execution.rpc_url` makes scans fas
 a paid key, so the scan doesn't use it. Backtests don't take launch-lane trades, because the wallet
 scan needs live chain data.
 
+## Tech vs meme, and fake charts
+
+**Tech or meme.** Each token that passes the filters is labelled from its name, its description
+(from its metadata file) and its links. **Tech** is a launchpad, AI agent, app, protocol, lab,
+terminal, DEX, and so on. Any product signal counts: a word like that in the name or description,
+a GitHub repo, a docs site, or an `.app`/`.tech`/`.ai` website. Anything else is a **meme**.
+- **Tech tokens** get the full LarpCheck gate: no buy without a verdict, a check started if needed
+  (one of your daily credits), and an exit if LarpCheck flags it while held.
+- **Memes** get LarpCheck's free lookup only (`larpcheck.memes: lookup`). If someone already checked
+  the coin and it came back LARP, SCAM or RIGGED, it isn't bought (or is sold if held). Otherwise it
+  needs no verdict, and no check is started or report opened, so memes never cost a credit.
+
+The label shows as a **Tech** or **Meme** tag in the Scanner, is stored with each position and in
+`state/entries.csv`, and `report` splits results by it. On a live sample it labelled launchpads
+(RAYPAD, 1EDGE, LAUNCH, pump.fun's own token), AI agents, labs, networks and terminals as tech, and
+cat, dog and joke coins as memes.
+
+**Fake-chart check.** Every candidate is checked for faked activity before anything paid runs,
+using DexScreener's numbers and RugCheck's holder count:
+
+| Signal | Real active tokens (live sample) | Wash-traded ones | Limit |
+|---|---|---|---|
+| 24h volume ÷ liquidity, per hour of the pool's life | under ~20× | 57–200× | 50× |
+| 24h volume per holder | ~$400 or less | $1,200–7,700 | $1,500 |
+| Last hour's trades per holder | ~4 | 11+ | 8 |
+| Holders | hundreds+ | | at least 100 |
+| RugCheck "High holder correlation" (wallets moving together) | | | reject |
+
+On that sample it rejected the five wash-traded tokens (ANT, TIT, WIFBTC, and the MUSK2028/ELON2028
+twins), DOAS (correlated holders) and a 66-holder copycat, and none of the real ones. GMGN's wash-trading
+flag, bundler and insider checks run later in the chain as before.
+
+**Earlier and smaller.** The filters now start at 5 minutes old, $20k market cap and $12k liquidity
+(was 20 minutes, $50k, $25k). Anything younger than 20 minutes or under $50k market cap must also pass the
+[wallet scan](#launch-lane) (launch-block bundles, linked wallets, top 10 holders, creator holdings),
+on top of the fake-chart check. Backtests don't take these early buys, since the scan needs live chain data.
+
 ## LarpCheck gate
 
 The last check before any buy is [LarpCheck](https://larpcheck.app). It investigates a coin's story (site, X account, claims) and its holders, and gives two verdicts:
@@ -443,7 +480,8 @@ memecoin_agent/
   data/dexscreener.py, data/rugcheck.py
   data/gmgn.py       GMGN trending discovery + safety check (read-only API)
   data/larpcheck.py  LarpCheck pre-buy gate and held-coin reviews
-  data/wallets.py    launch-lane wallet scan: launch-block bundles (on-chain) + RugCheck holder report
+  data/wallets.py    wallet scan (launch lane, early/small buys): launch-block bundles + RugCheck holders
+  data/profile.py    tech vs meme, fake-chart check (RugCheck report + token metadata)
   data/pumpportal.py real-time pump.fun graduation/launch websocket feed
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py

@@ -47,6 +47,7 @@ def parse_pair(pair: dict[str, Any]) -> TokenSnapshot | None:
     if not base.get("address") or price <= 0:
         return None
     txns = pair.get("txns") or {}
+    info = pair.get("info") or {}
     vol = pair.get("volume") or {}
     chg = pair.get("priceChange") or {}
     created_ms = pair.get("pairCreatedAt")
@@ -73,6 +74,8 @@ def parse_pair(pair: dict[str, Any]) -> TokenSnapshot | None:
         price_change_h24=_f(chg.get("h24")),
         pair_created_at=created,
         url=pair.get("url") or "",
+        links=[str(x["url"]) for x in [*(info.get("websites") or []), *(info.get("socials") or [])]
+               if isinstance(x, dict) and x.get("url")],
     )
 
 

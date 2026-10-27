@@ -26,7 +26,7 @@ def test_good_token_passes(snap):
     "overrides, expected",
     [
         ({"liquidity_usd": 5_000}, "liquidity"),
-        ({"pair_created_at": NOW - timedelta(minutes=5)}, "age"),
+        ({"pair_created_at": NOW - timedelta(minutes=3)}, "age"),
         ({"pair_created_at": None}, "unknown pair age"),
         ({"price_change_h1": 400.0}, "too extended"),
         ({"sells_h1": 900}, "b/s1h"),
