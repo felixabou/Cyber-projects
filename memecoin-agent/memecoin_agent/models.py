@@ -38,6 +38,7 @@ class TokenSnapshot:
     url: str = ""
     fetched_at: datetime = field(default_factory=utcnow)
     links: list[str] = field(default_factory=list)  # the token's website and social links (DexScreener)
+    price_change_h6: float = 0.0
 
     def age_minutes(self, now: datetime) -> float | None:
         if self.pair_created_at is None:

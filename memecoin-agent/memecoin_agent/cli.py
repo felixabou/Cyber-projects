@@ -164,8 +164,15 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         log.info("Fake-chart check on: volume <= %gx liquidity/hour, <= $%.0f per holder, <= %g trades/holder/hour, "
                  ">= %d holders", a.max_turnover_per_hour, a.max_volume_per_holder_usd, a.max_trades_per_holder_h1,
                  a.min_holders)
+    route_check = None
+    if cfg.honeypot.sell_route_check and cfg.execution.mode == "paper":  # live: the executor's own preflight
+        from .data.route import SellRouteCheck
+
+        route_check = SellRouteCheck(cfg.honeypot, cfg.execution, market.sol_price_usd)
+        log.info("Honeypot check on: every paper buy is quoted on Jupiter and sold straight back first "
+                 "(no route, or a round trip losing over %g%%, means no buy)", cfg.execution.max_roundtrip_loss_pct)
     return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics,
-                 profiler=profiler), feed
+                 profiler=profiler, route_check=route_check), feed
 
 
 def build_telegram(cfg: Config, runner):

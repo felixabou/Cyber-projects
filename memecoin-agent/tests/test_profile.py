@@ -51,7 +51,8 @@ def snap(**kw):
 @pytest.mark.parametrize("snap_kw, holders, risks, expect", [
     # ANT: $5.8M a day through $3.7k of liquidity, 758 holders, 85k trades.
     (dict(volume_h24=5_847_215, liquidity_usd=3_737, buys_h1=4_300, sells_h1=4_300, pair_created_at=NOW - timedelta(hours=10)),
-     758, [], ["wash trading: volume is 156x", "wash trading: $7,714 of volume per holder", "bot churn: 11 trades"]),
+     758, [], ["wash trading: volume is 156x", "wash trading: $7,714 of volume per holder", "bot churn: 11 trades",
+               "bot spam: $10.47 average trade"]),
     # MUSK2028: an hour old, $2.3M through $9.7k.
     (dict(volume_h24=2_318_437, liquidity_usd=9_690, pair_created_at=NOW - timedelta(minutes=70)),
      5_075, [], ["wash trading: volume is 205x"]),
@@ -185,7 +186,7 @@ def test_meme_kind_reaches_the_gate_position_and_scanner(tmp_path):
 
 
 @pytest.mark.parametrize("snap_kw, scanned", [
-    (dict(pair_created_at=NOW - timedelta(minutes=8)), True),  # young
+    (dict(pair_created_at=NOW - timedelta(minutes=40)), True),  # young: under an hour
     (dict(market_cap_usd=30_000, liquidity_usd=15_000, volume_h1=30_000), True),  # small
     ({}, False),  # 3h old, $600k: no wallet scan
 ])

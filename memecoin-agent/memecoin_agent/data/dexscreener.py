@@ -71,6 +71,7 @@ def parse_pair(pair: dict[str, Any]) -> TokenSnapshot | None:
         sells_h1=_i((txns.get("h1") or {}).get("sells")),
         price_change_m5=_f(chg.get("m5")),
         price_change_h1=_f(chg.get("h1")),
+        price_change_h6=_f(chg.get("h6")),
         price_change_h24=_f(chg.get("h24")),
         pair_created_at=created,
         url=pair.get("url") or "",

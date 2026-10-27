@@ -195,10 +195,30 @@ On that sample it rejected the five wash-traded tokens (ANT, TIT, WIFBTC, and th
 twins), DOAS (correlated holders) and a 66-holder copycat, and none of the real ones. GMGN's wash-trading
 flag, bundler and insider checks run later in the chain as before.
 
-**Earlier and smaller.** The filters now start at 5 minutes old, $20k market cap and $12k liquidity
-(was 20 minutes, $50k, $25k). Anything younger than 20 minutes or under $50k market cap must also pass the
+**Earlier and smaller.** The filters now start at 15 minutes old, $20k market cap and $12k liquidity
+(was 20 minutes, $50k, $25k). Anything younger than 60 minutes or under $50k market cap must also pass the
 [wallet scan](#launch-lane) (launch-block bundles, linked wallets, top 10 holders, creator holdings),
 on top of the fake-chart check. Backtests don't take these early buys, since the scan needs live chain data.
+
+## Rug and honeypot guards
+
+Added after a run of bad buys. Each one blocks a pattern that showed up on real charts:
+
+| Guard | What it blocks | Example |
+|---|---|---|
+| **Sell-back check** | A coin that can't be sold back, or loses over 12% on a buy-then-sell round trip. Every paper buy is quoted on Jupiter first (quotes only, no wallet). Live trading always did this. | honeypots, taxes, dead routes |
+| **Token settings** | A live mint or freeze authority, a permanent delegate, an active transfer hook, a pausable token, frozen-by-default accounts, or a transfer fee over 5%. These are the honeypot tricks on Solana; pump.fun coins have none of them. | freeze-authority honeypots |
+| **Bot spam** | An average trade under $12 over the last hour (200+ trades). Real coins averaged $17 or more; bot-run ones $1–6. | "Robinhood": 16,803 trades for $90k ($5 each) |
+| **Already ran** | Up more than 500% in 6 hours: a late chase, or a pump being painted. | "TREMP": +1,856% in 6h with a calm +9% hour |
+| **Painted chart** | Under a day old, price rising, but an hour's volume under 2% of the market cap (real young coins traded 2.5% or more). Bots walking the price up on no real buying. | TREMP's smooth climb on about $8k an hour |
+| **Just dumped** | More than 50% below the high the agent itself saw in the last 2 hours. | Robinhood's dev-dump candle |
+| **First hour** | Minimum age back to 15 minutes, and anything under 60 minutes old (or under $50k market cap) must pass the wallet scan. | Research on 6.4 million Solana memecoins found most show rug-pull traits within an hour of launch. |
+
+These run alongside the fake-chart checks, wallet scan, RugCheck, GMGN and LarpCheck. All of them
+are free and run before any LarpCheck credit is spent. Every limit is under `authenticity:` and
+`honeypot:` in [`config.example.yaml`](config.example.yaml). No scanner catches everything: a quote
+can pass on a token whose transfer code blocks the real sale (that's what the token-settings check is
+for), and a determined dev can still rug a clean-looking coin.
 
 ## LarpCheck gate
 
@@ -481,7 +501,8 @@ memecoin_agent/
   data/gmgn.py       GMGN trending discovery + safety check (read-only API)
   data/larpcheck.py  LarpCheck pre-buy gate and held-coin reviews
   data/wallets.py    wallet scan (launch lane, early/small buys): launch-block bundles + RugCheck holders
-  data/profile.py    tech vs meme, fake-chart check (RugCheck report + token metadata)
+  data/profile.py    tech vs meme, fake-chart and honeypot-settings checks (RugCheck report + metadata)
+  data/route.py      sell-back check: Jupiter buy and sell quotes before a paper buy
   data/pumpportal.py real-time pump.fun graduation/launch websocket feed
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py

@@ -79,7 +79,7 @@ def test_discovery_sends_the_agent_window_dedupes_and_refreshes_on_schedule():
     assert q["chain"] == "sol" and q["interval"] == "1h" and q["order_by"] == "volume"
     assert q.get_list("filters") == ["renounced", "frozen", "not_wash_trading"]
     assert q["min_liquidity"] == "12000" and q["max_marketcap"] == "5000000"
-    assert q["min_created"] == "5m" and q["max_created"] == "72h"
+    assert q["min_created"] == "15m" and q["max_created"] == "72h"
     fake.rank = [{"address": "T3"}]
     mono.t += 60
     assert d.discover() == ["T1", "T2"] and len(fake.requests) == 1  # cached between refreshes

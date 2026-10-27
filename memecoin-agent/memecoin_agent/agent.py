@@ -33,6 +33,7 @@ class Agent:
         launch_scan: object | None = None,
         analytics: object | None = None,
         profiler: object | None = None,
+        route_check: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -51,6 +52,10 @@ class Agent:
         # data.profile.TokenProfiler: tech vs meme, and the fake-chart check, for each candidate.
         self.profiler = profiler
         self.kinds: dict[str, str] = {}  # mint -> "tech" / "meme", for the scanner view
+        # data.route.SellRouteCheck: paper-mode honeypot check (live mode's executor does its own).
+        self.route_check = route_check
+        # Prices this agent has seen per candidate over the last 2 hours: catches buying right after a dump.
+        self._seen_prices: dict[str, deque[tuple[datetime, float]]] = {}
         self.launch_qualified: dict[str, datetime] = {}  # mint -> when it first qualified
         self._launch_skips: dict[str, str] = {}  # mint -> last rejection logged
         self.ticks = 0
@@ -188,6 +193,7 @@ class Agent:
         mints = mints[: self.cfg.agent.max_candidates_per_scan]
         evals = []
         for s in self._fetch(mints).values():
+            self._remember_price(s, now)
             ev = evaluate_entry(s, f, now)
             if not ev.passed and self.cfg.launch.enabled:
                 ev = self._launch_lane(ev, now) or ev
@@ -212,6 +218,29 @@ class Agent:
             log.info("Launch lane: %s traded $%.0f in its first %.0fm (liq $%.0f) | %s", s.symbol, s.volume_h1,
                      s.age_minutes(now) or 0, s.liquidity_usd, s.url)
         return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="launch")
+
+    def _remember_price(self, s: TokenSnapshot, now: datetime) -> None:
+        if s.price_usd <= 0:
+            return
+        seen = self._seen_prices.setdefault(s.mint, deque(maxlen=720))
+        seen.append((now, s.price_usd))
+        cutoff = now - timedelta(hours=2)
+        while seen and seen[0][0] < cutoff:
+            seen.popleft()
+        if len(self._seen_prices) > 3000:  # forget coins not seen in the last 2 hours
+            self._seen_prices = {m: q for m, q in self._seen_prices.items() if q and q[-1][0] >= cutoff}
+
+    def _dumped(self, s: TokenSnapshot, now: datetime) -> str | None:
+        limit = self.cfg.authenticity.max_drawdown_from_high_pct
+        seen = self._seen_prices.get(s.mint)
+        if limit is None or not self.cfg.authenticity.enabled or not seen or s.price_usd <= 0:
+            return None
+        high_at, high = max(seen, key=lambda x: x[1])
+        drop = (1 - s.price_usd / high) * 100
+        if drop > limit:
+            return (f"unsafe: just dumped: {drop:.0f}% below the high it hit "
+                    f"{(now - high_at).total_seconds() / 60:.0f}m ago (limit {limit:g}%)")
+        return None
 
     def _needs_wallet_scan(self, ev: EntryEvaluation, now: datetime) -> bool:
         if ev.lane == "launch":
@@ -261,8 +290,9 @@ class Agent:
             fake = authenticity_reasons(snap, prof, self.cfg.authenticity, snap.age_minutes(now))
             if fake:
                 why = "; ".join(fake)
-                if self._launch_skips.get(snap.mint) != why:
-                    self._launch_skips[snap.mint] = why
+                kinds = "|".join(r.split(":")[0] for r in fake)  # numbers drift every scan; log each kind once
+                if self._launch_skips.get(snap.mint) != kinds:
+                    self._launch_skips[snap.mint] = kinds
                     log.info("Skip %s: looks manipulated: %s", snap.symbol, why)
                 return prof, "unsafe: looks manipulated: " + why
         return prof, None
@@ -301,6 +331,10 @@ class Agent:
                 break
             # Free checks first (fake chart, then the wallet scan for launches and early or small buys):
             # they spare a LarpCheck credit on manipulated and bundled coins.
+            dumped = self._dumped(snap, now)
+            if dumped:
+                outcomes[snap.mint] = dumped
+                continue
             prof, fake = self._profile_check(snap, now)
             if fake:
                 outcomes[snap.mint] = fake
@@ -320,6 +354,10 @@ class Agent:
             if size <= 0:
                 log.info("Insufficient balance for a minimum-size position")
                 break
+            if self.route_check is not None and (why := self.route_check.check(snap.mint, size)):
+                outcomes[snap.mint] = "unsafe: " + why
+                log.info("Skip %s: %s", snap.symbol, why)
+                continue
             if reason := self.executor.preflight(snap, size):
                 outcomes[snap.mint] = f"skipped: {reason}"
                 log.info("Skip %s: %s", snap.symbol, reason)
