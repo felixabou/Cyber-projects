@@ -3,13 +3,13 @@
 
 filters:
   quote_symbols: [SOL, USDC]
-  min_liquidity_usd: 25000
-  min_market_cap_usd: 50000
+  min_liquidity_usd: 12000
+  min_market_cap_usd: 20000
   max_market_cap_usd: 5000000
-  min_age_minutes: 20        # skip the first-minutes sniper/bundle chaos
+  min_age_minutes: 5         # early: buys under 20 min old must also pass the wallet scan
   max_age_hours: 72
-  min_volume_h1_usd: 20000
-  min_txns_h1: 150
+  min_volume_h1_usd: 10000
+  min_txns_h1: 80
   min_buy_sell_ratio_h1: 1.15
   min_buy_sell_ratio_m5: 1.0
   min_price_change_m5: 0.0
@@ -18,6 +18,10 @@ filters:
   min_volume_to_liquidity_h1: 0.3
   min_score: 0.55
   require_rugcheck: true     # fails closed if RugCheck is unreachable
+  # Early or small buys must also pass the wallet scan (bundles, linked wallets, top holders, creator;
+  # limits under launch:). 0 turns either trigger off.
+  wallet_scan_below_age_minutes: 20
+  wallet_scan_below_market_cap_usd: 50000
   max_rugcheck_score: 50
   reject_danger_risks: true  # mint/freeze authority, unlocked LP, whale concentration...
   blacklist: []
@@ -112,6 +116,26 @@ larpcheck:
   sell_on_change: true            # a LIKELY coin whose LarpCheck view changes (new check/verdict/stamp) sells too
   held_recheck_minutes: 5
   max_report_opens_per_day: 1     # opening someone else's full report costs a credit (free plan)
+  # Memes (see classify): lookup = LarpCheck's free lookup only (a bad verdict still blocks; nothing is
+  # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
+  memes: lookup
+
+classify:
+  # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description
+  # and links. Tech gets the full LarpCheck gate. Any product signal counts as tech.
+  enabled: true
+  extra_tech_words: []              # e.g. [oracle, rpc]
+
+authenticity:
+  # Fake-chart check on every candidate, free, before any paid check. Measured on live tokens: real
+  # active coins stayed under ~20x liquidity an hour and ~$400 volume per holder; wash-traded ones
+  # ran 50-200x and $1,000-8,000.
+  enabled: true
+  max_turnover_per_hour: 50         # 24h volume / liquidity, per hour of the pool's life (1-24h)
+  max_volume_per_holder_usd: 1500
+  max_trades_per_holder_h1: 8
+  min_holders: 100
+  reject_holder_correlation: true   # RugCheck's "High holder correlation": wallets moving together
 
 gmgn:
   # GMGN OpenAPI (gmgn.ai): extra discovery (trending) and a pre-buy safety check. Read-only data

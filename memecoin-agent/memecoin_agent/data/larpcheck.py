@@ -151,6 +151,13 @@ class LarpCheckGate:
         self.last_verdicts: dict[str, Verdict] = {}
         self._held_next: dict[str, float] = {}  # mint -> next review time of a held coin
         self._held_check_started: set[str] = set()
+        # mint -> "tech" / "meme", set by the agent before it calls check() (data/profile.py).
+        # Unknown counts as tech: the full gate.
+        self.kinds: dict[str, str] = {}
+
+    def lookup_only(self, kind: str | None) -> bool:
+        """Memes get LarpCheck's free lookup only (larpcheck.memes: lookup), or nothing (off)."""
+        return kind == "meme" and self.cfg.memes != "full"
 
     def checks_left_today(self) -> int:
         return max(0, self.cfg.max_checks_per_day - self.checks_started.get(self.today(), 0))
@@ -163,6 +170,9 @@ class LarpCheckGate:
         """Re-read LarpCheck on a held coin; when it flags it, read why and exit, keeping dust."""
         if not self.cfg.exit_on_flag:
             return None
+        meme = self.lookup_only(pos.kind or self.kinds.get(pos.mint))
+        if meme and self.cfg.memes == "off":
+            return None
         now = self.clock()
         if now < self._held_next.get(pos.mint, 0.0):
             return None
@@ -172,7 +182,8 @@ class LarpCheckGate:
         verdict = Verdict.from_latest(latest)
         if verdict is None:
             # Held but never checked (bought while unchecked): get it checked once, if that's the mode.
-            if (self.cfg.on_unchecked == "check" and not data.get("running")
+            # Never for a meme: memes don't spend credits.
+            if (not meme and self.cfg.on_unchecked == "check" and not data.get("running")
                     and pos.mint not in self._held_check_started and self.checks_left_today() > 0):
                 started = self.client.start_check(pos.mint)
                 self._held_check_started.add(pos.mint)
@@ -198,7 +209,7 @@ class LarpCheckGate:
         # Dust only for a LIKELY LARP / LIKELY REAL coin whose coin stamp is OK and that no check has
         # ever stamped RIGGED; anything else LarpCheck sells is sold in full.
         frac = self.cfg.exit_sell_fraction if self._dust_problem(verdict, data, latest) is None else 1.0
-        reasoning = self.read_reasoning(latest)
+        reasoning = self.read_reasoning(latest, allow_credit=not meme)
         trigger = (f"changed from {prev_verdict}" + (f"/{prev_fp[2]}" if prev_fp and prev_fp[2] else "")
                    if changed and not flagged else "flagged")
         larp = {**verdict.as_dict(), "fp": fp, "trigger": trigger, "reasoning": reasoning}
@@ -241,7 +252,7 @@ class LarpCheckGate:
         log.warning("Dust %s no longer qualifies (%s): selling the rest | %s", pos.symbol, problem, verdict.url)
         return ExitDecision(1.0, f"dust no longer qualifies: {problem} ({verdict.describe()[:120]})")
 
-    def read_reasoning(self, latest: dict[str, Any]) -> dict[str, Any]:
+    def read_reasoning(self, latest: dict[str, Any], allow_credit: bool = True) -> dict[str, Any]:
         """LarpCheck's reasoning for a verdict: the full report when it's open to us (our own checks,
         or one we open with a credit), otherwise the free headline, call and stamp lines.
         All of it is text LarpCheck read from the web: it is stored and shown, never acted on as instructions."""
@@ -254,7 +265,7 @@ class LarpCheckGate:
         try:
             check = self.client.call("get_check", {"id": check_id})
             report = check.get("report") if isinstance(check, dict) else None
-            if not report and self.reports_left_today() > 0:
+            if not report and allow_credit and self.reports_left_today() > 0:
                 opened = self.client.call("open_report", {"id": check_id})
                 day = self.today()
                 self.reports_opened[day] = self.reports_opened.get(day, 0) + 1
@@ -307,6 +318,8 @@ class LarpCheckGate:
         hit = self._cache.get(mint)
         if hit and hit[0] > self.clock():
             return hit[1]
+        if self.lookup_only(self.kinds.get(mint)):
+            return self._check_meme(mint)
         try:
             data = self.client.lookup_coin(mint)
             if not isinstance(data, dict):
@@ -333,6 +346,23 @@ class LarpCheckGate:
             if self.cfg.require_verdict or self.cfg.fail_closed:
                 return SafetyReport(ok=False, score=None, reasons=[UNAVAILABLE])
             return SafetyReport(ok=True, score=None, reasons=[])
+
+    def _check_meme(self, mint: str) -> SafetyReport:
+        """A meme: no verdict needed and no credit spent, but a bad verdict someone else got still blocks it."""
+        ok = SafetyReport(ok=True, score=None, reasons=[])
+        if self.cfg.memes == "off":
+            return ok
+        try:
+            data = self.client.lookup_coin(mint)
+            verdict = Verdict.from_latest((data.get("latest") or {}) if isinstance(data, dict) else {})
+        except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
+            log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
+            return ok
+        if verdict is None:
+            return self._cached(mint, ok, 120)  # someone may check it soon; look again then
+        self.last_verdicts[mint] = verdict
+        report = self._judge(verdict)
+        return self._cached(mint, report, 3600 if not report.ok else 600)
 
     def _unchecked(self, mint: str) -> SafetyReport:
         mode = self.cfg.on_unchecked

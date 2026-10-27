@@ -6,7 +6,7 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import Config
 from .data import MarketData, SafetyChecker
@@ -32,6 +32,7 @@ class Agent:
         guard: object | None = None,
         launch_scan: object | None = None,
         analytics: object | None = None,
+        profiler: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -47,6 +48,9 @@ class Agent:
         self.launch_scan = launch_scan
         # analytics.Analytics: per-buy details and after-sale tracking (state/entries.csv, after_exit.csv).
         self.analytics = analytics
+        # data.profile.TokenProfiler: tech vs meme, and the fake-chart check, for each candidate.
+        self.profiler = profiler
+        self.kinds: dict[str, str] = {}  # mint -> "tech" / "meme", for the scanner view
         self.launch_qualified: dict[str, datetime] = {}  # mint -> when it first qualified
         self._launch_skips: dict[str, str] = {}  # mint -> last rejection logged
         self.ticks = 0
@@ -190,7 +194,10 @@ class Agent:
             evals.append(ev)
         window = timedelta(minutes=self.cfg.launch.buy_window_minutes)
         self.launch_qualified = {m: t for m, t in self.launch_qualified.items() if now - t <= window}
-        self._launch_skips = {m: r for m, r in self._launch_skips.items() if m in self.launch_qualified}
+        if len(self._launch_skips) > 2000:
+            self._launch_skips.clear()
+        if len(self.kinds) > 2000:
+            self.kinds.clear()
         return sorted(evals, key=lambda e: (e.passed, e.lane == "launch", e.score), reverse=True)
 
     def _launch_lane(self, ev: EntryEvaluation, now: datetime) -> EntryEvaluation | None:
@@ -206,24 +213,59 @@ class Agent:
                      s.age_minutes(now) or 0, s.liquidity_usd, s.url)
         return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="launch")
 
-    def _launch_check(self, snap: TokenSnapshot) -> tuple[bool, str]:
-        """(ok, note): the wallet scan for a launch-lane buy. The note is the trade journal reason,
-        or why not to buy (yet)."""
+    def _needs_wallet_scan(self, ev: EntryEvaluation, now: datetime) -> bool:
+        if ev.lane == "launch":
+            return True
+        f, s = self.cfg.filters, ev.snapshot
+        age = s.age_minutes(now)
+        return (age is not None and age < f.wallet_scan_below_age_minutes) or s.market_cap_usd < f.wallet_scan_below_market_cap_usd
+
+    def _launch_check(self, snap: TokenSnapshot, lane: str = "launch") -> tuple[bool, str]:
+        """(ok, note): the wallet scan for a launch-lane or early/small buy. The note is the trade
+        journal reason, or why not to buy (yet)."""
         from .data.wallets import SCANNING
 
         if self.launch_scan is None:
-            return False, "skipped: the launch lane needs the live wallet scan"
-        rep = self.launch_scan.check(snap.mint, self.launch_qualified.get(snap.mint))
+            return False, "skipped: early and launch buys need the live wallet scan"
+        qualified = self.launch_qualified.get(snap.mint) if lane == "launch" else None
+        rep = self.launch_scan.check(snap.mint, qualified)
         if not rep.ok:
             if rep.reasons == [SCANNING]:
                 return False, f"waiting: {SCANNING}"
             why = "; ".join(rep.reasons)
             if self._launch_skips.get(snap.mint) != why:  # once per verdict, not every scan of its window
                 self._launch_skips[snap.mint] = why
-                log.info("Skip %s (launch lane): %s", snap.symbol, why)
+                log.info("Skip %s (%s): %s", snap.symbol, "launch lane" if lane == "launch" else "wallet scan", why)
             return False, "unsafe: " + why
         res = self.launch_scan.result(snap.mint)
-        return True, f"launch lane: ${snap.volume_h1:,.0f} volume; {res.summary() if res else 'wallet scan passed'}"
+        summary = res.summary() if res else "wallet scan passed"
+        return True, (f"launch lane: ${snap.volume_h1:,.0f} volume; {summary}" if lane == "launch"
+                      else f"early buy: {summary}")
+
+    def _profile_check(self, snap: TokenSnapshot, now: datetime) -> tuple[Any, str | None]:
+        """(profile, why not): tech vs meme, then the fake-chart check. Free; before any paid check."""
+        if self.profiler is None:
+            return None, None
+        from .data.profile import authenticity_reasons
+
+        try:
+            prof = self.profiler.profile(snap)
+        except Exception as exc:  # the profile is extra evidence; never let it break a scan
+            log.warning("Token profile failed for %s: %s", snap.symbol, exc)
+            return None, None
+        self.kinds[snap.mint] = prof.kind
+        gate = self.guard
+        if gate is not None and hasattr(gate, "kinds"):
+            gate.kinds[snap.mint] = prof.kind  # memes get LarpCheck's free lookup only
+        if self.cfg.authenticity.enabled:
+            fake = authenticity_reasons(snap, prof, self.cfg.authenticity, snap.age_minutes(now))
+            if fake:
+                why = "; ".join(fake)
+                if self._launch_skips.get(snap.mint) != why:
+                    self._launch_skips[snap.mint] = why
+                    log.info("Skip %s: looks manipulated: %s", snap.symbol, why)
+                return prof, "unsafe: looks manipulated: " + why
+        return prof, None
 
     def _entry_block_reason(self, now: datetime) -> str | None:
         if self.entries_paused:
@@ -257,9 +299,15 @@ class Agent:
             if block := self._entry_block_reason(now):
                 self._set_entry_block(block)
                 break
+            # Free checks first (fake chart, then the wallet scan for launches and early or small buys):
+            # they spare a LarpCheck credit on manipulated and bundled coins.
+            prof, fake = self._profile_check(snap, now)
+            if fake:
+                outcomes[snap.mint] = fake
+                continue
             note = None
-            if ev.lane == "launch":  # wallet scan first: free, and it spares a LarpCheck credit on bundles
-                ok, note = self._launch_check(snap)
+            if self._needs_wallet_scan(ev, now):
+                ok, note = self._launch_check(snap, ev.lane)
                 if not ok:
                     outcomes[snap.mint] = note
                     continue
@@ -282,10 +330,12 @@ class Agent:
                 outcomes[snap.mint] = f"buy failed: {exc}"
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
-            self.pf.open(snap, fill, now, ev.score, reason=note)
+            pos = self.pf.open(snap, fill, now, ev.score, reason=note)
+            pos.kind = prof.kind if prof else ""
             if self.analytics is not None:
                 verdicts = getattr(self.guard, "last_verdicts", {}) or {}
-                self.analytics.log_entry(snap, ev.lane, ev.score, size, fill.price_usd, now, verdicts.get(snap.mint))
+                self.analytics.log_entry(snap, ev.lane, ev.score, size, fill.price_usd, now, verdicts.get(snap.mint),
+                                         kind=pos.kind, holders=prof.holders if prof else None)
             outcomes[snap.mint] = "bought"
             log.info("BUY %s $%.2f @ %.10g | %s liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
                      snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,
@@ -298,6 +348,7 @@ class Agent:
             {
                 "mint": e.snapshot.mint, "symbol": e.snapshot.symbol, "url": e.snapshot.url,
                 "score": e.score, "passed": e.passed, "reasons": e.reasons, "lane": e.lane,
+                "kind": self.kinds.get(e.snapshot.mint),
                 "volume_h1": e.snapshot.volume_h1,
                 "outcome": outcomes.get(e.snapshot.mint, ""),
                 "liquidity_usd": e.snapshot.liquidity_usd, "market_cap_usd": e.snapshot.market_cap_usd,

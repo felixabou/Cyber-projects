@@ -15,14 +15,14 @@ class FilterConfig:
     """Entry filters. A token must pass every one of these to be considered."""
 
     quote_symbols: list[str] = field(default_factory=lambda: ["SOL", "USDC"])
-    min_liquidity_usd: float = 25_000
+    min_liquidity_usd: float = 12_000
     max_liquidity_usd: float | None = None
-    min_market_cap_usd: float = 50_000
+    min_market_cap_usd: float = 20_000
     max_market_cap_usd: float = 5_000_000
-    min_age_minutes: float = 20
+    min_age_minutes: float = 5
     max_age_hours: float = 72
-    min_volume_h1_usd: float = 20_000
-    min_txns_h1: int = 150
+    min_volume_h1_usd: float = 10_000
+    min_txns_h1: int = 80
     min_buy_sell_ratio_h1: float = 1.15
     min_buy_sell_ratio_m5: float = 1.0
     min_price_change_m5: float = 0.0
@@ -40,6 +40,10 @@ class FilterConfig:
     blacklist: list[str] = field(default_factory=list)
     # Extra mints to evaluate every scan, in addition to discovered ones.
     watchlist: list[str] = field(default_factory=list)
+    # Early or small buys (younger than this, or a market cap under this) must also pass the wallet scan
+    # (launch-block bundles, linked wallets, top holders, creator: limits under `launch:`).
+    wallet_scan_below_age_minutes: float = 20
+    wallet_scan_below_market_cap_usd: float = 50_000
 
 
 @dataclass
@@ -178,6 +182,10 @@ class LarpCheckConfig:
     held_recheck_minutes: float = 5.0
     # Opening a full report of a check someone else ran costs a credit on the free plan.
     max_report_opens_per_day: int = 1
+    # Memes (classify): "lookup" = only LarpCheck's free lookup: a bad verdict someone else got still
+    # blocks the buy, but no verdict is required, no check is started and no credit is spent.
+    # "full" = same rules as tech tokens. "off" = LarpCheck isn't consulted for memes at all.
+    memes: str = "lookup"
 
 
 @dataclass
@@ -214,6 +222,30 @@ class GmgnConfig:
     min_smart_wallets: int = 0  # require this many smart-money holders (0 = off)
     # GMGN unreachable / rate limited: false = the other checks decide, true = skip the buy.
     fail_closed: bool = False
+
+
+@dataclass
+class ClassifyConfig:
+    """Tech or meme, from the token's name, description and links (data/profile.py). Tech tokens
+    (launchpads, AI agents, apps, protocols...) get the full LarpCheck gate; see larpcheck.memes."""
+
+    enabled: bool = True
+    extra_tech_words: list[str] = field(default_factory=list)  # added to the built-in list
+
+
+@dataclass
+class AuthenticityConfig:
+    """Fake-chart check on every candidate, before any paid check: wash trading and bot churn, from
+    DexScreener's numbers and RugCheck's holder count. Limits measured on live tokens: real active
+    coins stayed under ~20x liquidity an hour and ~$400 of volume per holder; wash-traded ones ran
+    50-200x and $1,000-8,000."""
+
+    enabled: bool = True
+    max_turnover_per_hour: float = 50.0  # 24h volume / liquidity, per hour of the pool's life (1-24h)
+    max_volume_per_holder_usd: float = 1_500.0  # 24h volume / current holders
+    max_trades_per_holder_h1: float = 8.0  # last hour's trades / current holders
+    min_holders: int = 100
+    reject_holder_correlation: bool = True  # RugCheck's "High holder correlation": wallets moving together
 
 
 @dataclass
@@ -276,6 +308,8 @@ class Config:
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
+    classify: ClassifyConfig = field(default_factory=ClassifyConfig)
+    authenticity: AuthenticityConfig = field(default_factory=AuthenticityConfig)
     launch: LaunchConfig = field(default_factory=LaunchConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -307,6 +341,8 @@ class Config:
                              "(use 'check' or 'reject', or set require_verdict: false)")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
+        if self.larpcheck.memes not in ("lookup", "full", "off"):
+            raise ValueError("larpcheck.memes must be 'lookup', 'full' or 'off'")
         if self.launch.max_age_minutes <= 0 or self.launch.buy_window_minutes < 0:
             raise ValueError("launch.max_age_minutes must be > 0 and launch.buy_window_minutes >= 0")
         if self.launch.max_signature_pages < 1:
@@ -325,6 +361,8 @@ _SECTIONS: dict[str, type] = {
     "recorder": RecorderConfig,
     "larpcheck": LarpCheckConfig,
     "gmgn": GmgnConfig,
+    "classify": ClassifyConfig,
+    "authenticity": AuthenticityConfig,
     "launch": LaunchConfig,
     "export": ExportConfig,
     "telegram": TelegramConfig,

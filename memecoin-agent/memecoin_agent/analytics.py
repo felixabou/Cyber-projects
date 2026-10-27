@@ -30,7 +30,7 @@ AFTER_EXIT_HOURS = 12.0
 CHECK_EVERY_S = 60.0
 ENTRY_COLS = ["time", "mint", "symbol", "lane", "score", "price_usd", "size_usd", "liquidity_usd", "market_cap_usd",
               "age_min", "volume_h1", "txns_h1", "buy_sell_h1", "buy_sell_m5", "chg_m5", "chg_h1", "larp_verdict",
-              "larp_stamp"]
+              "larp_stamp", "kind", "holders"]
 AFTER_COLS = ["mint", "symbol", "exit_time", "exit_price", "exit_reason", "high_pct", "low_pct", "last_pct",
               "minutes_to_high", "watched_minutes"]
 
@@ -38,6 +38,17 @@ AFTER_COLS = ["mint", "symbol", "exit_time", "exit_price", "exit_reason", "high_
 def _append(path: Path, cols: list[str], row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
+    if not new:
+        with path.open(newline="") as fh:
+            header = next(csv.reader(fh), [])
+        if header != cols:  # columns were added in an update: rewrite the file with the new header
+            old = _read(path)
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(old)
+            os.replace(tmp, path)
     with path.open("a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         if new:
@@ -101,7 +112,7 @@ class Analytics:
 
     # -- recording --------------------------------------------------------------------------
     def log_entry(self, snap: TokenSnapshot, lane: str, score: float, size_usd: float, price: float,
-                  now: datetime, larp: Any = None) -> None:
+                  now: datetime, larp: Any = None, kind: str = "", holders: int | None = None) -> None:
         row = {
             "time": now.isoformat(), "mint": snap.mint, "symbol": snap.symbol, "lane": lane, "score": round(score, 3),
             "price_usd": price, "size_usd": size_usd, "liquidity_usd": round(snap.liquidity_usd),
@@ -110,6 +121,7 @@ class Analytics:
             "buy_sell_h1": round(snap.buy_sell_ratio_h1, 2), "buy_sell_m5": round(snap.buy_sell_ratio_m5, 2),
             "chg_m5": snap.price_change_m5, "chg_h1": snap.price_change_h1,
             "larp_verdict": getattr(larp, "verdict", "") or "", "larp_stamp": getattr(larp, "coin_word", "") or "",
+            "kind": kind, "holders": "" if holders is None else holders,
         }
         try:
             _append(self.entries_csv, ENTRY_COLS, row)
@@ -262,6 +274,7 @@ def build_report(trades_csv: str | Path | list[str | Path], entries_csv: str | P
     with_entry = [r for r in trips if r.entry]
     if with_entry:
         out += ["By lane", head, *_group(with_entry, lambda r: r.entry.get("lane", "?")), ""]
+        out += ["Tech or meme", head, *_group(with_entry, lambda r: r.entry.get("kind") or "unknown"), ""]
         for title, col, edges, unit in (("By liquidity at entry ($)", "liquidity_usd", [0, 25_000, 50_000, 100_000, 250_000], ""),
                                         ("By token age at entry (min)", "age_min", [0, 20, 60, 180, 720], ""),
                                         ("By 1h change at entry (%)", "chg_h1", [-100, 0, 30, 100, 250], ""),

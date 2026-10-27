@@ -674,8 +674,11 @@ function verdict(c) {
   }
   const launch = c.lane === "launch"
     ? h("span", { class: "pill", title: `Launch lane: ${usd(c.volume_h1, { compact: true })} traded in its first minutes`, text: "Launch" }) : null;
+  const kind = c.kind
+    ? h("span", { class: "pill", title: c.kind === "meme" ? "Meme: LarpCheck's free lookup only" : "Tech: full LarpCheck gate",
+      text: c.kind === "meme" ? "Meme" : "Tech" }) : null;
   return h("span", { class: `verdict ${cls}`, title: c.reasons.join("\n") || null },
-    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), launch, h("span", { text }),
+    h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), launch, kind, h("span", { text }),
     evidence ? h("a", { href: evidence, target: "_blank", rel: "noopener noreferrer", class: "pill", text: "evidence" }) : null);
 }
 
