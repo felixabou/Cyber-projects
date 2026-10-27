@@ -19,7 +19,7 @@ class FilterConfig:
     max_liquidity_usd: float | None = None
     min_market_cap_usd: float = 20_000
     max_market_cap_usd: float = 5_000_000
-    min_age_minutes: float = 5
+    min_age_minutes: float = 15  # most Solana rugs happen inside the first hour
     max_age_hours: float = 72
     min_volume_h1_usd: float = 10_000
     min_txns_h1: int = 80
@@ -42,7 +42,7 @@ class FilterConfig:
     watchlist: list[str] = field(default_factory=list)
     # Early or small buys (younger than this, or a market cap under this) must also pass the wallet scan
     # (launch-block bundles, linked wallets, top holders, creator: limits under `launch:`).
-    wallet_scan_below_age_minutes: float = 20
+    wallet_scan_below_age_minutes: float = 60
     wallet_scan_below_market_cap_usd: float = 50_000
 
 
@@ -246,6 +246,30 @@ class AuthenticityConfig:
     max_trades_per_holder_h1: float = 8.0  # last hour's trades / current holders
     min_holders: int = 100
     reject_holder_correlation: bool = True  # RugCheck's "High holder correlation": wallets moving together
+    # Bots spamming tiny trades to fake activity: real coins averaged $17+ a trade on the live sample,
+    # the bot-run ones $4-5 (last hour, once it has 200+ trades).
+    min_avg_trade_usd: float = 12.0
+    # Already ran: a coin up this much in 6h is a late chase (or a pump being painted). null = off.
+    max_price_change_h6: float | None = 500.0
+    # Painted chart: a coin under a day old whose price rises while an hour's volume is under this share
+    # of its market cap (real young coins traded 2.5%+ of their cap an hour on the sample). null = off.
+    min_volume_to_mcap_h1: float | None = 0.02
+    # Just dumped: the price the agent itself saw over the last 2 hours fell this far from its high.
+    max_drawdown_from_high_pct: float | None = 50.0
+    # Honeypot settings on the token itself (RugCheck's report): live mint or freeze authority, a
+    # permanent delegate, a transfer hook, non-transferable or frozen-by-default accounts.
+    reject_honeypot_mint: bool = True
+    max_transfer_fee_pct: float = 5.0
+
+
+@dataclass
+class HoneypotConfig:
+    """Before a paper buy, ask Jupiter to quote the buy and then selling it straight back (quotes only,
+    no wallet). No sell route, or a round trip losing more than execution.max_roundtrip_loss_pct,
+    means no buy. Live mode always does this in the executor."""
+
+    sell_route_check: bool = True
+    fail_closed: bool = True  # Jupiter unreachable: skip the buy
 
 
 @dataclass
@@ -310,6 +334,7 @@ class Config:
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     authenticity: AuthenticityConfig = field(default_factory=AuthenticityConfig)
+    honeypot: HoneypotConfig = field(default_factory=HoneypotConfig)
     launch: LaunchConfig = field(default_factory=LaunchConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -363,6 +388,7 @@ _SECTIONS: dict[str, type] = {
     "gmgn": GmgnConfig,
     "classify": ClassifyConfig,
     "authenticity": AuthenticityConfig,
+    "honeypot": HoneypotConfig,
     "launch": LaunchConfig,
     "export": ExportConfig,
     "telegram": TelegramConfig,

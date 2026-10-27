@@ -61,6 +61,8 @@ class TokenProfile:
     description: str = ""
     links: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)  # RugCheck risk names
+    mint_flags: list[str] = field(default_factory=list)  # honeypot settings on the token (see mint_flags)
+    transfer_fee_pct: float = 0.0
     fetched_at: float = 0.0
 
 
@@ -90,6 +92,37 @@ def classify(name: str, symbol: str, description: str, links: list[str],
     return ("tech", why) if why else ("meme", ["no product claims in name, description or links"])
 
 
+def mint_flags(report: dict[str, Any]) -> tuple[list[str], float]:
+    """Settings on the token that can stop you selling or dilute you, from RugCheck's report:
+    (flags, transfer fee %). pump.fun coins have none of these; honeypots use them."""
+    flags: list[str] = []
+    if report.get("mintAuthority"):
+        flags.append("mint authority still active (more tokens can be minted)")
+    if report.get("freezeAuthority"):
+        flags.append("freeze authority active (holders' tokens can be frozen)")
+    ext = report.get("token_extensions") or {}
+    if isinstance(ext, dict):
+        if ext.get("permanentDelegate"):
+            flags.append("permanent delegate (someone can move anyone's tokens)")
+        hook = ext.get("transferHook")
+        if isinstance(hook, dict) and hook.get("programId"):  # an authority alone (pump.fun's PUMP) runs no code
+            flags.append("transfer hook (custom code runs on every transfer)")
+        pause = ext.get("pausableConfig")
+        if isinstance(pause, dict) and (pause.get("paused") or pause.get("authority")):
+            flags.append("pausable (someone can stop all transfers)")
+        if ext.get("nonTransferable"):
+            flags.append("non-transferable token")
+        state = str(ext.get("defaultAccountState") or "").lower()
+        if state and state not in ("initialized", "1", "none"):
+            flags.append(f"new holder accounts start {state}")
+    fee = report.get("transferFee") or {}
+    try:
+        pct = float(fee.get("pct") or 0) if isinstance(fee, dict) else 0.0
+    except (TypeError, ValueError):
+        pct = 0.0
+    return flags, pct
+
+
 def authenticity_reasons(s: TokenSnapshot, p: TokenProfile | None, cfg: AuthenticityConfig, age_minutes: float | None) -> list[str]:
     """Why the chart looks manipulated (empty: it doesn't)."""
     reasons: list[str] = []
@@ -110,6 +143,22 @@ def authenticity_reasons(s: TokenSnapshot, p: TokenProfile | None, cfg: Authenti
                            f"(limit {cfg.max_trades_per_holder_h1:g})")
     if p and cfg.reject_holder_correlation and any("holder correlation" in r.lower() for r in p.risks):
         reasons.append("coordinated wallets (RugCheck: high holder correlation)")
+    # Bot spam: many tiny trades to fake activity (and to game "most transactions" lists).
+    if s.txns_h1 >= 200 and s.volume_h1 / s.txns_h1 < cfg.min_avg_trade_usd:
+        reasons.append(f"bot spam: ${s.volume_h1 / s.txns_h1:,.2f} average trade over the last hour "
+                       f"(min ${cfg.min_avg_trade_usd:g})")
+    if cfg.max_price_change_h6 is not None and s.price_change_h6 > cfg.max_price_change_h6:
+        reasons.append(f"already ran {s.price_change_h6:+,.0f}% in 6h (limit {cfg.max_price_change_h6:+,.0f}%)")
+    if (cfg.min_volume_to_mcap_h1 is not None and age_minutes is not None and age_minutes < 24 * 60
+            and s.price_change_h1 > 5 and s.market_cap_usd > 0
+            and s.volume_h1 / s.market_cap_usd < cfg.min_volume_to_mcap_h1):
+        reasons.append(f"painted chart: up {s.price_change_h1:+.0f}% in 1h on ${s.volume_h1:,.0f} of volume, "
+                       f"{s.volume_h1 / s.market_cap_usd * 100:.1f}% of its market cap "
+                       f"(min {cfg.min_volume_to_mcap_h1 * 100:g}%)")
+    if p and cfg.reject_honeypot_mint:
+        reasons += [f"honeypot risk: {f}" for f in p.mint_flags]
+        if p.transfer_fee_pct > cfg.max_transfer_fee_pct:
+            reasons.append(f"honeypot risk: {p.transfer_fee_pct:g}% transfer fee (limit {cfg.max_transfer_fee_pct:g}%)")
     return reasons
 
 
@@ -138,6 +187,8 @@ class TokenProfiler:
         if isinstance(report.get("totalHolders"), int):
             p.holders = report["totalHolders"]
         p.risks = [str(r.get("name") or "") for r in report.get("risks") or [] if isinstance(r, dict)]
+        if report:
+            p.mint_flags, p.transfer_fee_pct = mint_flags(report)
         if s.mint not in self._meta:
             self._meta[s.mint] = self._metadata((report.get("tokenMeta") or {}).get("uri"))
         p.description, meta_links = self._meta[s.mint]
