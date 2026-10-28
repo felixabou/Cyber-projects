@@ -337,6 +337,18 @@ def test_manual_trades_any_chain(tmp_path):
         assert "paper-only" in str(exc)
 
 
+def test_solana_coins_quoted_in_another_coin(tmp_path):
+    # Grokbot only trades against SPCX: the momentum lane's SOL/USDC market has no pair for it, but
+    # manual, copy and long-term trades take the most liquid pair in any quote.
+    odd = make_snap(mint="GROKpump", symbol="Grokbot", quote_symbol="SPCX", liquidity_usd=82_000)
+    sol = make_snap(mint="SOLpump", symbol="PLAIN")
+    a = lane_agent(tmp_path, sol=[sol], other=[odd])
+    assert a._fetch(["GROKpump"]) == {}
+    assert a.manual_buy("solana", "GROKpump", 25, managed=True).startswith("Bought $25.00 of Grokbot on solana")
+    a.manual_buy("solana", "SOLpump", 25, managed=True)  # not in the any-quote lookup: the SOL/USDC market's pair
+    assert set(a._fetch(["GROKpump", "SOLpump"])) == {"GROKpump", "SOLpump"}  # held: priced the same way
+
+
 def test_telegram_buy_sell_agent(tmp_path):
     from memecoin_agent.config import TelegramConfig
     from memecoin_agent.telegram_bot import TelegramBot
