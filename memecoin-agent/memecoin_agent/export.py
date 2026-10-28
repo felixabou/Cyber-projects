@@ -1,92 +1,108 @@
-"""Trade CSVs on a schedule, for downloading later.
+"""Trade downloads.
 
-Each finished period (a UTC clock hour by default) that had trades gets its own file in
-export.dir, e.g. `trades_2026-10-22_1300-1400_UTC.csv`, with the same columns as the trade journal.
-The journal (agent.trades_csv) stays the complete history; these are its hourly slices. Periods
-missed while the agent was off are filled in on the next start (up to two days back).
+Every trade goes into one file for all time: the trade journal (agent.trades_csv). Downloads are
+slices of it made on request, with the journal's columns:
+- "session": this run of the agent (since it started),
+- "1h" ... "24h": the last N hours,
+- "all": every trade.
 """
 
 from __future__ import annotations
 
-import logging
+import csv
+import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import ExportConfig
-from .models import TradeRecord
-from .portfolio import read_trades_csv, write_trades_csv
+from .portfolio import TRADE_COLUMNS
 
-log = logging.getLogger(__name__)
+MAX_HOURS = 24
+RANGES = ("session", *(f"{h}h" for h in range(1, MAX_HOURS + 1)), "all")
+_HOURS = re.compile(r"^(?:last\s*)?(\d{1,2})\s*(?:h|hr|hrs|hour|hours)?$")
 
-LOOKBACK = timedelta(hours=48)
-FILE_RE = re.compile(r"^trades_\d{4}-\d{2}-\d{2}_\d{4}-\d{4}_UTC\.csv$")
+
+def parse_range(text: str | None) -> str:
+    """'session', 'all' or 'Nh' (1-24) from what a person typed: '6', '6h', '6 hours', 'last 6h'..."""
+    t = (text or "all").strip().lower()
+    if t in ("session", "this session", "all", "everything"):
+        return "all" if t == "everything" else t.replace("this ", "")
+    m = _HOURS.match(t)
+    if m and 1 <= int(m.group(1)) <= MAX_HOURS:
+        return f"{int(m.group(1))}h"
+    raise ValueError(f"Pick session, all, or 1 to {MAX_HOURS} hours")
+
+
+def read_journal(path: str | Path) -> bytes:
+    """The journal's complete rows (a row the agent is still appending is left out)."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return b""
+    return data[: data.rfind(b"\n") + 1]
 
 
 @dataclass
-class ExportedFile:
-    path: Path
-    start: datetime
-    end: datetime
-    trades: list[TradeRecord]
+class TradeSlice:
+    which: str
+    since: datetime | None
+    until: datetime
+    rows: list[dict[str, str]] = field(default_factory=list)
+    columns: list[str] = field(default_factory=list)
+
+    @property
+    def filename(self) -> str:
+        if self.which == "session" and self.since:
+            return f"trades_session_{self.since:%Y-%m-%d_%H%M}-{self.until:%H%M}_UTC.csv"
+        label = "all" if self.which == "all" else f"last_{self.which}"
+        return f"trades_{label}_to_{self.until:%Y-%m-%d_%H%M}_UTC.csv"
+
+    @property
+    def label(self) -> str:
+        if self.which == "all":
+            return "All trades"
+        if self.which == "session":
+            return f"This session's trades (since {self.since:%b %d %H:%M} UTC)"
+        hours = int(self.which[:-1])
+        return f"Trades in the last {hours} hour{'s' if hours > 1 else ''}"
+
+    def to_csv(self) -> bytes:
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=self.columns, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(self.rows)
+        return out.getvalue().encode()
 
     def summary(self) -> str:
-        sells = [t for t in self.trades if t.side == "sell"]
-        realized = sum(t.realized_pnl_usd for t in sells)
+        sells = [r for r in self.rows if r.get("side") == "sell"]
+        try:
+            realized = sum(float(r.get("realized_pnl_usd") or 0) for r in sells)
+        except ValueError:
+            realized = 0.0
         sign = "+" if realized >= 0 else "-"
-        return (f"Trades {self.start:%b %d %H:%M}-{self.end:%H:%M} UTC: {len(self.trades)} "
-                f"({len(self.trades) - len(sells)} buys, {len(sells)} sells), realized {sign}${abs(realized):,.2f}")
+        return (f"{self.label}: {len(self.rows)} ({len(self.rows) - len(sells)} buys, {len(sells)} sells), "
+                f"realized {sign}${abs(realized):,.2f}")
 
 
-class TradeExporter:
-    def __init__(self, cfg: ExportConfig, trades_csv: str | Path, now: datetime) -> None:
-        self.dir = Path(cfg.dir)
-        self.trades_csv = Path(trades_csv)
-        self.period = timedelta(minutes=cfg.every_minutes)
-        # Periods starting before this are settled (exported, or had no trades).
-        self._done_until = self.period_start(now) - LOOKBACK
+def _utc(t: datetime) -> datetime:
+    return t.astimezone(timezone.utc) if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
-    def period_start(self, t: datetime) -> datetime:
-        t = t.astimezone(timezone.utc) if t.tzinfo else t.replace(tzinfo=timezone.utc)
-        day = t.replace(hour=0, minute=0, second=0, microsecond=0)
-        return day + self.period * ((t - day) // self.period)
 
-    def path_for(self, start: datetime) -> Path:
-        end = start + self.period
-        end_label = "2400" if end.date() != start.date() else f"{end:%H%M}"
-        return self.dir / f"trades_{start:%Y-%m-%d}_{start:%H%M}-{end_label}_UTC.csv"
-
-    def due(self, now: datetime) -> bool:
-        return self.period_start(now) > self._done_until
-
-    def run(self, now: datetime) -> list[ExportedFile]:
-        """Write a file for every finished period since the last run that had trades and has no file yet."""
-        until = self.period_start(now)  # the current period isn't finished
-        if until <= self._done_until:
-            return []
-        since, self._done_until = self._done_until, until
-        groups: dict[datetime, list[TradeRecord]] = {}
-        for t in read_trades_csv(self.trades_csv):
-            if since <= t.time < until:
-                groups.setdefault(self.period_start(t.time), []).append(t)
-        written: list[ExportedFile] = []
-        for start, trades in sorted(groups.items()):
-            path = self.path_for(start)
-            if path.exists():  # written before a restart
-                continue
+def select(journal: str | Path, which: str, now: datetime, session_start: datetime) -> TradeSlice:
+    """The journal's trades for one download range (see parse_range)."""
+    which = parse_range(which)
+    now = _utc(now)
+    since = None if which == "all" else _utc(session_start) if which == "session" \
+        else now - timedelta(hours=int(which[:-1]))
+    reader = csv.DictReader(io.StringIO(read_journal(journal).decode("utf-8", "replace")))
+    slice_ = TradeSlice(which, since, now, columns=list(reader.fieldnames or TRADE_COLUMNS))
+    for row in reader:
+        if since is not None:
             try:
-                write_trades_csv(path, trades)
-            except OSError as exc:
-                log.warning("Could not write trade export %s: %s", path, exc)
+                if _utc(datetime.fromisoformat(row["time"])) < since:
+                    continue
+            except (KeyError, TypeError, ValueError):
                 continue
-            written.append(ExportedFile(path, start, start + self.period, trades))
-            log.info("Saved %s (%d trades)", path, len(trades))
-        return written
-
-    def files(self, limit: int = 200) -> list[Path]:
-        """Exported files, newest first."""
-        if not self.dir.is_dir():
-            return []
-        return sorted((p for p in self.dir.iterdir() if FILE_RE.match(p.name)), key=lambda p: p.name,
-                      reverse=True)[:limit]
+        slice_.rows.append(row)
+    return slice_

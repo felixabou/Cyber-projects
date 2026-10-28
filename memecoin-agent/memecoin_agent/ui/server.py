@@ -191,23 +191,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/backtest":
             self._json(runner.backtest.state)
         elif path == "/api/trades.csv":
-            csv_path = Path(runner.agent.cfg.agent.trades_csv)
-            body = csv_path.read_bytes() if csv_path.exists() else b""
-            self._send(200, body, "text/csv; charset=utf-8",
-                       {"Content-Disposition": 'attachment; filename="trades.csv"'})
-        elif path == "/api/exports":
-            files = runner.exporter.files() if runner.exporter is not None else []
-            self._json({"files": [{"name": p.name, "bytes": p.stat().st_size} for p in files]})
-        elif path.startswith("/api/exports/"):
-            from ..export import FILE_RE
+            # One journal for all time; ?range= picks session, 1h-24h or all (the default).
+            from ..export import select
 
-            name = path[len("/api/exports/"):]
-            file = runner.exporter.dir / name if runner.exporter is not None and FILE_RE.match(name) else None
-            if file is None or not file.is_file():
-                self._error(HTTPStatus.NOT_FOUND, "No such export")
+            try:
+                part = select(runner.agent.cfg.agent.trades_csv, q.get("range", ["all"])[0],
+                              runner.agent.clock(), runner.started_at)
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-            self._send(200, file.read_bytes(), "text/csv; charset=utf-8",
-                       {"Content-Disposition": f'attachment; filename="{name}"'})
+            self._send(200, part.to_csv(), "text/csv; charset=utf-8",
+                       {"Content-Disposition": f'attachment; filename="{part.filename}"'})
         else:
             self._error(HTTPStatus.NOT_FOUND, "Not found")
 

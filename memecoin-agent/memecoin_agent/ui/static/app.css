@@ -163,8 +163,6 @@ main { padding: 20px 24px 48px; max-width: 1440px; margin: 0 auto; }
 .card-tools { display: flex; gap: 8px; align-items: center; }
 .grid-2 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
 .filter-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-.export-list { display: flex; gap: 8px; flex-wrap: wrap; max-height: 240px; overflow-y: auto; }
-.export-list .btn { font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
 
 /* Hero + tiles */
@@ -342,6 +340,10 @@ td.reason .verdict.v-fail { white-space: normal; }
 .switch:checked { background: var(--series-1); }
 .switch:checked::after { transform: translateX(13px); }
 .switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* Trades tab: downloads */
+.downloads { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.dl-group { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); font-size: 13px; }
+.dl-group select { width: auto; padding-right: 24px; }
 /* Trade tab */
 .lookup-form { display: flex; gap: 8px; }
 .lookup-form .input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }

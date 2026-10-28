@@ -215,8 +215,8 @@ def build_telegram(cfg: Config, runner):
 
 
 class Engine:
-    """Everything a trading session runs in one process: agent, launch feed, recorder, hourly trade
-    exports, Telegram bot, state lock."""
+    """Everything a trading session runs in one process: agent, launch feed, recorder, background
+    lanes, Telegram bot, state lock."""
 
     def __init__(self, cfg: Config, args: argparse.Namespace) -> None:
         from .recording import Recorder, RecordingWriter
@@ -258,14 +258,9 @@ class Engine:
         except BaseException:
             self.lock.release()
             raise
-        exporter = None
-        if cfg.export.enabled:
-            from .export import TradeExporter
-
-            exporter = TradeExporter(cfg.export, cfg.agent.trades_csv, agent.clock())
         self.runner = AgentRunner(
             agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
-            record=record, max_ticks=getattr(args, "max_ticks", None), exporter=exporter,
+            record=record, max_ticks=getattr(args, "max_ticks", None),
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
                                            RecordingWriter(cfg.recorder.dir), clock=agent.clock),
         )
@@ -525,7 +520,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_scan)
 
     p = sub.add_parser("report", help="win rate and profit by exit reason, lane, liquidity, age... from the trade files")
-    p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. the hourly exports (default: agent.trades_csv)")
+    p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. a downloaded slice (default: agent.trades_csv)")
     p.set_defaults(func=cmd_report)
 
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)

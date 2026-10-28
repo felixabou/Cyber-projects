@@ -338,8 +338,8 @@ Besides `state/trades.csv`, the agent now writes two files that turn trades into
 - `state/after_exit.csv`: after a position is fully sold, the coin is watched for 12 hours. Its highest and lowest price versus the sale price are written when the window ends. This is how you see "it went up after we sold".
 
 ```bash
-memecoin-agent -c config.yaml report                        # state/trades.csv
-memecoin-agent -c config.yaml report --trades exports/*.csv  # or the hourly exports
+memecoin-agent -c config.yaml report                                  # state/trades.csv (all time)
+memecoin-agent -c config.yaml report --trades trades_last_24h_to_*.csv  # or a downloaded slice
 ```
 
 The report shows win rate, average result and profit for each way a trade ended (stop loss, trailing stop, time stop, take profit, LarpCheck flag, liquidity pulled, manual), and, for trades bought after this update, by lane, liquidity, token age, 1h change at entry, score and LarpCheck verdict. The "after the sale" table shows, per exit kind, the average high and low in the next 12 hours and the share of coins that rose more than 50%. Use it to see whether the stop loss is too tight or the hold too short, and which kinds of tokens lose. Below about 30 trades per row it's an anecdote, not a pattern.
@@ -359,7 +359,7 @@ automatically; `--no-browser` and `--port` change that.
   - how close you are to each risk limit;
   - recent trades.
 - **Scanner**: every token from the last scan, with its score, key metrics and verdict. The verdict is *Bought*, *Passed filters*, *Unsafe: …* (the RugCheck reason) or the exact filters it failed. This is the place to tune your filters.
-- **Trades**: the trade journal, with transaction links in live mode, a CSV download of the full history, and the saved hourly trade files.
+- **Trades**: the trade journal, with transaction links in live mode, and downloads: this session's trades, the last 1–24 hours, or all of them.
 - **Activity**: the agent's log, live, filterable to trades or to warnings.
 - **Backtest**: pick a recording, enter `section.key=value` overrides, and get the report, equity curve, exit breakdown and every round trip. It runs on a copy of the config and never touches the live agent.
 - **Settings**: the active config, read-only, with API keys masked.
@@ -384,25 +384,24 @@ To reach it from another device, set `MEMECOIN_UI_PASSWORD` and pass `--host 0.0
 
 ## Trade files
 
-Every fill is appended to `state/trades.csv` as it happens; that's the full history
-(the dashboard's **Download CSV**, or `/csv` in Telegram). On top of that, every hour
-the agent saves that hour's trades as their own file:
+Every fill is appended to one file, `state/trades.csv`, as it happens: all trades, for all time.
+Download the part you want, whenever you want:
 
-```
-exports/trades_2026-10-22_1300-1400_UTC.csv
-exports/trades_2026-10-22_1500-1600_UTC.csv     # no file for 14:00-15:00: no trades then
-```
+| What | Dashboard (**Trades** tab) | Telegram |
+|---|---|---|
+| This session's trades (since the agent started) | **This session's trades** | `/csv session` |
+| The last 1 to 24 hours | **Last** [hours] **Download** | `/csv 6` (any number from 1 to 24) |
+| Every trade | **All trades** | `/csv` or `/csv all` |
 
-- Hours are UTC clock hours. An hour without trades gets no file.
-- Hours missed while the agent was off are filled in on the next start (up to two days back).
-- Download them from the dashboard (**Trades → Saved trade files**), or get each one in Telegram as it's written.
-- Columns: time, side, mint, symbol, token amount, USD value, price, fee, reason, realized PnL, transaction signature (live mode).
-- `export.every_minutes` changes the period (30 = half-hour files); `export.enabled: false` turns it off.
+- Files are named for what they hold, e.g. `trades_last_6h_to_2026-10-28_1500_UTC.csv`.
+- Columns: time (UTC), side, mint, symbol, token amount, USD value, price, fee, reason, realized PnL,
+  transaction signature (live mode).
+- The hourly files in `exports/` are gone; an old `exports/` folder can be deleted.
 
 ## Telegram bot
 
 The agent can report to a Telegram chat and take commands from it: trade alerts as they happen,
-each hourly trade file, and control from your phone.
+trade downloads, and control from your phone.
 
 **Set up** (once):
 
@@ -421,7 +420,7 @@ each hourly trade file, and control from your phone.
 | `/status` | Equity, today's PnL, positions used, whether entries are open, LarpCheck checks left |
 | `/positions` | Each open position: value, PnL, time held, LarpCheck verdict, chart link |
 | `/trades` | The last 10 trades |
-| `/csv` | The full trade history as a CSV file |
+| `/csv`, `/csv session`, `/csv 6` | Trades as a CSV file: all of them, this session's, or the last 1–24 hours |
 | `/pause`, `/resume` | Stop or allow new buys (exits always keep running) |
 | `/scan` | Scan for entries now |
 | `/close SYMBOL` | Sell one position (the mint address works too) |
@@ -448,7 +447,7 @@ To keep paper trading while your computer is off, run the agent on a server. The
 [`Dockerfile`](Dockerfile) packages it for that:
 
 - It runs headless (`run`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
-- Everything it keeps is written to `/data`: `state/` (portfolio, `trades.csv`, equity curve) and `exports/`.
+- Everything it keeps is written to `/data/state/`: portfolio, `trades.csv` (every trade), equity curve.
 - Keys come from environment variables; see [`.env.example`](.env.example).
 - It shuts down cleanly when the host stops or redeploys it, saving its state first.
 
@@ -589,10 +588,10 @@ memecoin_agent/
   recording.py       market-data recorder (gzipped JSONL)
   backtest.py        point-in-time replay + performance report
   simulation.py      offline synthetic market for demo/tests
-  ui/runner.py       the session engine for run + ui: agent loop, recorder, exports, controls, views
-  export.py          hourly trade CSVs (exports/)
+  ui/runner.py       the session engine for run + ui: agent loop, recorder, controls, views
+  export.py          trade downloads: this session, the last 1-24 hours, or all (slices of trades.csv)
   analytics.py       entry details, after-sale tracking, `report`
-  telegram_bot.py    Telegram alerts, hourly CSVs and commands (Bot API long polling)
+  telegram_bot.py    Telegram alerts, trade downloads and commands (Bot API long polling)
   statelock.py       one trader per state/ directory
   ui/server.py       stdlib HTTP server + auth; ui/static/ is the page (vanilla JS, no build)
 tests/               pytest suite (HTTP and RPC mocked; real tx signing)

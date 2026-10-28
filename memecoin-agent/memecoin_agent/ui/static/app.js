@@ -17,7 +17,6 @@ const state = {
   logs: [],
   configLoaded: false,
   backtest: null,
-  exportsAt: 0,
   failures: 0,
   lastTicks: -1,
   lastTickWall: Date.now(),  // browser time when the tick counter last advanced
@@ -880,29 +879,23 @@ function renderTrades(v) {
   const sells = v.trades.filter((t) => t.side === "sell");
   const realized = sells.reduce((a, t) => a + t.realized_pnl_usd, 0);
   $("#trades-summary").textContent = `${v.trades.length} most recent trades · ${sells.length} sells · realized ${usd(realized, { sign: true })}`;
-  $("#trades-download").href = `/api/trades.csv?token=${encodeURIComponent(TOKEN)}`;
   replace($("#trades-table"), tradesTable(v.trades, true));
-  $("#exports-card").hidden = !v.export;
-  if (v.export && Date.now() - state.exportsAt > 60000) loadExports(v.export);
+  const dl = v.downloads;
+  if (dl && dl.session_started_at) {
+    $("#downloads-note").textContent = `This session started ${timeLabel(dl.session_started_at, true)}`;
+  }
+  setDownloadLinks();
 }
 
-async function loadExports(exp) {
-  state.exportsAt = Date.now();
-  const every = exp.every_minutes === 60 ? "hour" : `${exp.every_minutes} minutes`;
-  $("#exports-note").textContent = `One CSV per ${every} that had trades (UTC), saved in ${exp.dir}/`;
-  try {
-    const { files } = await api("/api/exports");
-    const label = (name) => {
-      const m = name.match(/^trades_(\d{4}-\d{2}-\d{2})_(\d\d)(\d\d)-(\d\d)(\d\d)_UTC\.csv$/);
-      return m ? `${m[1]} ${m[2]}:${m[3]}–${m[4]}:${m[5]} UTC` : name;
-    };
-    replace($("#exports-list"), files.length ? files.map((f) => h("a", {
-      class: "btn btn-small", download: f.name, text: label(f.name), title: f.name,
-      href: `/api/exports/${encodeURIComponent(f.name)}?token=${encodeURIComponent(TOKEN)}`,
-    })) : h("div", { class: "empty", text: "No saved files yet: the first appears after an hour with trades." }));
-  } catch (e) {
-    state.exportsAt = 0;
-  }
+// Downloads are slices of the one all-time trade file: this session, the last N hours (1-24), or all.
+function downloadUrl(range) {
+  return `/api/trades.csv?range=${encodeURIComponent(range)}&token=${encodeURIComponent(TOKEN)}`;
+}
+
+function setDownloadLinks() {
+  $("#dl-session").href = downloadUrl("session");
+  $("#dl-hours-go").href = downloadUrl(`${$("#dl-hours").value || 1}h`);
+  $("#dl-all").href = downloadUrl("all");
 }
 
 // ---------------------------------------------------------------- activity
@@ -1179,6 +1172,13 @@ function init() {
   });
 
   const saved = store("tab");
+  const hours = $("#dl-hours");
+  for (let n = 1; n <= 24; n++) hours.append(h("option", { value: n, text: `${n} hour${n > 1 ? "s" : ""}` }));
+  const savedHours = store("dlHours");
+  hours.value = /^([1-9]|1\d|2[0-4])$/.test(savedHours || "") ? savedHours : "1";
+  hours.addEventListener("change", () => { store("dlHours", hours.value); setDownloadLinks(); });
+  setDownloadLinks();
+
   $("#lookup-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const q = $("#lookup-q").value.trim();

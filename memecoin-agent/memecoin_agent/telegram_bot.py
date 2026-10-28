@@ -1,4 +1,4 @@
-"""Telegram bot: trade alerts, the hourly trade CSVs and remote control, over the Bot API.
+"""Telegram bot: trade alerts, trade downloads and remote control, over the Bot API.
 
 Long polling (getUpdates) works from anywhere, a laptop or a cloud container: no public URL and
 no inbound port. Only chats in telegram.allowed_chat_ids / TELEGRAM_CHAT_ID can use it; anyone
@@ -10,8 +10,6 @@ are untrusted. The bot token is part of every request URL, so errors are logged 
 
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import math
 import os
@@ -40,7 +38,7 @@ COMMANDS = [
     ("status", "Equity, PnL and what the agent is doing"),
     ("positions", "Open positions"),
     ("trades", "The last 10 trades"),
-    ("csv", "Download the full trade history (CSV)"),
+    ("csv", "Download trades (CSV): /csv session, /csv 6 (last 6 hours, 1-24), /csv all"),
     ("pause", "Stop opening new positions (exits keep running)"),
     ("resume", "Allow new positions again"),
     ("scan", "Scan for entries now"),
@@ -225,7 +223,7 @@ def format_trades(v: dict[str, Any], n: int = 10) -> str:
 def help_text(controls: bool) -> str:
     rows = [f"/{c} - {d}" for c, d in COMMANDS if controls or c not in CONTROLS]
     return "\n".join(["memecoin-agent commands:", *rows,
-                      "", "Trades are announced here as they happen, and each hour's trades arrive as a CSV."])
+                      "", "Trades are announced here as they happen; /csv downloads them whenever you want."])
 
 
 # -- Bot API client ----------------------------------------------------------------------
@@ -366,20 +364,13 @@ class TelegramBot:
         for chat in sorted(self.chats):
             self.send(chat, text)
 
-    def broadcast_file(self, filename: str, content: bytes, caption: str) -> None:
-        for chat in sorted(self.chats):
-            self._queue(("doc", chat, (filename, content, caption)))
-
-    def notify(self, trades: list[TradeRecord], exports: list[Any]) -> None:
-        """New trades and hourly exports (AgentRunner listener; runs on the agent thread)."""
+    def notify(self, trades: list[TradeRecord]) -> None:
+        """New trades (AgentRunner listener; runs on the agent thread)."""
         if self.state == "token rejected" or not self.chats:
             return
         if trades and self.cfg.notify_trades:
             mode = self.runner.agent.cfg.execution.mode
             self.broadcast("\n\n".join(format_trade(t, mode) for t in trades))
-        if self.cfg.send_exports:
-            for e in exports:
-                self.broadcast_file(e.path.name, e.path.read_bytes(), e.summary())
 
     def _send_loop(self) -> None:
         while not (self._stop.is_set() and self.outbox.empty()):
@@ -480,7 +471,7 @@ class TelegramBot:
         if cmd == "trades":
             return format_trades(view)
         if cmd == "csv":
-            return self._send_csv(chat)
+            return self._send_csv(chat, arg)
         if cmd == "pause":
             return self._control("pause", "Paused: no new positions. Exits keep running.")
         if cmd == "resume":
@@ -571,15 +562,16 @@ class TelegramBot:
         pos, why = self._match(key.strip(), view, "/agent SYMBOL on|off")
         return self._control("set_managed", mint=pos["mint"], managed=switch.lower() == "on") if pos else why
 
-    def _send_csv(self, chat: int) -> str | None:
-        path = Path(self.runner.agent.cfg.agent.trades_csv)
+    def _send_csv(self, chat: int, arg: str = "") -> str | None:
+        from .export import MAX_HOURS, parse_range, select
+
         try:
-            data = path.read_bytes()
-        except OSError:
-            return "No trades yet."
-        data = data[: data.rfind(b"\n") + 1]  # the agent may be appending a row right now
-        rows = sum(1 for _ in csv.reader(io.StringIO(data.decode("utf-8", "replace")))) - 1  # minus the header
-        if rows < 1:
-            return "No trades yet."
-        self._queue(("doc", chat, ("trades.csv", data, f"Full trade history: {rows} trades")))
+            which = parse_range(arg or "all")
+        except ValueError:
+            return f"Send /csv session, /csv all, or /csv HOURS for the last 1 to {MAX_HOURS} hours (e.g. /csv 6)."
+        part = select(self.runner.agent.cfg.agent.trades_csv, which, self.runner.agent.clock(), self.runner.started_at)
+        if not part.rows:
+            return {"all": "No trades yet.", "session": "No trades this session yet."}.get(
+                which, f"No trades in the last {which[:-1]} hour(s).")
+        self._queue(("doc", chat, (part.filename, part.to_csv(), part.summary())))
         return None

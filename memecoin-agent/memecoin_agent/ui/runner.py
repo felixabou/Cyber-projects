@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..agent import Agent
+from ..export import RANGES
 from ..models import TradeRecord
 from ..portfolio import read_trades_csv
 from ..recording import summarize_recordings
@@ -203,11 +204,9 @@ class AgentRunner:
         make_recorder: Callable[[], Any] | None = None,
         record: bool = False,
         max_ticks: int | None = None,
-        exporter: Any = None,
     ) -> None:
         self.agent = agent
-        self.exporter = exporter  # export.TradeExporter: the hourly trade CSVs
-        # Told about new trades and exports on the agent thread (the Telegram bot only queues messages).
+        # Told about new trades on the agent thread (the Telegram bot only queues messages).
         self.listeners: list[Any] = []
         self.telegram: Any = None  # the bot, for the dashboard's status line
         self._trades_notified = agent.trades_made
@@ -273,9 +272,8 @@ class AgentRunner:
                         log.exception("Tick failed")
                     self.equity.add(a.clock(), a.pf.equity_usd())
                     self._record()  # after trading, inside the sleep budget: never delays exits
-                    exported = self._export()
                     self._publish()
-                    self._notify(exported)
+                    self._notify()
                     if self.max_ticks is not None and a.ticks >= self.max_ticks:
                         break
                 self._wake.wait(timeout=max(0.0, next_tick - time.monotonic()))
@@ -303,26 +301,17 @@ class AgentRunner:
         except Exception:
             log.exception("Recorder tick failed")
 
-    # -- exports and listeners ------------------------------------------------------
-    def _export(self) -> list[Any]:
-        if self.exporter is None or not self.exporter.due(self.agent.clock()):
-            return []
-        try:
-            return self.exporter.run(self.agent.clock())
-        except Exception:
-            log.exception("Trade export failed")
-            return []
-
-    def _notify(self, exported: list[Any]) -> None:
+    # -- listeners ------------------------------------------------------------------
+    def _notify(self) -> None:
         a = self.agent
         n = min(a.trades_made - self._trades_notified, len(a.recent_trades))
         self._trades_notified = a.trades_made
         trades = list(a.recent_trades)[-n:] if n > 0 else []
-        if not (trades or exported):
+        if not trades:
             return
         for listener in self.listeners:
             try:
-                listener.notify(trades, exported)
+                listener.notify(trades)
             except Exception:
                 log.exception("Listener %s failed", type(listener).__name__)
 
@@ -344,7 +333,7 @@ class AgentRunner:
             except Exception as exc:
                 fut.set_exception(exc)
             self._publish()
-            self._notify([])  # manual sells get their alerts now, not after the next tick
+            self._notify()  # manual sells get their alerts now, not after the next tick
 
     def _execute(self, action: str, **kw: Any) -> dict[str, Any]:
         a = self.agent
@@ -510,8 +499,7 @@ class AgentRunner:
             "recorder": self._recorder_view(),
             "larpcheck": self._larpcheck_view(),
             "gmgn": self._gmgn_view(),
-            "export": {"dir": str(self.exporter.dir), "every_minutes": int(self.exporter.period.total_seconds() // 60)}
-            if self.exporter is not None else None,
+            "downloads": {"ranges": list(RANGES), "session_started_at": _iso(self.started_at)},
             "telegram": self.telegram.status() if self.telegram is not None else None,
             "copy": a.copy_tracker.view() if a.copy_tracker is not None else None,
             "longterm": a.longterm.view() if a.longterm is not None else None,

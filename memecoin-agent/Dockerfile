@@ -1,5 +1,5 @@
 # The agent as a 24/7 paper trader on a server or cloud host (Railway, any VPS with Docker).
-# Everything it keeps (portfolio, trade journal, hourly trade CSVs) is written under /data:
+# Everything it keeps (portfolio, the all-time trade journal, equity curve) is written under /data:
 # attach a persistent volume there or each redeploy starts from a fresh $1,000 paper wallet.
 # Keys come from environment variables; see .env.example.
 FROM python:3.12-slim

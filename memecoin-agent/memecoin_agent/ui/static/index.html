@@ -160,15 +160,23 @@
 
     <!-- Trades -->
     <section id="tab-trades" class="tab-panel" role="tabpanel" hidden>
+      <section class="card">
+        <div class="card-head"><h2>Download trades</h2><span id="downloads-note" class="muted"></span></div>
+        <div class="downloads">
+          <a id="dl-session" class="btn btn-primary" href="#" download>This session's trades</a>
+          <span class="dl-group">
+            <label for="dl-hours">Last</label>
+            <select id="dl-hours" class="input" aria-label="How many hours"></select>
+            <a id="dl-hours-go" class="btn" href="#" download>Download</a>
+          </span>
+          <a id="dl-all" class="btn" href="#" download>All trades</a>
+        </div>
+        <p class="hint">Every trade is saved in one file for all time (<code>state/trades.csv</code>); each button downloads a slice of it as a CSV.</p>
+      </section>
       <div class="filter-row">
         <span id="trades-summary" class="muted"></span>
-        <a id="trades-download" class="btn btn-small" href="#" download="trades.csv">Download CSV</a>
       </div>
       <section class="card"><div id="trades-table" class="table-wrap"></div></section>
-      <section id="exports-card" class="card" hidden>
-        <div class="card-head"><h2>Saved trade files</h2><span id="exports-note" class="muted"></span></div>
-        <div id="exports-list" class="export-list"></div>
-      </section>
     </section>
 
     <!-- Activity -->

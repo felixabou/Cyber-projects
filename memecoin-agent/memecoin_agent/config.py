@@ -326,8 +326,9 @@ class LaunchConfig:
 
 @dataclass
 class ExportConfig:
-    """Trade CSVs saved on a schedule for downloading later: one file per period (UTC clock hours by
-    default) that had trades, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv."""
+    """No longer used: the hourly trade files are gone. Every trade is in agent.trades_csv, and the
+    dashboard and Telegram download this session's, the last 1-24 hours' or all of them. Kept so
+    config files that still have an export: section load."""
 
     enabled: bool = True
     dir: str = "exports"
@@ -336,7 +337,7 @@ class ExportConfig:
 
 @dataclass
 class TelegramConfig:
-    """Telegram bot: trade alerts, the hourly CSVs and remote control from your phone.
+    """Telegram bot: trade alerts, trade downloads (/csv) and remote control from your phone.
     On whenever a bot token is configured (TELEGRAM_BOT_TOKEN, or token_file)."""
 
     enabled: bool = True
@@ -345,7 +346,7 @@ class TelegramConfig:
     # adds to the list. Message the bot from a chat that isn't listed and it replies with its id.
     allowed_chat_ids: list[int] = field(default_factory=list)
     notify_trades: bool = True
-    send_exports: bool = True  # post each hourly trade CSV to the chat
+    send_exports: bool = True  # no longer used (there are no hourly files); /csv downloads trades
     # /pause, /resume, /scan, /close and /closeall. Off = the bot only reports.
     allow_controls: bool = True
 
@@ -475,8 +476,6 @@ class Config:
             raise ValueError("launch.max_age_minutes must be > 0 and launch.buy_window_minutes >= 0")
         if self.launch.max_signature_pages < 1:
             raise ValueError("launch.max_signature_pages must be >= 1")
-        if not 0 < self.export.every_minutes <= 1440 or 1440 % self.export.every_minutes:
-            raise ValueError("export.every_minutes must divide a day evenly (e.g. 15, 30, 60, 120, 1440)")
 
 
 _SECTIONS: dict[str, type] = {
