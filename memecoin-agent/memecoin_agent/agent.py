@@ -34,6 +34,10 @@ class Agent:
         analytics: object | None = None,
         profiler: object | None = None,
         route_check: object | None = None,
+        multichain: object | None = None,
+        copy_tracker: object | None = None,
+        longterm: object | None = None,
+        chain_safety: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -54,6 +58,20 @@ class Agent:
         self.kinds: dict[str, str] = {}  # mint -> "tech" / "meme", for the scanner view
         # data.route.SellRouteCheck: paper-mode honeypot check (live mode's executor does its own).
         self.route_check = route_check
+        # Tokens on other chains: data.dexscreener.DexScreenerClient (snapshots_on), plus which chain
+        # each non-Solana token lives on (held positions carry their own).
+        self.multichain = multichain
+        self.chains: dict[str, str] = {}
+        # Copy lane (data.copytrade.CopyTracker): low caps bought only when a tracked wallet buys them.
+        self.copy_tracker = copy_tracker
+        # Long-term lane (data.longterm.LongTermScanner): old, worn-down coins that still trade daily.
+        self.longterm = longterm
+        # data.evm_safety.ChainSafety: honeypot and tax checks for tokens on other chains.
+        self.chain_safety = chain_safety
+        self._longterm_exits: Any = None
+        self.lane_outcomes: deque[dict[str, Any]] = deque(maxlen=100)  # copy / long-term decisions, newest last
+        self._lane_last: dict[str, str] = {}  # mint -> last outcome noted (log each change once)
+        self._next_longterm: datetime | None = None
         # Prices this agent has seen per candidate over the last 2 hours: catches buying right after a dump.
         self._seen_prices: dict[str, deque[tuple[datetime, float]]] = {}
         self.launch_qualified: dict[str, datetime] = {}  # mint -> when it first qualified
@@ -86,6 +104,11 @@ class Agent:
                     log.warning("After-sale tracking failed: %s", exc)
             if self.ticks % self.cfg.agent.scan_every_ticks == 0:
                 self.scan_and_enter(now)
+            for lane in (self.enter_copy_signals, self.enter_longterm):  # every tick: copy signals go stale fast
+                try:
+                    lane(now)
+                except Exception as exc:
+                    log.warning("%s failed: %s", lane.__name__, exc)
         finally:
             self.ticks += 1
             self.last_tick_at = now
@@ -106,14 +129,40 @@ class Agent:
         self._trades_mirrored = len(self.pf.trades)
 
     # -- exits ----------------------------------------------------------------------
+    def chain_of(self, mint: str) -> str:
+        pos = self.pf.positions.get(mint)
+        return pos.chain if pos is not None else self.chains.get(mint, "solana")
+
     def _fetch(self, mints: list[str]) -> dict[str, TokenSnapshot]:
+        """Snapshots for Solana mints from the market (with its discovery wrappers), and for tokens on
+        other chains (copy trades, long-term holds, manual trades) from DexScreener directly."""
         if not mints:
             return {}
-        try:
-            return self.market.snapshots(mints)
-        except Exception as exc:
-            log.warning("Market data fetch failed: %s", exc)
-            return {}
+        by_chain: dict[str, list[str]] = {}
+        for m in mints:
+            by_chain.setdefault(self.chain_of(m), []).append(m)
+        out: dict[str, TokenSnapshot] = {}
+        for chain, group in by_chain.items():
+            try:
+                if chain == "solana":
+                    out.update(self.market.snapshots(group))
+                elif self.multichain is not None:
+                    out.update(self.multichain.snapshots_on(chain, group))
+            except Exception as exc:
+                log.warning("Market data fetch failed (%s): %s", chain, exc)
+        return out
+
+    def exits_for(self, pos: Any) -> Any:
+        """Exit settings for a position: long-term holds get their own stop and profit line, no time stop."""
+        if pos.lane != "longterm":
+            return self.cfg.exits
+        if self._longterm_exits is None:
+            from dataclasses import replace
+
+            lt = self.cfg.longterm
+            self._longterm_exits = replace(self.cfg.exits, style="let_it_run", hard_stop_pct=lt.hard_stop_pct,
+                                           secure_at_pct=lt.secure_at_pct, dip_watch_pct=None, max_hold_minutes=None)
+        return self._longterm_exits
 
     def manage_positions(self, now: datetime) -> None:
         snaps = self._fetch(list(self.pf.positions))
@@ -123,6 +172,8 @@ class Agent:
                 self.pf.mark(snap)
             else:
                 log.warning("No market data for held token %s", pos.symbol)
+            if not pos.managed:
+                continue  # a manual trade: only you sell it (dashboard or Telegram)
             if pos.dust:
                 # Dust is left alone by the strategy; it only goes if it stops qualifying (or by hand).
                 dust_exit = None
@@ -134,8 +185,11 @@ class Agent:
                 if dust_exit:
                     self._sell(mint, dust_exit, snap, now)
                 continue
-            decision = evaluate_exit(pos, snap, self.cfg.exits, now)
-            if decision is None and self.guard is not None:
+            had_note = pos.review_note
+            decision = evaluate_exit(pos, snap, self.exits_for(pos), now, self.cfg.execution.paper_fee_pct)
+            if pos.review_note != had_note and not decision:
+                log.info("Review %s: %s", pos.symbol, pos.review_note)
+            if decision is None and self.guard is not None and pos.chain == "solana":
                 try:
                     decision = self.guard.review_position(pos)
                 except Exception as exc:  # an outside service must never break exit handling
@@ -152,8 +206,15 @@ class Agent:
             return
         if decision.tp_level is not None:
             pos.tp_levels_hit.append(decision.tp_level)
-        realized = self.pf.reduce(mint, decision.fraction, fill, now, decision.reason,
-                                  cooldown_until=self.risk.cooldown_until(now))
+        if decision.secure:
+            # What's left is house money: no stop loss or time stop, reviewed against its own peak.
+            pos.secured_at, pos.runner_peak_usd = now, snap.price_usd if snap else pos.last_price_usd
+            pos.next_review_at = now + timedelta(minutes=self.exits_for(pos).runner_review_minutes)
+            pos.dip_since = None
+            pos.review_note = "initials out; the rest runs"
+        # A long-term hold that was sold isn't rebought while the scanner still likes it: a week off.
+        cooldown = now + timedelta(days=7) if pos.lane == "longterm" else self.risk.cooldown_until(now)
+        realized = self.pf.reduce(mint, decision.fraction, fill, now, decision.reason, cooldown_until=cooldown)
         log.info("SELL %s %.0f%% -> $%.2f | %s | realized %+.2f | equity $%.2f",
                  pos.symbol, decision.fraction * 100, fill.usd_value, decision.reason, realized, self.pf.equity_usd())
         if mint not in self.pf.positions and self.analytics is not None:
@@ -297,11 +358,15 @@ class Agent:
                 return prof, "unsafe: looks manipulated: " + why
         return prof, None
 
-    def _entry_block_reason(self, now: datetime) -> str | None:
+    def _entry_block_reason(self, now: datetime, lane: str = "momentum") -> str | None:
         if self.entries_paused:
             return "paused from the dashboard"
         if self.cfg.agent.kill_switch_file and Path(self.cfg.agent.kill_switch_file).exists():
             return f"kill switch file '{self.cfg.agent.kill_switch_file}' present"
+        if lane == "longterm":  # its own slots, and no hourly entry limit
+            if self.risk.daily_loss_halted(self.pf, now):
+                return f"daily loss limit ({self.cfg.risk.max_daily_loss_pct:.0f}%) hit"
+            return None
         return self.risk.entry_block_reason(self.pf, now)
 
     def _set_entry_block(self, block: str | None) -> None:
@@ -379,6 +444,247 @@ class Agent:
                      snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,
                      snap.market_cap_usd, snap.price_change_h1, snap.url)
         self._record_scan(now, evals, outcomes)
+
+    # -- copy lane, long-term lane, manual trades ---------------------------------------------------
+    def _lane_note(self, now: datetime, lane: str, snap_or_symbol: Any, chain: str, mint: str, outcome: str) -> None:
+        symbol = getattr(snap_or_symbol, "symbol", snap_or_symbol) or mint[:8]
+        if self._lane_last.get(mint) == outcome:
+            for note in self.lane_outcomes:  # same verdict again: refresh it, don't repeat it
+                if note["mint"] == mint and note["outcome"] == outcome:
+                    note["at"] = now.isoformat()
+            return
+        self._lane_last[mint] = outcome
+        if len(self._lane_last) > 5000:
+            self._lane_last = {mint: outcome}
+        self.lane_outcomes.append({"at": now.isoformat(), "lane": lane, "symbol": symbol, "chain": chain,
+                                   "mint": mint, "outcome": outcome})
+        if outcome == "bought" or outcome.startswith(("unsafe", "skipped")):
+            log.info("%s lane: %s (%s): %s", lane.capitalize(), symbol, chain, outcome)
+
+    def token_checks(self, snap: TokenSnapshot, size: float, now: datetime, lane: str) -> str | None:
+        """The checks every non-momentum buy gets, by chain. None: buy it."""
+        if snap.chain != "solana":
+            if self.cfg.execution.mode == "live":
+                return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
+            if self.chain_safety is None:
+                return f"unsafe: no honeypot check available for {snap.chain}"
+            rep = self.chain_safety.check(snap.chain, snap.mint)
+            return None if rep.ok else "unsafe: " + "; ".join(rep.reasons)
+        if self.profiler is not None:
+            try:
+                prof = self.profiler.profile(snap)
+                flags = [f"honeypot risk: {f}" for f in prof.mint_flags]
+                if prof.transfer_fee_pct > self.cfg.authenticity.max_transfer_fee_pct:
+                    flags.append(f"honeypot risk: {prof.transfer_fee_pct:g}% transfer fee")
+                if flags:
+                    return "unsafe: " + "; ".join(flags)
+                self.kinds[snap.mint] = prof.kind
+                if self.guard is not None and hasattr(self.guard, "kinds"):
+                    self.guard.kinds[snap.mint] = prof.kind
+            except Exception as exc:
+                log.warning("Token profile failed for %s: %s", snap.symbol, exc)
+        if lane == "copy":
+            age = snap.age_minutes(now)
+            f = self.cfg.filters
+            if (age is not None and age < f.wallet_scan_below_age_minutes) or snap.market_cap_usd < f.wallet_scan_below_market_cap_usd:
+                ok, note = self._launch_check(snap, "copy")
+                if not ok:
+                    return note
+        report = self.safety.check(snap.mint)
+        if not report.ok:
+            return "unsafe: " + "; ".join(report.reasons)
+        if self.route_check is not None and (why := self.route_check.check(snap.mint, size)):
+            return "unsafe: " + why
+        if reason := self.executor.preflight(snap, size):
+            return f"skipped: {reason}"
+        return None
+
+    def _open(self, snap: TokenSnapshot, size: float, now: datetime, lane: str, reason: str,
+              managed: bool = True) -> Any:
+        fill = self.executor.buy(snap, size)
+        pos = self.pf.open(snap, fill, now, 0.0, reason=reason, lane=lane, managed=managed)
+        pos.kind = self.kinds.get(snap.mint, "")
+        if self.analytics is not None and snap.chain == "solana":
+            self.analytics.log_entry(snap, lane, 0.0, size, fill.price_usd, now, None, kind=pos.kind)
+        log.info("BUY %s (%s, %s lane) $%.2f @ %.10g | %s | liq $%.0f mcap $%.0f | %s", snap.symbol, snap.chain,
+                 lane, size, fill.price_usd, reason, snap.liquidity_usd, snap.market_cap_usd, snap.url)
+        return pos
+
+    def enter_copy_signals(self, now: datetime) -> None:
+        """Copy lane: low caps a tracked wallet just bought (data.copytrade)."""
+        tracker = self.copy_tracker
+        if tracker is None:
+            return
+        from .data.dexscreener import GMGN_TO_DEX, norm_address
+
+        cc, f = self.cfg.copy, self.cfg.filters
+        pending = []
+        for sig in tracker.signals():
+            chain = GMGN_TO_DEX.get(sig.chain, sig.chain)
+            mint = norm_address(chain, sig.token)
+            if self.risk.token_blocked(self.pf, mint, now) or mint in f.blacklist:
+                tracker.consume(sig.chain, sig.token)
+                continue
+            self.chains[mint] = chain
+            pending.append((sig, chain, mint))
+        if not pending:
+            return
+        if block := self._entry_block_reason(now, "copy"):
+            sig, chain, mint = pending[0]
+            self._lane_note(now, "copy", sig.symbol, chain, mint, f"waiting: {block}")
+            return
+        snaps = self._fetch([mint for _, _, mint in pending])  # one lookup per chain for every signal
+        for sig, chain, mint in pending:
+            if block := self._entry_block_reason(now, "copy"):
+                self._lane_note(now, "copy", sig.symbol, chain, mint, f"waiting: {block}")
+                return
+            snap = snaps.get(mint)
+            if snap is None:
+                self._lane_note(now, "copy", sig.symbol, chain, mint, "waiting: no DexScreener pair yet")
+                continue
+            why = None
+            if snap.market_cap_usd >= f.min_market_cap_usd:
+                why = f"skipped: not a low cap (${snap.market_cap_usd:,.0f}; the momentum lane judges it)"
+            elif snap.market_cap_usd < cc.min_market_cap_usd:
+                why = f"skipped: market cap ${snap.market_cap_usd:,.0f} < ${cc.min_market_cap_usd:,.0f}"
+            elif snap.liquidity_usd < cc.min_liquidity_usd:
+                why = f"skipped: liquidity ${snap.liquidity_usd:,.0f} < ${cc.min_liquidity_usd:,.0f}"
+            size = min(cc.position_usd, self.executor.available_usd(self.pf)) if cc.position_usd \
+                else self.risk.position_size_usd(self.pf, self.executor.available_usd(self.pf))
+            if why is None and size <= 0:
+                why = "skipped: not enough cash"
+            why = why or self.token_checks(snap, size, now, "copy")
+            if why:
+                self._lane_note(now, "copy", snap, chain, mint, why)
+                if not why.startswith("waiting"):
+                    tracker.consume(sig.chain, sig.token)
+                continue
+            wallets = ", ".join(w[:6] + "…" for w in sig.wallets)
+            try:
+                self._open(snap, size, now, "copy", f"copy: {len(sig.wallets)} tracked wallet(s) bought "
+                                                    f"${sig.usd:,.0f} ({wallets})")
+                self._lane_note(now, "copy", snap, chain, mint, "bought")
+            except Exception as exc:
+                log.error("BUY %s (copy) failed: %s", snap.symbol, exc)
+                self._lane_note(now, "copy", snap, chain, mint, f"buy failed: {exc}")
+            tracker.consume(sig.chain, sig.token)
+
+    def enter_longterm(self, now: datetime) -> None:
+        """Long-term lane: buy qualified coins (data.longterm) while it has free slots."""
+        scanner = self.longterm
+        if scanner is None or (self._next_longterm is not None and now < self._next_longterm):
+            return
+        self._next_longterm = now + timedelta(minutes=1)  # its candidates change every few hours, not seconds
+        lt = self.cfg.longterm
+        held = sum(1 for p in self.pf.positions.values() if p.lane == "longterm")
+        for v in scanner.qualified():
+            if held >= lt.max_positions:
+                return
+            if self.risk.token_blocked(self.pf, v.address, now):
+                continue
+            if block := self._entry_block_reason(now, "longterm"):
+                self._lane_note(now, "longterm", v.symbol, v.chain, v.address, f"waiting: {block}")
+                return
+            self.chains[v.address] = v.chain
+            snap = self._fetch([v.address]).get(v.address)
+            if snap is None:
+                continue
+            size = min(lt.position_usd, self.executor.available_usd(self.pf))
+            why = "skipped: not enough cash" if size < self.cfg.risk.min_position_usd else \
+                self.token_checks(snap, size, now, "longterm")
+            if why:
+                self._lane_note(now, "longterm", snap, v.chain, v.address, why)
+                continue
+            facts = v.facts
+            try:
+                self._open(snap, size, now, "longterm",
+                           f"long-term: {facts.get('age_days', '?')} days old, {facts.get('below_high_pct', '?')}% below "
+                           f"its high, {facts.get('holders', '?')} holders ({facts.get('large_holders', '?')} large), "
+                           f"{snap.buys_h24} buys in 24h")
+                self._lane_note(now, "longterm", snap, v.chain, v.address, "bought")
+                held += 1
+            except Exception as exc:
+                log.error("BUY %s (long-term) failed: %s", snap.symbol, exc)
+
+    def lookup(self, query: str) -> list[TokenSnapshot]:
+        if self.multichain is None or not hasattr(self.multichain, "lookup"):
+            raise RuntimeError("Token search isn't available in this mode")
+        return self.multichain.lookup(query)
+
+    def snapshot_for(self, chain: str, address: str) -> TokenSnapshot:
+        from .data.dexscreener import norm_address
+
+        chain = (chain or "solana").strip().lower()
+        mint = norm_address(chain, address)
+        if mint not in self.pf.positions:  # a held token keeps the chain it was bought on
+            self.chains[mint] = chain
+        snap = self._fetch([mint]).get(mint)
+        if snap is None:
+            raise ValueError(f"No market data for that token on {chain}")
+        return snap
+
+    def manual_check(self, snap: TokenSnapshot, usd: float) -> list[str]:
+        """Warnings for a manual buy (shown, never blocking: it's your call)."""
+        if snap.chain != "solana":
+            if self.chain_safety is None:
+                return [f"no honeypot check available for {snap.chain}"]
+            return list(self.chain_safety.check(snap.chain, snap.mint).reasons)
+        warnings: list[str] = []
+        if self.profiler is not None:
+            try:
+                prof = self.profiler.profile(snap)
+                warnings += [f"honeypot risk: {f}" for f in prof.mint_flags]
+            except Exception:
+                pass
+        if self.route_check is not None and (why := self.route_check.check(snap.mint, usd)):
+            warnings.append(why)
+        return warnings
+
+    def manual_buy(self, chain: str, address: str, usd: float, managed: bool, source: str = "dashboard") -> str:
+        """Paper-buy any token on any chain DexScreener covers. managed: the agent's exits apply to it;
+        otherwise only you sell it."""
+        from .data.dexscreener import norm_address
+
+        if self.cfg.execution.mode != "paper":
+            raise ValueError("Manual trades are paper-only")
+        chain = (chain or "solana").strip().lower()
+        mint = norm_address(chain, address)
+        if mint in self.pf.positions:
+            raise ValueError(f"Already holding {self.pf.positions[mint].symbol}; sell it or switch who trades it")
+        if not usd or usd <= 0:
+            raise ValueError("Enter an amount in USD")
+        if usd > self.executor.available_usd(self.pf):
+            raise ValueError(f"Only ${self.executor.available_usd(self.pf):,.2f} of paper cash available")
+        now = self.clock()
+        snap = self.snapshot_for(chain, mint)
+        warnings = self.manual_check(snap, usd)
+        who = "the agent trades it" if managed else "you trade it"
+        self._open(snap, usd, now, "manual", f"manual buy ({source}; {who})" +
+                   (f"; warnings: {'; '.join(warnings)}" if warnings else ""), managed=managed)
+        self.save()
+        return f"Bought ${usd:,.2f} of {snap.symbol} on {chain}; {who}" + \
+            (f". Warnings: {'; '.join(warnings)}" if warnings else "")
+
+    def sell_part(self, mint: str, fraction: float, reason: str) -> bool:
+        if mint not in self.pf.positions:
+            raise ValueError("No open position for that token")
+        if not 0 < fraction <= 1:
+            raise ValueError("Sell between 1% and 100%")
+        self._sell(mint, ExitDecision(1.0 if fraction >= 0.999 else fraction, reason),
+                   self._fetch([mint]).get(mint), self.clock())
+        self.save()
+        return True
+
+    def set_managed(self, mint: str, managed: bool) -> str:
+        pos = self.pf.positions.get(mint)
+        if pos is None:
+            raise ValueError("No open position for that token")
+        pos.managed = bool(managed)
+        if managed:  # fresh review timers: the agent picks it up from where it is now
+            pos.next_review_at = pos.dip_since = None
+        log.info("%s: %s", pos.symbol, "the agent trades it" if managed else "you trade it (no automatic sells)")
+        self.save()
+        return f"{pos.symbol}: {'the agent trades it' if managed else 'you trade it'}"
 
     def _record_scan(self, now: datetime, evals: list[EntryEvaluation], outcomes: dict[str, str]) -> None:
         self.last_scan_at = now

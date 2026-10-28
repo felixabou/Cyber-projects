@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .runner import AgentRunner, LogBuffer
+from .runner import AgentRunner, LogBuffer, token_view
 
 log = logging.getLogger(__name__)
 
@@ -180,26 +180,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"entries": srv.logs.since(after)})
         elif path == "/api/config":
             self._json(srv.config_dict)
+        elif path == "/api/lookup":
+            query = q.get("q", [""])[0].strip()[:120]
+            try:  # read-only DexScreener lookups: served on this thread, the agent never waits for them
+                found = runner.agent.lookup(query) if query else []
+            except Exception as exc:
+                self._error(HTTPStatus.BAD_GATEWAY, f"Search failed: {exc}")
+                return
+            self._json({"results": [token_view(sn, runner.agent.clock()) for sn in found]})
         elif path == "/api/backtest":
             self._json(runner.backtest.state)
         elif path == "/api/trades.csv":
-            csv_path = Path(runner.agent.cfg.agent.trades_csv)
-            body = csv_path.read_bytes() if csv_path.exists() else b""
-            self._send(200, body, "text/csv; charset=utf-8",
-                       {"Content-Disposition": 'attachment; filename="trades.csv"'})
-        elif path == "/api/exports":
-            files = runner.exporter.files() if runner.exporter is not None else []
-            self._json({"files": [{"name": p.name, "bytes": p.stat().st_size} for p in files]})
-        elif path.startswith("/api/exports/"):
-            from ..export import FILE_RE
+            # One journal for all time; ?range= picks session, 1h-24h or all (the default).
+            from ..export import select
 
-            name = path[len("/api/exports/"):]
-            file = runner.exporter.dir / name if runner.exporter is not None and FILE_RE.match(name) else None
-            if file is None or not file.is_file():
-                self._error(HTTPStatus.NOT_FOUND, "No such export")
+            try:
+                part = select(runner.agent.cfg.agent.trades_csv, q.get("range", ["all"])[0],
+                              runner.agent.clock(), runner.started_at)
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-            self._send(200, file.read_bytes(), "text/csv; charset=utf-8",
-                       {"Content-Disposition": f'attachment; filename="{name}"'})
+            self._send(200, part.to_csv(), "text/csv; charset=utf-8",
+                       {"Content-Disposition": f'attachment; filename="{part.filename}"'})
         else:
             self._error(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -212,7 +214,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = self._body()
             if path == "/api/control":
                 action = str(body.get("action", ""))
-                result = runner.submit(action, mint=body.get("mint"))
+                args = {k: body.get(k) for k in ("mint", "fraction", "managed", "chain", "address", "usd") if k in body}
+                result = runner.submit(action, **args)
                 self._json({"ok": True, **(result or {})})
             elif path == "/api/backtest":
                 overrides = [str(o).strip() for o in body.get("overrides") or [] if str(o).strip()]

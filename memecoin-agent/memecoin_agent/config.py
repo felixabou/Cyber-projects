@@ -17,7 +17,9 @@ class FilterConfig:
     quote_symbols: list[str] = field(default_factory=lambda: ["SOL", "USDC"])
     min_liquidity_usd: float = 12_000
     max_liquidity_usd: float | None = None
-    min_market_cap_usd: float = 20_000
+    # Low caps are the copy lane's (copy:): bought only when a tracked wallet buys them. On the agent's
+    # own trades, buys under $150k won 9 of 29 (-$261); $150k-300k won 10 of 13 (+$167).
+    min_market_cap_usd: float = 150_000
     max_market_cap_usd: float = 5_000_000
     min_age_minutes: float = 15  # most Solana rugs happen inside the first hour
     max_age_hours: float = 72
@@ -54,6 +56,30 @@ class TakeProfitLevel:
 
 @dataclass
 class ExitConfig:
+    # let_it_run: take the initials and half the profit out once, then let the rest run (the keys
+    # from hard_stop_pct down). classic: the older stop loss / take profit levels / trailing stop.
+    style: str = "let_it_run"
+    # -- let_it_run ---------------------------------------------------------------------------------
+    hard_stop_pct: float = 50.0  # sell everything at this loss, checked every tick
+    # A dip this deep starts reviews every dip_review_minutes. At a review, a dip still between
+    # dip_watch_pct and dip_hold_max_pct is held if it is consolidating or accumulating; deeper, or
+    # still sliding, it sells. Recovered above dip_watch_pct: the watch ends.
+    dip_watch_pct: float | None = 30.0  # null: no dip reviews, only the hard stop
+    dip_hold_max_pct: float = 40.0
+    dip_review_minutes: float = 30.0
+    # Consolidating: since the last review it slipped no more than max_slide and either traded in a
+    # range of max_range or buyers outnumbered sellers over the last hour (accumulating).
+    consolidation_max_range_pct: float = 25.0
+    consolidation_max_slide_pct: float = 10.0
+    # Up this much: sell the initial cost plus secure_profit_share of the profit, keep the rest. Replaying
+    # the agent's last 42 trades, +25% did best: 24 got their initials out (vs 16 wins before).
+    secure_at_pct: float = 25.0
+    secure_profit_share: float = 0.5
+    # The rest (the runner) is checked every runner_review_minutes and sold in full only once it is
+    # runner_drawdown_pct below its highest price since then. No time stop on runners.
+    runner_review_minutes: float = 30.0
+    runner_drawdown_pct: float = 70.0
+    # -- classic ------------------------------------------------------------------------------------
     stop_loss_pct: float = 25.0
     take_profit_levels: list[TakeProfitLevel] = field(
         default_factory=lambda: [
@@ -65,8 +91,9 @@ class ExitConfig:
     # then exits if price falls `trailing_stop_pct` from its peak.
     trailing_activation_pct: float = 30.0
     trailing_stop_pct: float = 20.0
-    # Time stop: sell whatever is still held after this long (12 hours).
-    max_hold_minutes: float = 720.0
+    # -- both ---------------------------------------------------------------------------------------
+    # Time stop: sell whatever is still held after this long (12 hours); let_it_run runners are exempt.
+    max_hold_minutes: float | None = 720.0
     # A sharp liquidity drop versus entry is the classic rug signature: get out at once.
     liquidity_drop_exit_pct: float = 40.0
 
@@ -222,6 +249,8 @@ class GmgnConfig:
     min_smart_wallets: int = 0  # require this many smart-money holders (0 = off)
     # GMGN unreachable / rate limited: false = the other checks decide, true = skip the buy.
     fail_closed: bool = False
+    # Your plan's rate (free 5, Plus 20, Pro 50): the agent, copy tracker and long-term scanner share it.
+    rate_per_s: float = 5.0
 
 
 @dataclass
@@ -297,8 +326,9 @@ class LaunchConfig:
 
 @dataclass
 class ExportConfig:
-    """Trade CSVs saved on a schedule for downloading later: one file per period (UTC clock hours by
-    default) that had trades, e.g. exports/trades_2026-10-22_1300-1400_UTC.csv."""
+    """No longer used: the hourly trade files are gone. Every trade is in agent.trades_csv, and the
+    dashboard and Telegram download this session's, the last 1-24 hours' or all of them. Kept so
+    config files that still have an export: section load."""
 
     enabled: bool = True
     dir: str = "exports"
@@ -307,7 +337,7 @@ class ExportConfig:
 
 @dataclass
 class TelegramConfig:
-    """Telegram bot: trade alerts, the hourly CSVs and remote control from your phone.
+    """Telegram bot: trade alerts, trade downloads (/csv) and remote control from your phone.
     On whenever a bot token is configured (TELEGRAM_BOT_TOKEN, or token_file)."""
 
     enabled: bool = True
@@ -316,9 +346,68 @@ class TelegramConfig:
     # adds to the list. Message the bot from a chat that isn't listed and it replies with its id.
     allowed_chat_ids: list[int] = field(default_factory=list)
     notify_trades: bool = True
-    send_exports: bool = True  # post each hourly trade CSV to the chat
+    send_exports: bool = True  # no longer used (there are no hourly files); /csv downloads trades
     # /pause, /resume, /scan, /close and /closeall. Off = the bot only reports.
     allow_controls: bool = True
+
+
+@dataclass
+class CopyConfig:
+    """Copy lane: low caps (under filters.min_market_cap_usd) are bought only when a tracked wallet
+    buys them, on any chain GMGN covers. Needs a GMGN API key. Other chains are paper-only."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["sol", "bsc", "base", "eth", "robinhood"])  # GMGN names
+    # Which wallets. Found in GMGN's smart-money and KOL trade feeds and among the top traders of
+    # trending tokens, then vetted on their last 30 days:
+    min_win_rate: float = 0.10
+    max_win_rate: float = 0.30
+    min_wallet_age_days: float = 60  # first funded at least this long ago
+    min_losing_trades: int = 3  # has taken losses, not a 100%-hit insider wallet
+    min_trades_30d: int = 10  # still active
+    min_pnl: float | None = 0.0  # 30-day realized profit / cost: wins must outweigh the losses (null = off)
+    max_wallets_per_chain: int = 15
+    refresh_hours: float = 6.0
+    wallets: list[str] = field(default_factory=list)  # always tracked: "chain:address" (plain address = sol)
+    # Which buys: a real buy (not a transfer in, not the wallet's own launch) of a low cap.
+    min_market_cap_usd: float = 5_000
+    min_liquidity_usd: float = 5_000
+    min_wallet_buy_usd: float = 50
+    max_signal_age_minutes: float = 10
+    min_wallets: int = 1  # tracked wallets that must have bought it
+    poll_seconds: float = 3.0  # one wallet's activity per poll, within GMGN's rate budget
+    position_usd: float | None = None  # null: the usual risk sizing
+    state_file: str = "state/copy_wallets.json"
+    fail_closed: bool = True  # no honeypot/tax check available on that chain: skip the buy
+
+
+@dataclass
+class LongTermConfig:
+    """Long-term lane: coins over a year old that wore down gradually but still trade every day, with
+    big holders still in. Bought with their own budget and slots; held without a time stop."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["solana", "ethereum", "bsc", "base", "robinhood"])
+    watchlist: list[str] = field(default_factory=list)  # "chain:address"; the age rule doesn't apply to these
+    discovery: bool = True  # GMGN: tokens over min_age_days old, ranked by 24h volume (needs a GMGN key)
+    rescan_hours: float = 6.0
+    min_age_days: float = 365
+    min_liquidity_usd: float = 20_000
+    min_market_cap_usd: float = 50_000
+    max_market_cap_usd: float = 10_000_000
+    min_volume_h24_usd: float = 2_000
+    min_buys_h24: int = 25  # still gets daily buys
+    min_active_days: int = 25  # of the last 30 daily candles, days with trading
+    min_drawdown_from_high_pct: float = 60  # worn down: this far below its high
+    max_daily_drop_pct: float = 40  # gradual: no single day in the last month fell more than this
+    max_drop_7d_pct: float = 35  # bottoming: not still sliding hard this week
+    min_holders: int = 300
+    min_large_holders: int = 5  # holders with at least large_holder_usd (pools left out)
+    large_holder_usd: float = 1_000
+    position_usd: float = 50
+    max_positions: int = 5
+    hard_stop_pct: float = 50
+    secure_at_pct: float = 100  # initials + half the profit out at 2x; the rest runs
 
 
 @dataclass
@@ -338,10 +427,25 @@ class Config:
     launch: LaunchConfig = field(default_factory=LaunchConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    copy: CopyConfig = field(default_factory=CopyConfig)
+    longterm: LongTermConfig = field(default_factory=LongTermConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
             raise ValueError(f"execution.mode must be 'paper' or 'live', got {self.execution.mode!r}")
+        e = self.exits
+        if e.style not in ("let_it_run", "classic"):
+            raise ValueError("exits.style must be 'let_it_run' or 'classic'")
+        if not 0 < e.hard_stop_pct <= 100 or not 0 < e.runner_drawdown_pct <= 100:
+            raise ValueError("exits.hard_stop_pct and exits.runner_drawdown_pct must be between 0 and 100")
+        if e.secure_at_pct <= 0 or not 0 <= e.secure_profit_share <= 1:
+            raise ValueError("exits.secure_at_pct must be > 0 and exits.secure_profit_share between 0 and 1")
+        if e.dip_watch_pct is not None and not 0 < e.dip_watch_pct <= e.dip_hold_max_pct:
+            raise ValueError("exits.dip_watch_pct must be > 0 and no deeper than exits.dip_hold_max_pct")
+        if min(e.dip_review_minutes, e.runner_review_minutes) <= 0:
+            raise ValueError("exits.dip_review_minutes and exits.runner_review_minutes must be > 0")
+        if not 0 <= self.copy.min_win_rate <= self.copy.max_win_rate <= 1:
+            raise ValueError("copy.min_win_rate and copy.max_win_rate are ratios: 0 <= min <= max <= 1")
         if not 0 < self.exits.stop_loss_pct < 100:
             raise ValueError("exits.stop_loss_pct must be between 0 and 100")
         if not 0 < self.exits.trailing_stop_pct < 100:
@@ -372,8 +476,6 @@ class Config:
             raise ValueError("launch.max_age_minutes must be > 0 and launch.buy_window_minutes >= 0")
         if self.launch.max_signature_pages < 1:
             raise ValueError("launch.max_signature_pages must be >= 1")
-        if not 0 < self.export.every_minutes <= 1440 or 1440 % self.export.every_minutes:
-            raise ValueError("export.every_minutes must divide a day evenly (e.g. 15, 30, 60, 120, 1440)")
 
 
 _SECTIONS: dict[str, type] = {
@@ -392,6 +494,8 @@ _SECTIONS: dict[str, type] = {
     "launch": LaunchConfig,
     "export": ExportConfig,
     "telegram": TelegramConfig,
+    "copy": CopyConfig,
+    "longterm": LongTermConfig,
 }
 
 

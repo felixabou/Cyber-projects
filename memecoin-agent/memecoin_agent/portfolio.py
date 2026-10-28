@@ -66,8 +66,10 @@ class Portfolio:
     closed: list[ClosedTrade] = field(default_factory=list)  # in-memory round-trip log (backtest stats)
 
     def active_positions(self) -> dict[str, Position]:
-        """Positions that count toward limits (dust doesn't)."""
-        return {m: p for m, p in self.positions.items() if not p.dust}
+        """Positions that count toward limits. Dust, runners (initials already out), long-term holds
+        and manual trades don't."""
+        return {m: p for m, p in self.positions.items()
+                if not p.dust and not p.secured and p.lane not in ("longterm", "manual")}
 
     # -- valuation ----------------------------------------------------------------
     def positions_value_usd(self) -> float:
@@ -88,10 +90,14 @@ class Portfolio:
         pos.last_liquidity_usd = snap.liquidity_usd
         pos.peak_price_usd = max(pos.peak_price_usd, snap.price_usd)
 
-    def open(self, snap: TokenSnapshot, fill: Fill, now: datetime, score: float, reason: str | None = None) -> Position:
+    def open(self, snap: TokenSnapshot, fill: Fill, now: datetime, score: float, reason: str | None = None,
+             lane: str = "momentum", managed: bool = True) -> Position:
         if snap.mint in self.positions:
             raise ValueError(f"Already holding {snap.symbol}")
         pos = Position(
+            chain=snap.chain,
+            lane=lane,
+            managed=managed,
             mint=snap.mint,
             symbol=snap.symbol,
             pair_address=snap.pair_address,
@@ -108,7 +114,8 @@ class Portfolio:
         )
         self.positions[snap.mint] = pos
         self.cash_usd -= fill.usd_value
-        self.entry_times.append(now.isoformat())
+        if lane in ("momentum", "launch", "copy"):  # the hourly entry limit is for the agent's fast lanes
+            self.entry_times.append(now.isoformat())
         self.trades.append(
             TradeRecord(now, "buy", snap.mint, snap.symbol, fill.token_amount, fill.usd_value,
                         fill.price_usd, fill.fee_usd, reason or f"entry score {score:.2f}", 0.0, fill.signature)

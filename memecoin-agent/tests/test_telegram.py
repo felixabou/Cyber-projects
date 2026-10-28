@@ -14,7 +14,6 @@ import pytest
 from memecoin_agent.agent import Agent
 from memecoin_agent.config import Config, TelegramConfig
 from memecoin_agent.execution.paper import PaperExecutor
-from memecoin_agent.export import ExportedFile
 from memecoin_agent.models import TradeRecord
 from memecoin_agent.portfolio import Portfolio
 from memecoin_agent.simulation import SimClock
@@ -178,35 +177,40 @@ def test_commands():
     assert "Controls are off" in quiet.respond(OWNER, "/closeall yes") and "/pause" not in quiet.respond(OWNER, "/help")
 
 
-def test_alerts_exports_and_csv(tmp_path):
+def test_alerts_and_csv_downloads(tmp_path):
     fake = FakeTelegram()
     cfg = Config()
     cfg.agent.trades_csv = str(tmp_path / "trades.csv")
     runner = FakeRunner(cfg)
+    runner.started_at = NOW - timedelta(hours=2)  # this session
     bot = make_bot(fake, runner)
-    t0 = datetime(2026, 10, 22, 13, 5, tzinfo=timezone.utc)
+    t0 = NOW - timedelta(days=3)  # before this session and the last 6 hours
     buy = TradeRecord(t0, "buy", "MINT_A", "PEPE\n/evil", 50.0, 50.0, 0.0000123456, 0.25, "entry score 0.71")
     sell = TradeRecord(t0, "sell", "MINT_A", "PEPE", 20.0, 61.0, 0.000015, 0.3, "LarpCheck: LIKELY LARP", 11.0)
-    export = tmp_path / "trades_2026-10-22_1300-1400_UTC.csv"
-    export.write_text("time,side\n2026-10-22T13:05:00+00:00,buy\n")
+    recent = TradeRecord(NOW - timedelta(minutes=30), "buy", "MINT_B", "BONK", 10.0, 40.0, 0.004, 0.2, "copy")
     assert bot.respond(OWNER, "/csv") == "No trades yet."
-    Portfolio(cash_usd=0, trades=[buy, sell]).flush_trades(cfg.agent.trades_csv)
+    Portfolio(cash_usd=0, trades=[buy, sell, recent]).flush_trades(cfg.agent.trades_csv)
     with open(cfg.agent.trades_csv, "a") as fh:
         fh.write("2026-10-22T13:06:00+00:00,buy,PARTIAL")  # a row the agent is still writing
-    assert bot.respond(OWNER, "/csv") is None
+    assert bot.respond(OWNER, "/csv") is None  # all
+    assert bot.respond(OWNER, "/csv session") is None
+    assert bot.respond(OWNER, "/csv 6") is None
+    assert bot.respond(OWNER, "/csv 48").startswith("Send /csv session, /csv all, or /csv HOURS")
     assert bot.start()
     try:
-        bot.notify([buy, sell], [ExportedFile(export, t0.replace(minute=0), t0.replace(minute=0) + timedelta(hours=1), [buy])])
-        _wait(lambda: len(fake.docs()) == 2 and len(fake.sent(OWNER)) >= 2)
+        bot.notify([buy, sell])
+        _wait(lambda: len(fake.docs()) == 3 and len(fake.sent(OWNER)) >= 2)
     finally:
         bot.stop(timeout=2)
     alert = fake.sent(OWNER)[1]
     assert alert.startswith("🟢 BUY PEPE /evil $50.00 at $0.00001235 (paper)")
     assert "https://dexscreener.com/solana/MINT_A" in alert and "🔴 SELL PEPE $61.00, realized +$11.00" in alert
-    csv_doc, hourly = fake.docs()
-    assert b'filename="trades.csv"' in csv_doc["raw"] and b"PARTIAL" not in csv_doc["raw"]
-    assert b"Full trade history: 2 trades" in csv_doc["raw"]
-    assert b'filename="trades_2026-10-22_1300-1400_UTC.csv"' in hourly["raw"] and b"Trades Oct 22 13:00-14:00" in hourly["raw"]
+    every, session, hours = fake.docs()
+    assert b'filename="trades_all_to_' in every["raw"] and b"PARTIAL" not in every["raw"]
+    assert b"All trades: 3 (2 buys, 1 sells), realized +$11.00" in every["raw"]
+    assert b'filename="trades_session_' in session["raw"] and b"This session's trades" in session["raw"]
+    assert b"MINT_B" in session["raw"] and b"MINT_A" not in session["raw"]
+    assert b"Trades in the last 6 hours: 1" in hours["raw"]
 
 
 def test_rejected_token_turns_the_bot_off():
@@ -214,7 +218,7 @@ def test_rejected_token_turns_the_bot_off():
     fake.always_fail["getMe"] = (401, "Unauthorized")
     bot = make_bot(fake, FakeRunner(Config()))
     assert not bot.start() and bot.status()["state"] == "token rejected" and not bot._threads
-    bot.notify([TradeRecord(NOW, "buy", "M", "S", 1, 1, 1, 0, "r")], [])
+    bot.notify([TradeRecord(NOW, "buy", "M", "S", 1, 1, 1, 0, "r")])
     assert bot.outbox.empty()
     bot.stop(timeout=1)
 

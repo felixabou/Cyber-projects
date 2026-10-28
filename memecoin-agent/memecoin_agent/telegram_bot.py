@@ -1,4 +1,4 @@
-"""Telegram bot: trade alerts, the hourly trade CSVs and remote control, over the Bot API.
+"""Telegram bot: trade alerts, trade downloads and remote control, over the Bot API.
 
 Long polling (getUpdates) works from anywhere, a laptop or a cloud container: no public URL and
 no inbound port. Only chats in telegram.allowed_chat_ids / TELEGRAM_CHAT_ID can use it; anyone
@@ -10,8 +10,6 @@ are untrusted. The bot token is part of every request URL, so errors are logged 
 
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import math
 import os
@@ -40,15 +38,20 @@ COMMANDS = [
     ("status", "Equity, PnL and what the agent is doing"),
     ("positions", "Open positions"),
     ("trades", "The last 10 trades"),
-    ("csv", "Download the full trade history (CSV)"),
+    ("csv", "Download trades (CSV): /csv session, /csv 6 (last 6 hours, 1-24), /csv all"),
     ("pause", "Stop opening new positions (exits keep running)"),
     ("resume", "Allow new positions again"),
     ("scan", "Scan for entries now"),
     ("close", "Sell one position: /close SYMBOL"),
     ("closeall", "Sell every position: /closeall yes"),
+    ("buy", "Paper-buy any token: /buy ADDRESS USD [chain] [manual]"),
+    ("sell", "Sell part of a position: /sell SYMBOL 50"),
+    ("agent", "Who trades a position: /agent SYMBOL on|off"),
     ("help", "List the commands"),
 ]
-CONTROLS = {"pause", "resume", "scan", "close", "closeall"}
+CONTROLS = {"pause", "resume", "scan", "close", "closeall", "buy", "sell", "agent"}
+CHAIN_WORDS = {"sol": "solana", "solana": "solana", "eth": "ethereum", "ethereum": "ethereum", "bsc": "bsc",
+               "bnb": "bsc", "base": "base", "arb": "arbitrum", "arbitrum": "arbitrum", "robinhood": "robinhood"}
 
 
 class TelegramError(RuntimeError):
@@ -186,8 +189,15 @@ def format_positions(v: dict[str, Any]) -> str:
     total = sum(p["value_usd"] for p in positions)
     blocks = [f"{len(positions)} open position(s), worth {usd(total)}"]
     for p in positions:
+        tags = [p["chain"]] if p.get("chain") not in (None, "solana") else []
+        tags += [x for x in (p.get("lane") if p.get("lane") in ("copy", "longterm", "manual") else None,
+                             "dust" if p.get("dust") else None,
+                             p.get("stage") if p.get("stage") in ("runner", "dip watch") else None,
+                             "you trade it" if p.get("managed") is False else None) if x]
         line = (f"{one_line(p['symbol'])}  {usd(p['value_usd'])}  {pct(p['pnl_pct'])}  held {duration(p['held_minutes'])}"
-                + ("  · dust" if p.get("dust") else ""))
+                + (f"  · {', '.join(tags)}" if tags else ""))
+        if p.get("review_note"):
+            line += f"\n{clip(one_line(p['review_note']), 160)}"
         larp = p.get("larp") or {}
         if larp.get("verdict"):
             line += f"\nLarpCheck {larp['verdict']}" + (f", coin {larp['coin_stamp']}" if larp.get("coin_stamp") else "")
@@ -213,7 +223,7 @@ def format_trades(v: dict[str, Any], n: int = 10) -> str:
 def help_text(controls: bool) -> str:
     rows = [f"/{c} - {d}" for c, d in COMMANDS if controls or c not in CONTROLS]
     return "\n".join(["memecoin-agent commands:", *rows,
-                      "", "Trades are announced here as they happen, and each hour's trades arrive as a CSV."])
+                      "", "Trades are announced here as they happen; /csv downloads them whenever you want."])
 
 
 # -- Bot API client ----------------------------------------------------------------------
@@ -354,20 +364,13 @@ class TelegramBot:
         for chat in sorted(self.chats):
             self.send(chat, text)
 
-    def broadcast_file(self, filename: str, content: bytes, caption: str) -> None:
-        for chat in sorted(self.chats):
-            self._queue(("doc", chat, (filename, content, caption)))
-
-    def notify(self, trades: list[TradeRecord], exports: list[Any]) -> None:
-        """New trades and hourly exports (AgentRunner listener; runs on the agent thread)."""
+    def notify(self, trades: list[TradeRecord]) -> None:
+        """New trades (AgentRunner listener; runs on the agent thread)."""
         if self.state == "token rejected" or not self.chats:
             return
         if trades and self.cfg.notify_trades:
             mode = self.runner.agent.cfg.execution.mode
             self.broadcast("\n\n".join(format_trade(t, mode) for t in trades))
-        if self.cfg.send_exports:
-            for e in exports:
-                self.broadcast_file(e.path.name, e.path.read_bytes(), e.summary())
 
     def _send_loop(self) -> None:
         while not (self._stop.is_set() and self.outbox.empty()):
@@ -468,7 +471,7 @@ class TelegramBot:
         if cmd == "trades":
             return format_trades(view)
         if cmd == "csv":
-            return self._send_csv(chat)
+            return self._send_csv(chat, arg)
         if cmd == "pause":
             return self._control("pause", "Paused: no new positions. Exits keep running.")
         if cmd == "resume":
@@ -481,6 +484,12 @@ class TelegramBot:
                     + (f", bought {', '.join(bought)}" if bought else ", nothing bought") + ".")
         if cmd == "close":
             return self._close(arg, view)
+        if cmd == "buy":
+            return self._buy(arg)
+        if cmd == "sell":
+            return self._sell(arg, view)
+        if cmd == "agent":
+            return self._agent(arg, view)
         if cmd == "closeall":
             n = len(view.get("positions") or [])
             if not n:
@@ -499,30 +508,70 @@ class TelegramBot:
             return f"Failed: {exc}"
         return done or result.get("message") or "Done."
 
-    def _close(self, arg: str, view: dict[str, Any]) -> str:
+    def _match(self, arg: str, view: dict[str, Any], usage: str) -> tuple[dict[str, Any] | None, str]:
         positions = view.get("positions") or []
         if not arg:
             names = ", ".join(one_line(p["symbol"]) for p in positions) or "none"
-            return f"Which one? Send /close SYMBOL (or the token's mint address). Open: {names}"
+            return None, f"Which one? Send {usage} (or the token's mint address). Open: {names}"
         key = arg.lstrip("$")
-        matches = ([p for p in positions if p["mint"] == key]
+        matches = ([p for p in positions if p["mint"].lower() == key.lower()]
                    or [p for p in positions if one_line(p["symbol"]).lower() == key.lower()])
         if not matches:
-            return f"No open position matching {one_line(arg)}."
+            return None, f"No open position matching {one_line(arg)}."
         if len(matches) > 1:
-            return "More than one position has that symbol; send /close with the mint:\n" + "\n".join(
+            return None, "More than one position has that symbol; use the mint:\n" + "\n".join(
                 f"{one_line(p['symbol'])} {p['mint']}" for p in matches)
-        return self._control("close", mint=matches[0]["mint"])
+        return matches[0], ""
 
-    def _send_csv(self, chat: int) -> str | None:
-        path = Path(self.runner.agent.cfg.agent.trades_csv)
+    def _close(self, arg: str, view: dict[str, Any]) -> str:
+        pos, why = self._match(arg, view, "/close SYMBOL")
+        return self._control("close", mint=pos["mint"]) if pos else why
+
+    def _buy(self, arg: str) -> str:
+        parts = arg.split()
+        usage = ("Send /buy ADDRESS USD [chain] [manual], e.g. /buy 0xded8...79cc 50 robinhood\n"
+                 "chain: sol (default for Solana addresses), eth, bsc, base, arbitrum, robinhood. "
+                 "Add 'manual' if only you should sell it.")
+        if len(parts) < 2:
+            return usage
+        address, amount, rest = parts[0], parts[1].lstrip("$"), [w.lower() for w in parts[2:]]
         try:
-            data = path.read_bytes()
-        except OSError:
-            return "No trades yet."
-        data = data[: data.rfind(b"\n") + 1]  # the agent may be appending a row right now
-        rows = sum(1 for _ in csv.reader(io.StringIO(data.decode("utf-8", "replace")))) - 1  # minus the header
-        if rows < 1:
-            return "No trades yet."
-        self._queue(("doc", chat, ("trades.csv", data, f"Full trade history: {rows} trades")))
+            usd_amount = float(amount)
+        except ValueError:
+            return usage
+        chain = next((CHAIN_WORDS[w] for w in rest if w in CHAIN_WORDS), None)
+        if chain is None:
+            if address.lower().startswith("0x"):
+                return "Which chain is that address on? Add it: eth, bsc, base, arbitrum or robinhood."
+            chain = "solana"
+        return self._control("manual_buy", chain=chain, address=address, usd=usd_amount, managed="manual" not in rest)
+
+    def _sell(self, arg: str, view: dict[str, Any]) -> str:
+        key, _, amount = arg.rpartition(" ")
+        try:
+            fraction = float(amount.rstrip("%")) / 100
+        except ValueError:
+            return "Send /sell SYMBOL PERCENT, e.g. /sell ROBINCAT 50"
+        pos, why = self._match(key.strip(), view, "/sell SYMBOL PERCENT")
+        return self._control("sell", mint=pos["mint"], fraction=fraction) if pos else why
+
+    def _agent(self, arg: str, view: dict[str, Any]) -> str:
+        key, _, switch = arg.rpartition(" ")
+        if switch.lower() not in ("on", "off"):
+            return "Send /agent SYMBOL on (the agent's exits apply) or /agent SYMBOL off (only you sell it)"
+        pos, why = self._match(key.strip(), view, "/agent SYMBOL on|off")
+        return self._control("set_managed", mint=pos["mint"], managed=switch.lower() == "on") if pos else why
+
+    def _send_csv(self, chat: int, arg: str = "") -> str | None:
+        from .export import MAX_HOURS, parse_range, select
+
+        try:
+            which = parse_range(arg or "all")
+        except ValueError:
+            return f"Send /csv session, /csv all, or /csv HOURS for the last 1 to {MAX_HOURS} hours (e.g. /csv 6)."
+        part = select(self.runner.agent.cfg.agent.trades_csv, which, self.runner.agent.clock(), self.runner.started_at)
+        if not part.rows:
+            return {"all": "No trades yet.", "session": "No trades this session yet."}.get(
+                which, f"No trades in the last {which[:-1]} hour(s).")
+        self._queue(("doc", chat, (part.filename, part.to_csv(), part.summary())))
         return None

@@ -33,6 +33,8 @@
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button role="tab" class="tab" data-tab="overview" aria-selected="true">Overview</button>
     <button role="tab" class="tab" data-tab="scanner" aria-selected="false">Scanner <span id="tab-scanner-count" class="tab-count"></span></button>
+    <button role="tab" class="tab" data-tab="trade" aria-selected="false">Trade</button>
+    <button role="tab" class="tab" data-tab="lanes" aria-selected="false">Copy &amp; long-term</button>
     <button role="tab" class="tab" data-tab="trades" aria-selected="false">Trades</button>
     <button role="tab" class="tab" data-tab="activity" aria-selected="false">Activity</button>
     <button role="tab" class="tab" data-tab="backtest" aria-selected="false">Backtest</button>
@@ -106,17 +108,75 @@
       </section>
     </section>
 
+    <!-- Trade (manual paper trades) -->
+    <section id="tab-trade" class="tab-panel" role="tabpanel" hidden>
+      <section class="card">
+        <div class="card-head"><h2>Paper-trade any token</h2><span id="trade-cash" class="muted"></span></div>
+        <form id="lookup-form" class="lookup-form" novalidate>
+          <input id="lookup-q" class="input" type="search" autocomplete="off" spellcheck="false"
+            placeholder="Paste a contract address (any chain) or type a name" aria-label="Contract address or name">
+          <button id="lookup-go" class="btn btn-primary" type="submit">Search</button>
+        </form>
+        <p id="trade-note" class="hint"></p>
+        <div id="lookup-results" class="table-wrap"></div>
+      </section>
+      <section id="buy-card" class="card" hidden>
+        <div class="card-head"><h2 id="buy-title">Buy</h2><a id="buy-link" class="muted" target="_blank" rel="noopener noreferrer"></a></div>
+        <div id="buy-facts" class="buy-facts"></div>
+        <form id="buy-form" class="buy-form" novalidate>
+          <label class="field"><span>Amount (USD of paper cash)</span>
+            <input id="buy-usd" class="input" type="number" min="1" step="any" inputmode="decimal" value="50"></label>
+          <label class="switch-row">
+            <input id="buy-managed" type="checkbox" class="switch" checked>
+            <span><strong>Agent trades it</strong><br><span id="buy-managed-note" class="muted"></span></span>
+          </label>
+          <div class="form-actions">
+            <button id="buy-check" class="btn" type="button">Check safety</button>
+            <button id="buy-go" class="btn btn-primary" type="submit">Buy</button>
+            <span id="buy-status" class="muted" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+        <ul id="buy-warnings" class="warnings"></ul>
+      </section>
+    </section>
+
+    <!-- Copy lane and long-term lane -->
+    <section id="tab-lanes" class="tab-panel" role="tabpanel" hidden>
+      <section class="card">
+        <div class="card-head"><h2>Copy lane: tracked wallets</h2><span id="copy-status" class="muted"></span></div>
+        <p class="hint" id="copy-hint"></p>
+        <div id="copy-wallets" class="table-wrap"></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Copy and long-term decisions</h2><span class="muted">newest first</span></div>
+        <div id="lane-outcomes" class="table-wrap"></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Long-term lane: candidates</h2><span id="lt-status" class="muted"></span></div>
+        <p class="hint" id="lt-hint"></p>
+        <div id="lt-table" class="table-wrap"></div>
+      </section>
+    </section>
+
     <!-- Trades -->
     <section id="tab-trades" class="tab-panel" role="tabpanel" hidden>
+      <section class="card">
+        <div class="card-head"><h2>Download trades</h2><span id="downloads-note" class="muted"></span></div>
+        <div class="downloads">
+          <a id="dl-session" class="btn btn-primary" href="#" download>This session's trades</a>
+          <span class="dl-group">
+            <label for="dl-hours">Last</label>
+            <select id="dl-hours" class="input" aria-label="How many hours"></select>
+            <a id="dl-hours-go" class="btn" href="#" download>Download</a>
+          </span>
+          <a id="dl-all" class="btn" href="#" download>All trades</a>
+        </div>
+        <p class="hint">Every trade is saved in one file for all time (<code>state/trades.csv</code>); each button downloads a slice of it as a CSV.</p>
+      </section>
       <div class="filter-row">
         <span id="trades-summary" class="muted"></span>
-        <a id="trades-download" class="btn btn-small" href="#" download="trades.csv">Download CSV</a>
       </div>
       <section class="card"><div id="trades-table" class="table-wrap"></div></section>
-      <section id="exports-card" class="card" hidden>
-        <div class="card-head"><h2>Saved trade files</h2><span id="exports-note" class="muted"></span></div>
-        <div id="exports-list" class="export-list"></div>
-      </section>
     </section>
 
     <!-- Activity -->
@@ -150,7 +210,7 @@
           </label>
           <label class="field field-wide">
             <span>Overrides <span class="muted">(one <code>section.key=value</code> per line)</span></span>
-            <textarea id="bt-overrides" class="input" rows="3" spellcheck="false" placeholder="filters.min_score=0.65&#10;exits.stop_loss_pct=15"></textarea>
+            <textarea id="bt-overrides" class="input" rows="3" spellcheck="false" placeholder="filters.min_score=0.65&#10;exits.secure_at_pct=40"></textarea>
           </label>
           <label class="check"><input type="checkbox" id="bt-assume-safe"> Treat tokens without a recorded RugCheck verdict as safe</label>
           <div class="form-actions">
