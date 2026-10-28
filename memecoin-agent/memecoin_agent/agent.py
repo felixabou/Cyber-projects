@@ -18,6 +18,10 @@ from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_ex
 
 log = logging.getLogger(__name__)
 
+# Lanes priced from a token's most liquid pair whatever it's quoted in: some pump.fun coins only trade
+# against another coin. Momentum and launch buys keep to filters.quote_symbols (SOL/USDC) pairs.
+ANY_QUOTE_LANES = ("manual", "copy", "longterm")
+
 
 class Agent:
     def __init__(
@@ -133,19 +137,26 @@ class Agent:
         pos = self.pf.positions.get(mint)
         return pos.chain if pos is not None else self.chains.get(mint, "solana")
 
-    def _fetch(self, mints: list[str]) -> dict[str, TokenSnapshot]:
+    def _fetch(self, mints: list[str], any_quote: bool = False) -> dict[str, TokenSnapshot]:
         """Snapshots for Solana mints from the market (with its discovery wrappers), and for tokens on
-        other chains (copy trades, long-term holds, manual trades) from DexScreener directly."""
+        other chains (copy trades, long-term holds, manual trades) from DexScreener directly.
+        any_quote, or a held position in ANY_QUOTE_LANES: a Solana token's most liquid pair in any quote."""
         if not mints:
             return {}
-        by_chain: dict[str, list[str]] = {}
+        groups: dict[tuple[str, bool], list[str]] = {}
         for m in mints:
-            by_chain.setdefault(self.chain_of(m), []).append(m)
+            chain, pos = self.chain_of(m), self.pf.positions.get(m)
+            loose = chain == "solana" and (any_quote or (pos is not None and pos.lane in ANY_QUOTE_LANES))
+            groups.setdefault((chain, loose), []).append(m)
         out: dict[str, TokenSnapshot] = {}
-        for chain, group in by_chain.items():
+        for (chain, loose), group in groups.items():
             try:
                 if chain == "solana":
-                    out.update(self.market.snapshots(group))
+                    if loose and self.multichain is not None:
+                        out.update(self.multichain.snapshots_on(chain, group))
+                        group = [m for m in group if m not in out]
+                    if group:
+                        out.update(self.market.snapshots(group))
                 elif self.multichain is not None:
                     out.update(self.multichain.snapshots_on(chain, group))
             except Exception as exc:
@@ -533,7 +544,7 @@ class Agent:
             sig, chain, mint = pending[0]
             self._lane_note(now, "copy", sig.symbol, chain, mint, f"waiting: {block}")
             return
-        snaps = self._fetch([mint for _, _, mint in pending])  # one lookup per chain for every signal
+        snaps = self._fetch([mint for _, _, mint in pending], any_quote=True)  # one lookup per chain for every signal
         for sig, chain, mint in pending:
             if block := self._entry_block_reason(now, "copy"):
                 self._lane_note(now, "copy", sig.symbol, chain, mint, f"waiting: {block}")
@@ -586,7 +597,7 @@ class Agent:
                 self._lane_note(now, "longterm", v.symbol, v.chain, v.address, f"waiting: {block}")
                 return
             self.chains[v.address] = v.chain
-            snap = self._fetch([v.address]).get(v.address)
+            snap = self._fetch([v.address], any_quote=True).get(v.address)
             if snap is None:
                 continue
             size = min(lt.position_usd, self.executor.available_usd(self.pf))
@@ -618,7 +629,7 @@ class Agent:
         mint = norm_address(chain, address)
         if mint not in self.pf.positions:  # a held token keeps the chain it was bought on
             self.chains[mint] = chain
-        snap = self._fetch([mint]).get(mint)
+        snap = self._fetch([mint], any_quote=True).get(mint)
         if snap is None:
             raise ValueError(f"No market data for that token on {chain}")
         return snap
