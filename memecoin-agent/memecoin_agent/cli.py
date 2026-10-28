@@ -43,15 +43,17 @@ def setup_logging(log_file: str | None, verbose: bool = False) -> None:
 
 def build_gmgn(cfg: Config):
     """A GMGN client if GMGN is enabled and a key is configured, else None (with one log line)."""
-    if not (cfg.gmgn.enabled and (cfg.gmgn.discovery or cfg.gmgn.safety)):
+    uses = cfg.gmgn.discovery or cfg.gmgn.safety or cfg.copy.enabled or cfg.longterm.discovery
+    if not (cfg.gmgn.enabled and uses):
         return None
     from .data.gmgn import GmgnClient, load_api_key
 
     key = load_api_key(cfg.gmgn)
     if not key:
-        log.info("GMGN not configured (set GMGN_API_KEY or gmgn.api_key_file); running without it")
+        log.info("GMGN not configured (set GMGN_API_KEY or gmgn.api_key_file); running without it"
+                 "%s", " (the copy lane needs it)" if cfg.copy.enabled else "")
         return None
-    return GmgnClient(key, cfg.gmgn.host)
+    return GmgnClient(key, cfg.gmgn.host, rate_per_s=cfg.gmgn.rate_per_s)
 
 
 def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
@@ -171,8 +173,32 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         route_check = SellRouteCheck(cfg.honeypot, cfg.execution, market.sol_price_usd)
         log.info("Honeypot check on: every paper buy is quoted on Jupiter and sold straight back first "
                  "(no route, or a round trip losing over %g%%, means no buy)", cfg.execution.max_roundtrip_loss_pct)
+    from .data.chain_safety import ChainSafety
+
+    dex = DexScreenerClient(cfg.filters.quote_symbols)  # tokens on every chain: copy, long-term, manual trades
+    chain_safety = ChainSafety(gmgn, fail_closed=cfg.copy.fail_closed)
+    copy_tracker = None
+    if cfg.copy.enabled and gmgn is not None:
+        from .data.copytrade import CopyTracker
+
+        cc = cfg.copy
+        copy_tracker = CopyTracker(cc, gmgn, state_file=cc.state_file)
+        log.info("Copy lane on: low caps (under $%.0fK) only when a tracked wallet buys them, on %s; wallets with a "
+                 "%g-%g%% win rate, %g+ days old, real losses", cfg.filters.min_market_cap_usd / 1000,
+                 ", ".join(cc.chains), cc.min_win_rate * 100, cc.max_win_rate * 100, cc.min_wallet_age_days)
+    elif cfg.copy.enabled:
+        log.info("Copy lane off: it needs a GMGN API key (low caps are not bought without it)")
+    longterm = None
+    if cfg.longterm.enabled:
+        from .data.longterm import LongTermScanner
+
+        longterm = LongTermScanner(cfg.longterm, dex, gmgn)
+        lt = cfg.longterm
+        log.info("Long-term lane on: %d watchlist token(s)%s; up to %d holds of $%.0f", len(lt.watchlist),
+                 " + GMGN discovery" if gmgn is not None and lt.discovery else "", lt.max_positions, lt.position_usd)
     return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics,
-                 profiler=profiler, route_check=route_check), feed
+                 profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
+                 longterm=longterm, chain_safety=chain_safety), feed
 
 
 def build_telegram(cfg: Config, runner):
@@ -251,12 +277,18 @@ class Engine:
     def start(self) -> None:
         if self.feed is not None:
             self.feed.start()
+        for worker in (self.runner.agent.copy_tracker, self.runner.agent.longterm):
+            if worker is not None:
+                worker.start()
         self.runner.start()
         if self.bot is not None:
             self.bot.start()
 
     def stop(self) -> None:
         self.runner.stop()
+        for worker in (self.runner.agent.copy_tracker, self.runner.agent.longterm):
+            if worker is not None:
+                worker.stop()
         if self.bot is not None:
             self.bot.stop()
         if self.feed is not None:

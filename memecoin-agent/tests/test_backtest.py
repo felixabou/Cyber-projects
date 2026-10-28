@@ -73,7 +73,7 @@ def test_backtest_trades_only_on_information_available_at_the_time():
     records = [disc(NOW, ["GOOD"]), safe(NOW, "GOOD")]
     t = NOW
     while t < NOW + timedelta(minutes=20):
-        price = 0.001 if t < drop_at else 0.0006  # -40%: stop loss
+        price = 0.001 if t < drop_at else 0.0004  # -60%: past the 50% hard stop
         records.append(snap_rec(t, mint="GOOD", price_usd=price))
         t += timedelta(seconds=30)
 

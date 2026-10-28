@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -72,21 +73,48 @@ def _truthy(v: Any) -> bool:
     return v is True or (isinstance(v, (int, float)) and v == 1) or str(v).strip().lower() in ("true", "yes", "1")
 
 
+# Rate-limit weight of each route (GMGN's docs): the free plan refills 5 a second, holding at most 5.
+WEIGHTS = {"/v1/market/rank": 3, "/v1/user/wallet_activity": 3, "/v1/user/wallet_stats": 3,
+           "/v1/market/token_top_traders": 5, "/v1/market/token_top_holders": 5, "/v1/market/token_kline": 2,
+           "/v1/user/smartmoney": 1, "/v1/user/kol": 1}
+
+
 class GmgnClient:
+    """Thread-safe: the agent, the copy tracker and the long-term scanner share one client and one
+    rate budget (a leaky bucket, so bursts wait instead of earning a GMGN ban)."""
+
     def __init__(self, api_key: str, host: str = "https://openapi.gmgn.ai", client: httpx.Client | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, rate_per_s: float = 5.0,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.host = host.rstrip("/")
         self.http = client or httpx.Client(timeout=20.0)
         self.headers = {"X-APIKEY": api_key, "Content-Type": "application/json", "User-Agent": "memecoin-agent"}
         self.clock = clock
+        self.sleep = sleep
         self.blocked_until = 0.0  # set when GMGN reports a rate limit
+        self.rate = max(rate_per_s, 0.1)
+        self._lock = threading.Lock()
+        self._free_at = 0.0  # when the bucket has room for the next request
 
-    def get(self, path: str, params: dict[str, Any]) -> Any:
+    def _wait_turn(self, path: str) -> None:
+        weight = min(WEIGHTS.get(path, 2), self.rate)
+        with self._lock:  # _free_at: when the bucket (capacity = rate) would be empty
+            now = self.clock()
+            start = max(now, self._free_at - (self.rate - weight) / self.rate)
+            self._free_at = max(self._free_at, start) + weight / self.rate
+        if start > now:
+            self.sleep(start - now)
+
+    def get(self, path: str, params: dict[str, Any], body: dict[str, Any] | None = None) -> Any:
         if self.clock() < self.blocked_until:
             raise GmgnError(f"GMGN rate limited for another {self.blocked_until - self.clock():.0f}s",
                             error="RATE_LIMIT_EXCEEDED")
+        self._wait_turn(path)
         query = {**params, "timestamp": int(self.clock()), "client_id": str(uuid.uuid4())}
-        resp = self.http.get(f"{self.host}{path}", params=query, headers=self.headers)
+        if body is None:
+            resp = self.http.get(f"{self.host}{path}", params=query, headers=self.headers)
+        else:
+            resp = self.http.post(f"{self.host}{path}", params=query, headers=self.headers, json=body)
         try:
             body = resp.json()
         except ValueError:
@@ -101,18 +129,58 @@ class GmgnClient:
             raise err
         return body.get("data")
 
-    def trending(self, interval: str, extra: dict[str, Any]) -> list[dict[str, Any]]:
-        data = self.get("/v1/market/rank", {"chain": CHAIN, "interval": interval, **extra})
+    def trending(self, interval: str, extra: dict[str, Any], chain: str = CHAIN) -> list[dict[str, Any]]:
+        data = self.get("/v1/market/rank", {"chain": chain, "interval": interval, **extra})
         rows = data.get("rank") if isinstance(data, dict) else data
         return [r for r in rows or [] if isinstance(r, dict)]
 
-    def security(self, mint: str) -> dict[str, Any]:
-        data = self.get("/v1/token/security", {"chain": CHAIN, "address": mint})
+    def security(self, mint: str, chain: str = CHAIN) -> dict[str, Any]:
+        data = self.get("/v1/token/security", {"chain": chain, "address": mint})
         return data if isinstance(data, dict) else {}
 
-    def info(self, mint: str) -> dict[str, Any]:
-        data = self.get("/v1/token/info", {"chain": CHAIN, "address": mint})
+    def info(self, mint: str, chain: str = CHAIN) -> dict[str, Any]:
+        data = self.get("/v1/token/info", {"chain": chain, "address": mint})
         return data if isinstance(data, dict) else {}
+
+    # -- wallets (copy lane) and history (long-term lane) ----------------------------------------
+    @staticmethod
+    def _rows(data: Any, *keys: str) -> list[dict[str, Any]]:
+        if isinstance(data, dict):
+            for k in keys:
+                if isinstance(data.get(k), list):
+                    data = data[k]
+                    break
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+    def trades_feed(self, kind: str, chain: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Latest trades by GMGN's tagged wallets: kind "smartmoney" or "kol"."""
+        return self._rows(self.get(f"/v1/user/{kind}", {"chain": chain, "limit": limit}), "list")
+
+    def wallet_stats(self, chain: str, wallet: str, period: str = "30d") -> dict[str, Any]:
+        data = self.get("/v1/user/wallet_stats", {"chain": chain, "wallet_address": wallet, "period": period})
+        rows = self._rows(data, "list")
+        return rows[0] if rows else (data if isinstance(data, dict) else {})
+
+    def wallet_activity(self, chain: str, wallet: str, limit: int = 20, types: tuple[str, ...] = ("buy",)) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"chain": chain, "wallet_address": wallet, "limit": limit}
+        if types:
+            params["type"] = list(types)
+        return self._rows(self.get("/v1/user/wallet_activity", params), "activities", "list")
+
+    def top_traders(self, chain: str, address: str, limit: int = 50) -> list[dict[str, Any]]:
+        data = self.get("/v1/market/token_top_traders", {"chain": chain, "address": address, "limit": limit,
+                                                          "order_by": "profit", "direction": "desc"})
+        return self._rows(data, "list", "holders", "traders")
+
+    def top_holders(self, chain: str, address: str, limit: int = 50) -> list[dict[str, Any]]:
+        data = self.get("/v1/market/token_top_holders", {"chain": chain, "address": address, "limit": limit,
+                                                          "order_by": "amount_percentage", "direction": "desc"})
+        return self._rows(data, "list", "holders")
+
+    def kline(self, chain: str, address: str, resolution: str, start: int, end: int) -> list[dict[str, Any]]:
+        data = self.get("/v1/market/token_kline", {"chain": chain, "address": address, "resolution": resolution,
+                                                    "from": start, "to": end})
+        return self._rows(data, "list", "klines", "candles")
 
 
 class GmgnDiscovery:

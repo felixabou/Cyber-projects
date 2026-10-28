@@ -55,7 +55,7 @@ def _position(pf: Portfolio, snap, price=0.001):
 
 
 def test_exit_rules(snap):
-    e = ExitConfig()
+    e = ExitConfig(style="classic")
     pos = _position(Portfolio(cash_usd=1000), snap)
     later = NOW + timedelta(minutes=10)
 

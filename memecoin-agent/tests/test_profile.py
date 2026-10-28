@@ -185,18 +185,18 @@ def test_meme_kind_reaches_the_gate_position_and_scanner(tmp_path):
     assert agent.last_scan[0]["kind"] == "meme"
 
 
-@pytest.mark.parametrize("snap_kw, scanned", [
-    (dict(pair_created_at=NOW - timedelta(minutes=40)), True),  # young: under an hour
-    (dict(market_cap_usd=30_000, liquidity_usd=15_000, volume_h1=30_000), True),  # small
-    ({}, False),  # 3h old, $600k: no wallet scan
+@pytest.mark.parametrize("snap_kw, scanned, bought", [
+    (dict(pair_created_at=NOW - timedelta(minutes=40)), True, False),  # young: under an hour
+    (dict(market_cap_usd=30_000, liquidity_usd=15_000, volume_h1=30_000), False, False),  # low cap: copy lane only
+    ({}, False, True),  # 3h old, $600k: no wallet scan
 ])
-def test_early_and_small_buys_need_the_wallet_scan(tmp_path, snap_kw, scanned):
+def test_early_and_small_buys_need_the_wallet_scan(tmp_path, snap_kw, scanned, bought):
     s = make_snap(mint="E1", volume_h24=200_000, **snap_kw)
     scanner = FakeScanner(SafetyReport(False, None, [SCANNING]))
     agent, gate = agent_with(tmp_path, s, TokenProfile("E1", kind="meme", holders=2_000), scanner)
     agent.scan_and_enter(NOW)
     assert bool(scanner.calls) is scanned
-    assert ("E1" in agent.pf.positions) is not scanned
+    assert ("E1" in agent.pf.positions) is bought
     if scanned:
         assert scanner.calls[0] == ("E1", None)  # no launch-age check for early buys
         assert agent.last_scan[0]["outcome"] == f"waiting: {SCANNING}" and gate.checked == []

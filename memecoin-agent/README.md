@@ -1,9 +1,12 @@
 # memecoin-agent
 
-An automated momentum trading agent for Solana memecoins. It finds new tokens on
-DexScreener, screens out obvious rugs with RugCheck, enters tokens with real
-liquidity and steady buy pressure, and exits on fixed rules. It **paper trades by
-default**. Live trading goes through Jupiter and has to be switched on explicitly.
+An automated trading agent for memecoins. Its main lane finds new Solana tokens on
+DexScreener, screens out obvious rugs, enters tokens with real liquidity and steady buy
+pressure, takes its initial stake out early and lets the rest run. Two more lanes reach
+every chain GMGN and DexScreener cover: a **copy lane** buys low caps only when tracked
+wallets buy them, and a **long-term lane** holds old, worn-down coins that still trade
+daily. You can also **paper-trade any token yourself** from the dashboard. It **paper trades
+by default**. Live trading goes through Jupiter (Solana only) and has to be switched on explicitly.
 
 > **Read this first.** Most memecoins go to zero, and most automated memecoin
 > strategies lose money once fees, slippage, MEV and rugs are counted. This is a
@@ -15,12 +18,12 @@ default**. Live trading goes through Jupiter and has to be switched on explicitl
 
 Each tick (10s by default):
 
-1. **Mark & exit.** Re-price every open position and apply the exit rules, in this order:
+1. **Mark & exit.** Re-price every open position and apply the exit rules ([details](#exits-take-the-initials-out-let-the-rest-run)):
    - **Liquidity pulled.** Liquidity falls ≥40% below its level at entry, which is the classic rug signature. Sell everything at once.
-   - **Stop loss.** −25% from the effective entry price.
-   - **Trailing stop.** Once the position has been +30% at its peak, exit if price falls 20% from that peak.
-   - **Time stop.** Exit after 12 hours (`max_hold_minutes: 720`). Losers are still cut by the stop loss and winners protected by the trailing stop; this only clears out tokens that went nowhere.
-   - **Staged take-profit.** Sell 40% at +50%, then 50% of what's left at +120%. A trailing stop rides the remainder.
+   - **Initials out at +25%.** Sell the initial cost plus half the profit; the rest becomes a runner.
+   - **Runner.** Checked every 30 minutes; sold only once it is 70% below its highest price since then. No time stop.
+   - **Hard stop at −50%**, every tick. A dip past −30% starts 30-minute reviews: held while it consolidates between −30% and −40%, sold if it keeps sliding or is deeper than −40% at a review.
+   - **Time stop.** Exit after 12 hours (`max_hold_minutes: 720`) if the initials never came out.
 2. **Scan & enter** (every 2nd tick, so every 20s):
    - Discover mints from three sources:
      - **Pump.fun graduations, in real time.** A background websocket to PumpPortal sees each token the moment it moves from the bonding curve to a real AMM pool. These go first in the scan.
@@ -31,12 +34,13 @@ Each tick (10s by default):
      - 1h volume, transaction count and volume/liquidity turnover;
      - buy/sell ratio over 5m and 1h;
      - positive 5m/1h momentum, but not already parabolic (>250% in 1h).
+   - Low caps (under $150k) are left to the [copy lane](#copy-lane-low-caps-only-when-tracked-wallets-buy).
    - Rank the survivors by a 0–1 momentum score.
    - Run RugCheck on each one. A danger-level risk (live mint or freeze authority, unlocked LP, concentrated holders…) or a high risk score rejects the token. If RugCheck can't be reached, the token is rejected.
    - **Live only:** quote the buy, then quote selling the tokens straight back. Skip the token if that round trip loses more than 12%. This catches honeypots and thin routes.
    - Size the position: 5% of equity, capped at $100.
 3. **Risk limits:**
-   - at most 20 open positions (dust left after a LarpCheck exit doesn't count);
+   - at most 20 open positions (runners, long-term holds, manual trades and LarpCheck dust don't count);
    - at most 6 entries per hour;
    - a 3-hour cooldown per token after an exit;
    - new entries stop for the rest of the day once realized plus unrealized losses reach 15% of the day's starting equity;
@@ -200,6 +204,76 @@ flag, bundler and insider checks run later in the chain as before.
 [wallet scan](#launch-lane) (launch-block bundles, linked wallets, top 10 holders, creator holdings),
 on top of the fake-chart check. Backtests don't take these early buys, since the scan needs live chain data.
 
+## Exits: take the initials out, let the rest run
+
+Researched on the agent's own trades (Oct 22–28, 50 round trips): 23 of them went 50% or more above
+the final sell price later, 14 of those within the hour. The trailing stop sold PMUP at +8%, +15%
+and +14%; it later ran 7–10x. But most coins also ended far lower: the median is now 82% below where
+it was sold, and of the coins that touched −30%, 27 of 39 fell to −50% before they came back to entry.
+So the exits now bank the stake early and let a small piece ride, instead of trailing tightly:
+
+| Stage | Rule (defaults) |
+|---|---|
+| Up 25% | Sell the initial cost plus half the profit (about 90% of the position). The rest is house money: a runner. |
+| Runner | Its peak is tracked every tick; every 30 minutes the agent checks how far above or below that peak it is, and sells it only when it is 70% or more below. No stop loss or time stop. |
+| Down 30% | A dip watch starts. Every 30 minutes: still between −30% and −40% and consolidating (range under 25% and down no more than 10% since the last check) or accumulating (more buys than sells in the last hour): hold. Deeper than −40%, or still sliding: sell. Back above −30%: the watch ends. |
+| Down 50% | Sell everything, at once. |
+
+Replaying those trades on 1-minute candles: these exits came to −$75 against −$95 for the old ones on
+the same data (42 trades with price history; rugs keep their real result). The −50% stop with dip
+reviews did better than a −30% stop (−$127) because it let five dippers recover and get their initials
+out, but it loses more on coins that keep falling. Taking the initials at +25% did best; +50% came to
+−$200. Every number is under `exits:` in [`config.example.yaml`](config.example.yaml);
+`style: classic` brings back the old stop loss, take-profit levels and trailing stop.
+
+## Copy lane: low caps only when tracked wallets buy
+
+The agent's own low-cap buys lost: entries under $150k market cap won 9 of 29 trades (−$261), while
+$150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer buy under
+`filters.min_market_cap_usd` ($150k), and low caps come only from wallets worth following:
+
+- **Finding wallets** (every 6 hours, on `copy.chains`: Solana, BSC, Base, Ethereum, Robinhood):
+  addresses from GMGN's smart-money and KOL trade feeds and the top traders of each chain's trending
+  tokens, kept only if, over 30 days, their win rate is **between 10% and 30%**, the wallet was first
+  funded **over 2 months ago**, they have **taken real losses** (3+ losing trades), they still trade
+  (10+ trades) and the wins outweigh the losses (`min_pnl: 0`; `null` turns that off). Up to 15 per
+  chain. Add your own under `copy.wallets` (`chain:address`).
+- **Copying**: a tracked wallet's **buy** of a token between $5k and $150k market cap. Activity is read
+  as buys only, so tokens **sent** to the wallet never count, and a token the wallet **created** is
+  skipped. The signal is good for 10 minutes.
+- **Checks before the buy**: Solana coins get the token-settings check, the wallet scan, RugCheck,
+  GMGN, LarpCheck and the sell-back quote; other chains get GMGN's (or GoPlus's) honeypot and tax
+  check. Other chains are paper-only.
+
+It needs a GMGN API key. Without one the copy lane is off and the agent buys no low caps.
+
+## Long-term lane
+
+Coins **over a year old** that wore down gradually, still trade every day and still have big holders:
+
+- far below their high (60%+), lower than one to three months ago, no single-day drop over 40% in the
+  last month, not down more than 35% this week, traded on 25+ of the last 30 days;
+- $20k+ liquidity, $50k–$10M market cap, $2k+ daily volume and 25+ buys a day;
+- 300+ holders, 5+ of them holding $1,000 or more.
+
+Candidates are your `longterm.watchlist` (`chain:address`; these skip the age rule) plus, with a GMGN
+key, each chain's year-old tokens ranked by 24h volume. Rescanned every 6 hours. Each buy is $50, up
+to 5 holds, outside the 20 trading slots. Exits: initials and half the profit out at 2x, the rest
+runs (70% from its peak, checked every 30 minutes), hard stop at −50%, no time stop; a sold coin
+isn't rebought for a week.
+
+Example: ROBINCAT, PFWA and MEME on Robinhood Chain are 49–89 days old, so they only qualify from the
+watchlist. On Oct 28 all three passed every other rule (PFWA only just: 31% down that week).
+
+## Paper-trade any token yourself
+
+The dashboard's **Trade** tab: paste a contract address from any chain (or search a name), pick the
+token, enter an amount and buy it with paper cash. The **Agent trades it** switch decides who sells:
+on, the agent's exits apply; off, the agent never sells it and you do. Every open position has the
+same switch, plus **25% / 50% / Sell all** buttons. **Check safety** runs the honeypot checks first
+(warnings only; it's your call). From Telegram: `/buy ADDRESS USD [chain] [manual]`,
+`/sell SYMBOL 50`, `/agent SYMBOL on|off`. Manual trades are paper-only and don't use a trading slot.
+
 ## Rug and honeypot guards
 
 Added after a run of bad buys. Each one blocks a pattern that showed up on real charts:
@@ -352,6 +426,9 @@ each hourly trade file, and control from your phone.
 | `/scan` | Scan for entries now |
 | `/close SYMBOL` | Sell one position (the mint address works too) |
 | `/closeall yes` | Sell everything, dust included |
+| `/buy ADDRESS USD [chain] [manual]` | Paper-buy any token, e.g. `/buy 0xded8…79cc 50 robinhood`; add `manual` if only you should sell it |
+| `/sell SYMBOL 50` | Sell part of a position (a percentage) |
+| `/agent SYMBOL on\|off` | Whether the agent's exits apply to a position |
 
 **Safety:**
 
@@ -504,6 +581,9 @@ memecoin_agent/
   data/profile.py    tech vs meme, fake-chart and honeypot-settings checks (RugCheck report + metadata)
   data/route.py      sell-back check: Jupiter buy and sell quotes before a paper buy
   data/pumpportal.py real-time pump.fun graduation/launch websocket feed
+  data/copytrade.py  copy lane: finds and vets wallets on GMGN, turns their buys into signals
+  data/longterm.py   long-term lane: year-old, worn-down coins that still trade daily
+  data/chain_safety.py   honeypot/tax checks for other chains (GMGN, GoPlus)
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py
   recording.py       market-data recorder (gzipped JSONL)

@@ -178,3 +178,41 @@ def test_log_buffer_incremental():
         logger.removeHandler(buf)
     assert [e["msg"] for e in buf.since(0)] == ["msg 2", "msg 3", "msg 4"]
     assert [e["msg"] for e in buf.since(buf.seq - 1)] == ["msg 4"]
+
+
+def test_manual_trades_from_the_dashboard(tmp_path):
+    from .test_lanes import FakeMulti
+
+    cfg = Config()
+    cfg.agent.tick_seconds = 0.05
+    cfg.agent.kill_switch_file = str(tmp_path / "STOP")
+    cfg.agent.trades_csv = str(tmp_path / "trades.csv")
+    rc = make_snap(mint="0x" + "ab" * 20, chain="robinhood", symbol="ROBINCAT")
+    clock = SimClock(NOW)
+    agent = Agent(cfg, FakeMarket([]), FakeSafety(), PaperExecutor(cfg.execution), Portfolio(cash_usd=1000),
+                  clock=clock, persist=False, multichain=FakeMulti([rc]))
+    runner = AgentRunner(agent, equity=EquityHistory(tmp_path / "equity.csv"), advance=lambda s: clock.advance(15))
+    server = DashboardServer(runner, LogBuffer(), port=0, config_dict=redacted_config(cfg))
+    runner.start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    client = httpx.Client(base_url=f"http://127.0.0.1:{server.port}", headers={"X-UI-Token": server.token}, timeout=10)
+    try:
+        found = client.get("/api/lookup", params={"q": rc.mint}).json()["results"]
+        assert found[0]["symbol"] == "ROBINCAT" and found[0]["chain"] == "robinhood"
+        r = client.post("/api/control", json={"action": "manual_buy", "chain": "robinhood", "address": rc.mint,
+                                              "usd": 30, "managed": False}).json()
+        assert r["ok"] and r["message"].startswith("Bought $30.00 of ROBINCAT")
+        pos = client.get("/api/view").json()["positions"][0]
+        assert pos["lane"] == "manual" and pos["managed"] is False and pos["stage"] == "manual"
+        assert pos["url"].startswith("https://dexscreener.com/robinhood/")
+        assert client.post("/api/control", json={"action": "set_managed", "mint": rc.mint, "managed": True}).json()["ok"]
+        assert client.post("/api/control", json={"action": "sell", "mint": rc.mint, "fraction": 0.5}).json()["ok"]
+        pos = client.get("/api/view").json()["positions"][0]
+        assert pos["managed"] is True and abs(pos["value_usd"] - 15) < 1
+        bad = client.post("/api/control", json={"action": "manual_buy", "chain": "robinhood", "address": rc.mint, "usd": 5})
+        assert bad.status_code == 400 and "Already holding" in bad.json()["error"]
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        runner.stop()

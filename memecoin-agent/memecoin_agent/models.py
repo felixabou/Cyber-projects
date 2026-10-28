@@ -39,6 +39,9 @@ class TokenSnapshot:
     fetched_at: datetime = field(default_factory=utcnow)
     links: list[str] = field(default_factory=list)  # the token's website and social links (DexScreener)
     price_change_h6: float = 0.0
+    chain: str = "solana"  # DexScreener chain id; EVM addresses are kept lowercase
+    buys_h24: int = 0
+    sells_h24: int = 0
 
     def age_minutes(self, now: datetime) -> float | None:
         if self.pair_created_at is None:
@@ -119,6 +122,26 @@ class Position:
     # LarpCheck's view of the coin while held: verdict, stamp, parsed reasoning (see data/larpcheck.py).
     larp: dict[str, Any] | None = None
     kind: str = ""  # "tech" or "meme" (data/profile.py); memes get LarpCheck's free lookup only
+    chain: str = "solana"
+    # How it was bought: momentum, launch, copy (a tracked wallet bought it), longterm, manual.
+    lane: str = "momentum"
+    # False: a manual trade the agent never sells (dashboard toggle "Agent trades it").
+    managed: bool = True
+    # Let-it-run exits (strategy.evaluate_exit): once the initials and part of the profit are out,
+    # the rest is a runner, reviewed every 30 minutes against its own peak.
+    secured_at: datetime | None = None
+    runner_peak_usd: float = 0.0
+    next_review_at: datetime | None = None  # the next runner or dip review
+    # Dip watch: a dip into the review zone; the price range since the last review.
+    dip_since: datetime | None = None
+    dip_open_usd: float = 0.0
+    dip_high_usd: float = 0.0
+    dip_low_usd: float = 0.0
+    review_note: str = ""  # what the last review found, for the dashboard
+
+    @property
+    def secured(self) -> bool:
+        return self.secured_at is not None
 
     def pnl_pct(self, price: float | None = None) -> float:
         p = self.last_price_usd if price is None else price
@@ -129,14 +152,20 @@ class Position:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["opened_at"] = self.opened_at.isoformat()
+        for k in _POSITION_TIMES:
+            d[k] = d[k].isoformat() if d[k] else None
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Position":
-        d = dict(d)
-        d["opened_at"] = datetime.fromisoformat(d["opened_at"])
+        d = {k: v for k, v in d.items() if k in _POSITION_FIELDS}
+        for k in _POSITION_TIMES:
+            d[k] = datetime.fromisoformat(d[k]) if d.get(k) else None
         return cls(**d)
+
+
+_POSITION_FIELDS = {f.name for f in fields(Position)}
+_POSITION_TIMES = ("opened_at", "secured_at", "next_review_at", "dip_since")
 
 
 @dataclass

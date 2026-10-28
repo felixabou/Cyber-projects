@@ -524,22 +524,18 @@ function renderOverview(v) {
     tile("Win rate", sess.win_rate_pct === null ? "—" : `${sess.win_rate_pct.toFixed(0)}%`,
       `${sess.wins}/${sess.round_trips} round trips this session`));
 
-  const dust = v.positions.filter((p) => p.dust).length;  // dust doesn't take a slot
-  $("#positions-count").textContent = `${v.positions.length - dust} / ${v.risk.max_open_positions}${dust ? ` + ${dust} dust` : ""}`;
+  const free = v.positions.length - v.risk.open_positions;  // dust, runners, long-term and manual don't take a slot
+  $("#positions-count").textContent = `${v.risk.open_positions} / ${v.risk.max_open_positions}${free ? ` + ${free} outside the limit` : ""}`;
   replace($("#positions"), table([
-    { label: "Token", render: (p) => h("div", { class: "token-row" }, tokenCell(p.symbol, p.mint, p.url),
-      p.dust ? h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }) : null) },
+    { label: "Token", render: (p) => h("div", { class: "token-row" }, tokenCell(p.symbol, p.mint, p.url), positionPills(p)) },
     { label: "Value", num: true, render: (p) => usd(p.value_usd) },
     { label: "PnL", num: true, render: (p) => delta(p.pnl_pct, pct(p.pnl_pct)) },
     { label: "Peak", num: true, render: (p) => pct(p.peak_pct) },
-    { label: "Exit if below", num: true, render: (p) => p.dust ? h("span", { class: "muted", title: "Dust has no automatic exits", text: "none (dust)" }) : h("span", { title: p.trailing_armed ? "Trailing stop armed" : "Stop loss" },
-      `${price(p.stop_price_usd)}${p.trailing_armed ? " ↟" : ""}`) },
-    { label: "Take profit", num: true, render: (p) => `${p.tp_hit}/${p.tp_total}` },
+    { label: "Plan", cls: "reason", render: (p) => planCell(p, v) },
     { label: "Liquidity", num: true, render: (p) => pct(p.liquidity_change_pct, 0) },
     { label: "LarpCheck", render: larpCell },
-    { label: "Held", num: true, render: (p) => h("span", { title: `Time stop at ${duration(p.max_hold_minutes)}` }, duration(p.held_minutes)) },
-    { label: "", render: (p) => h("button", { class: "btn btn-small btn-danger", type: "button",
-      onclick: () => closePosition(p), text: "Close" }) },
+    { label: "Held", num: true, render: (p) => h("span", { title: p.stage === "runner" ? "Runners have no time stop" : `Time stop at ${duration(p.max_hold_minutes)}` }, duration(p.held_minutes)) },
+    { label: "", render: (p) => positionActions(p) },
   ], v.positions, "No open positions"));
   renderLarpReasons(v.positions);
 
@@ -566,6 +562,54 @@ function renderOverview(v) {
     h("div", { class: "entry-state", text: entry }));
 
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
+}
+
+const LANE_LABELS = { copy: "Copy", longterm: "Long-term", manual: "Manual", launch: "Launch" };
+const CHAIN_LABELS = { solana: "SOL", ethereum: "ETH", bsc: "BSC", base: "Base", arbitrum: "ARB", robinhood: "Robinhood" };
+
+function positionPills(p) {
+  const pills = [];
+  if (p.chain && p.chain !== "solana") pills.push(h("span", { class: "pill pill-chain", text: CHAIN_LABELS[p.chain] || p.chain }));
+  if (LANE_LABELS[p.lane]) pills.push(h("span", { class: "pill", text: LANE_LABELS[p.lane] }));
+  if (p.dust) pills.push(h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }));
+  if (p.stage === "runner") pills.push(h("span", { class: "pill pill-runner", title: "Initials and half the profit are out; the rest runs", text: "runner" }));
+  if (p.stage === "dip watch") pills.push(h("span", { class: "pill pill-dip", title: p.review_note || "", text: "dip watch" }));
+  return pills;
+}
+
+function planCell(p, v) {
+  const next = p.next_review_at ? ` · next check ${timeLabel(p.next_review_at)}` : "";
+  let text, tip = p.review_note || null;
+  if (!p.managed) text = "You trade it: no automatic sells";
+  else if (p.dust) text = "None (dust)";
+  else if (p.style !== "let_it_run") text = `Exit below ${price(p.stop_price_usd)}${p.trailing_armed ? " ↟" : ""} · take profit ${p.tp_hit}/${p.tp_total}`;
+  else if (p.stage === "runner") {
+    text = `Runner: ${pct(-(p.runner_below_peak_pct || 0), 0)} from its peak; sells only ${v.exits.runner_drawdown_pct}% below it${next}`;
+  } else if (p.stage === "dip watch") {
+    text = `Dip watch: held while it consolidates; stop ${price(p.stop_price_usd)}${next}`;
+  } else {
+    text = `Initials out at ${price(p.secure_price_usd)} (+${v.exits.secure_at_pct}%) · stop ${price(p.stop_price_usd)}`;
+  }
+  return h("span", { title: tip }, text, p.review_note && p.stage !== "securing"
+    ? h("div", { class: "muted small", text: p.review_note }) : null);
+}
+
+function positionActions(p) {
+  const sell = (fraction, label) => h("button", { class: "btn btn-small", type: "button",
+    title: `Sell ${Math.round(fraction * 100)}% now`, onclick: () => sellPart(p, fraction), text: label });
+  const toggle = h("label", { class: "agent-toggle", title: p.managed ? "The agent's exit rules apply" : "Only you sell it" },
+    h("input", { type: "checkbox", class: "switch", checked: p.managed || null,
+      onchange: (e) => control("set_managed", { mint: p.mint, managed: e.target.checked }) }),
+    h("span", { text: "Agent" }));
+  return h("div", { class: "row-actions" }, toggle, sell(0.25, "25%"), sell(0.5, "50%"),
+    h("button", { class: "btn btn-small btn-danger", type: "button", onclick: () => closePosition(p), text: "Sell all" }));
+}
+
+async function sellPart(p, fraction) {
+  const live = state.view && state.view.mode === "live";
+  const ok = await confirmDialog(`Sell ${Math.round(fraction * 100)}% of ${p.symbol}?`,
+    `About ${usd(p.value_usd * fraction)} at market now${live ? " — a real on-chain sale" : ""}.`, "Sell");
+  if (ok) control("sell", { mint: p.mint, fraction });
 }
 
 const LARP_BAD = new Set(["LARP", "SCAM", "LIKELY LARP"]);
@@ -680,6 +724,155 @@ function verdict(c) {
   return h("span", { class: `verdict ${cls}`, title: c.reasons.join("\n") || null },
     h("span", { class: "verdict-icon", "aria-hidden": "true", text: icon }), launch, kind, h("span", { text }),
     evidence ? h("a", { href: evidence, target: "_blank", rel: "noopener noreferrer", class: "pill", text: "evidence" }) : null);
+}
+
+// ---------------------------------------------------------------- manual trades
+const trade = { results: [], picked: null, searching: false };
+
+function renderTrade(v) {
+  $("#trade-cash").textContent = `${usd(v.cash)} paper cash`;
+  const off = !v.manual_trading;
+  $("#lookup-go").disabled = off;
+  $("#trade-note").textContent = off
+    ? (v.mode === "live" ? "Manual trades are paper-only; this agent is trading live." : "Token search isn't available in this mode.")
+    : "Any chain DexScreener covers (Solana, Ethereum, BSC, Base, Robinhood…). Buys fill at the current price with paper fees. "
+      + "Searching by name? Fake copies share names: check the contract before you buy.";
+  $("#buy-managed-note").textContent = $("#buy-managed").checked
+    ? `On: the agent's exits apply (initials and half the profit out at +${v.exits.secure_at_pct}%, the rest runs; stop at −${v.exits.hard_stop_pct}%).`
+    : "Off: the agent never sells it; you sell from Open positions or Telegram.";
+}
+
+function renderLookup() {
+  const rows = trade.results;
+  replace($("#lookup-results"), trade.searching ? h("div", { class: "empty", text: "Searching…" }) : table([
+    { label: "Token", render: (t) => h("div", { class: "token-row" }, tokenCell(t.symbol, t.mint, t.url),
+      h("span", { class: "pill pill-chain", text: CHAIN_LABELS[t.chain] || t.chain })) },
+    { label: "Name", cls: "reason", render: (t) => t.name },
+    { label: "Price", num: true, render: (t) => price(t.price_usd) },
+    { label: "Liquidity", num: true, render: (t) => usd(t.liquidity_usd, { compact: true }) },
+    { label: "Mkt cap", num: true, render: (t) => usd(t.market_cap_usd, { compact: true }) },
+    { label: "24h vol", num: true, render: (t) => usd(t.volume_h24, { compact: true }) },
+    { label: "24h", num: true, render: (t) => pct(t.price_change_h24, 0) },
+    { label: "Age", num: true, render: (t) => duration(t.age_minutes) },
+    { label: "", render: (t) => h("button", { class: "btn btn-small btn-primary", type: "button", onclick: () => pickToken(t), text: "Select" }) },
+  ], rows, "Paste a contract address or a name, then Search"));
+}
+
+async function lookup(q) {
+  trade.searching = true; renderLookup();
+  try {
+    const res = await api(`/api/lookup?q=${encodeURIComponent(q)}`);
+    trade.results = res.results || [];
+    if (trade.results.length === 1) pickToken(trade.results[0]);
+  } catch (e) { toast(e.message, true); trade.results = []; }
+  trade.searching = false; renderLookup();
+}
+
+function pickToken(t) {
+  trade.picked = t;
+  $("#buy-card").hidden = false;
+  $("#buy-title").textContent = `Buy ${t.symbol} on ${CHAIN_LABELS[t.chain] || t.chain}`;
+  const link = $("#buy-link");
+  if (safeUrl(t.url)) { link.href = t.url; link.textContent = "DexScreener →"; } else { link.removeAttribute("href"); link.textContent = ""; }
+  const fact = (label, value) => h("div", { class: "fact" }, h("span", { class: "muted", text: label }), h("strong", { text: value }));
+  replace($("#buy-facts"),
+    fact("Price", price(t.price_usd)), fact("Liquidity", usd(t.liquidity_usd, { compact: true })),
+    fact("Market cap", usd(t.market_cap_usd, { compact: true })), fact("24h volume", usd(t.volume_h24, { compact: true })),
+    fact("24h buys / sells", `${t.buys_h24} / ${t.sells_h24}`), fact("Pool age", duration(t.age_minutes)),
+    fact("Contract", shortMint(t.mint)));
+  replace($("#buy-warnings"));
+  $("#buy-status").textContent = "";
+  $("#buy-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function checkPicked() {
+  const t = trade.picked;
+  if (!t) return;
+  $("#buy-status").textContent = "Checking…";
+  try {
+    const res = await api("/api/control", { method: "POST", body: JSON.stringify({ action: "manual_check", chain: t.chain,
+      address: t.mint, usd: Number($("#buy-usd").value) || 50 }) });
+    const w = res.warnings || [];
+    replace($("#buy-warnings"), w.length ? w.map((x) => h("li", { class: "warn", text: x }))
+      : h("li", { class: "ok", text: "No honeypot or tax flags found (not a guarantee)." }));
+    $("#buy-status").textContent = "";
+  } catch (e) { $("#buy-status").textContent = ""; toast(e.message, true); }
+}
+
+async function buyPicked() {
+  const t = trade.picked;
+  const amount = Number($("#buy-usd").value);
+  if (!t || !(amount > 0)) { toast("Enter an amount in USD", true); return; }
+  const managed = $("#buy-managed").checked;
+  const ok = await confirmDialog(`Paper-buy ${usd(amount)} of ${t.symbol}?`,
+    `On ${t.chain} at about ${price(t.price_usd)}. ${managed ? "The agent will manage the exit." : "Only you will sell it."}`, "Buy");
+  if (!ok) return;
+  await control("manual_buy", { chain: t.chain, address: t.mint, usd: amount, managed });
+}
+
+// ---------------------------------------------------------------- copy lane and long-term lane
+function walletLink(w) {
+  const chain = w.chain === "sol" ? "sol" : w.chain;
+  return h("a", { href: `https://gmgn.ai/${encodeURIComponent(chain)}/address/${encodeURIComponent(w.address)}`,
+    target: "_blank", rel: "noopener noreferrer", title: w.address, text: w.short });
+}
+
+function renderLanes(v) {
+  const c = v.copy;
+  if (!c) {
+    $("#copy-status").textContent = "off";
+    $("#copy-hint").textContent = "The copy lane needs a GMGN API key (GMGN_API_KEY). Without it the agent buys no low caps.";
+    replace($("#copy-wallets"));
+  } else {
+    $("#copy-status").textContent = `${c.wallets.length} wallet(s) on ${c.chains.join(", ")} · vetted ${c.last_refresh ? ago(new Date(c.last_refresh * 1000).toISOString()) : "soon"}`
+      + (c.errors ? ` · ${c.errors} error(s)` : "");
+    $("#copy-hint").textContent = "Wallets with a 10–30% win rate over 30 days, over 2 months old, with real losses. "
+      + "A low cap is bought only when one of them buys it (never transfers in, never its own launch)."
+      + (c.last_error ? ` Last error: ${c.last_error}` : "");
+    replace($("#copy-wallets"), table([
+      { label: "Chain", render: (w) => h("span", { class: "pill pill-chain", text: w.chain }) },
+      { label: "Wallet", render: (w) => h("div", { class: "token" }, walletLink(w), w.pinned ? h("span", { class: "pill", text: "yours" }) : null) },
+      { label: "Win rate", num: true, render: (w) => (w.win_rate === null ? "—" : `${(w.win_rate * 100).toFixed(0)}%`) },
+      { label: "30d return", num: true, render: (w) => (w.pnl === null ? "—" : delta(w.pnl, pct(w.pnl * 100, 0))) },
+      { label: "Trades", num: true, render: (w) => w.trades },
+      { label: "Losses", num: true, render: (w) => w.losses },
+      { label: "Age", num: true, render: (w) => (w.age_days === null ? "—" : `${Math.round(w.age_days)}d`) },
+      { label: "Last buy", cls: "reason", render: (w) => (w.last_buy_at ? `${w.last_buy_symbol || "?"} · ${ago(new Date(w.last_buy_at * 1000).toISOString())}` : "—") },
+      { label: "Found in", cls: "reason", render: (w) => w.source },
+    ], c.wallets, "Finding wallets… (the first vetting pass takes a few minutes)"));
+  }
+  replace($("#lane-outcomes"), table([
+    { label: "Time", cls: "nowrap", render: (o) => timeLabel(o.at, true) },
+    { label: "Lane", render: (o) => h("span", { class: "pill", text: LANE_LABELS[o.lane] || o.lane }) },
+    { label: "Token", render: (o) => h("div", { class: "token-row" }, tokenCell(o.symbol, o.mint, null),
+      h("span", { class: "pill pill-chain", text: CHAIN_LABELS[o.chain] || o.chain })) },
+    { label: "Outcome", cls: "reason", render: (o) => o.outcome },
+  ], v.lane_outcomes || [], "Nothing yet"));
+
+  const lt = v.longterm;
+  if (!lt) {
+    $("#lt-status").textContent = "off";
+    replace($("#lt-table"));
+    return;
+  }
+  const ok = lt.tokens.filter((t) => t.ok).length;
+  $("#lt-status").textContent = lt.scanning ? "scanning…"
+    : lt.last_scan ? `${ok} qualify of ${lt.tokens.length} · scanned ${ago(new Date(lt.last_scan * 1000).toISOString())}` : "first scan soon";
+  $("#lt-hint").textContent = "Over a year old (your watchlist skips the age rule), far below its high but wearing down gradually, "
+    + "still traded every day, holders with $1,000+ still in. Bought with its own budget; no time stop.";
+  replace($("#lt-table"), table([
+    { label: "Token", render: (t) => h("div", { class: "token-row" }, tokenCell(t.symbol, t.address, t.facts.url),
+      h("span", { class: "pill pill-chain", text: CHAIN_LABELS[t.chain] || t.chain }), t.watchlist ? h("span", { class: "pill", text: "watchlist" }) : null) },
+    { label: "Age", num: true, render: (t) => (t.facts.age_days !== undefined ? `${t.facts.age_days}d` : "—") },
+    { label: "Below high", num: true, render: (t) => (t.facts.below_high_pct !== undefined ? `${t.facts.below_high_pct}%` : "—") },
+    { label: "vs 1–3 mo ago", num: true, render: (t) => (t.facts.vs_1_3_months_pct !== undefined ? pct(t.facts.vs_1_3_months_pct, 0) : "—") },
+    { label: "24h vol", num: true, render: (t) => usd(t.facts.volume_h24_usd, { compact: true }) },
+    { label: "Buys 24h", num: true, render: (t) => (t.facts.buys_h24 ?? "—") },
+    { label: "Holders (large)", num: true, render: (t) => (t.facts.holders ? `${t.facts.holders} (${t.facts.large_holders})` : "—") },
+    { label: "Verdict", cls: "reason", render: (t) => h("span", { class: `verdict ${t.ok ? "v-pass" : "v-fail"}` },
+      h("span", { class: "verdict-icon", "aria-hidden": "true", text: t.ok ? "✓" : "✗" }),
+      h("span", { text: t.ok ? "Qualifies" : t.reasons.join(" · ") })) },
+  ], lt.tokens, "No candidates yet: add tokens to longterm.watchlist, or set a GMGN key for discovery"));
 }
 
 // ---------------------------------------------------------------- trades
@@ -878,6 +1071,8 @@ function render() {
   if (state.tab === "overview") renderOverview(v);
   else if (state.tab === "scanner") renderScanner(v);
   else if (state.tab === "trades") renderTrades(v);
+  else if (state.tab === "trade") renderTrade(v);
+  else if (state.tab === "lanes") renderLanes(v);
   else if (state.tab === "backtest") renderRecorder(v);
 }
 
@@ -984,7 +1179,17 @@ function init() {
   });
 
   const saved = store("tab");
-  selectTab(["overview", "scanner", "trades", "activity", "backtest", "settings"].includes(saved) ? saved : "overview");
+  $("#lookup-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = $("#lookup-q").value.trim();
+    if (q) lookup(q);
+  });
+  $("#buy-form").addEventListener("submit", (e) => { e.preventDefault(); buyPicked(); });
+  $("#buy-check").addEventListener("click", checkPicked);
+  $("#buy-managed").addEventListener("change", () => state.view && renderTrade(state.view));
+  renderLookup();
+
+  selectTab(["overview", "scanner", "trade", "lanes", "trades", "activity", "backtest", "settings"].includes(saved) ? saved : "overview");
   pollView(); pollEquity(); pollLog();
   setInterval(pollView, 2000);
   setInterval(pollEquity, 10000);

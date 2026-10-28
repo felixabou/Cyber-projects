@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .runner import AgentRunner, LogBuffer
+from .runner import AgentRunner, LogBuffer, token_view
 
 log = logging.getLogger(__name__)
 
@@ -180,6 +180,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"entries": srv.logs.since(after)})
         elif path == "/api/config":
             self._json(srv.config_dict)
+        elif path == "/api/lookup":
+            query = q.get("q", [""])[0].strip()[:120]
+            try:  # read-only DexScreener lookups: served on this thread, the agent never waits for them
+                found = runner.agent.lookup(query) if query else []
+            except Exception as exc:
+                self._error(HTTPStatus.BAD_GATEWAY, f"Search failed: {exc}")
+                return
+            self._json({"results": [token_view(sn, runner.agent.clock()) for sn in found]})
         elif path == "/api/backtest":
             self._json(runner.backtest.state)
         elif path == "/api/trades.csv":
@@ -212,7 +220,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = self._body()
             if path == "/api/control":
                 action = str(body.get("action", ""))
-                result = runner.submit(action, mint=body.get("mint"))
+                args = {k: body.get(k) for k in ("mint", "fraction", "managed", "chain", "address", "usd") if k in body}
+                result = runner.submit(action, **args)
                 self._json({"ok": True, **(result or {})})
             elif path == "/api/backtest":
                 overrides = [str(o).strip() for o in body.get("overrides") or [] if str(o).strip()]

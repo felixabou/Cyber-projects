@@ -177,7 +177,8 @@ def exit_kind(reason: str) -> str:
     r = reason.lower()
     if r.startswith("larpcheck"):
         return "larpcheck flag"
-    for key in ("take profit", "stop loss", "trailing stop", "time stop", "liquidity pulled", "manual close"):
+    for key in ("take profit", "stop loss", "trailing stop", "time stop", "liquidity pulled", "manual close",
+                "initials out", "runner", "dip review", "manual sell"):
         if r.startswith(key):
             return key
     return r.split(" (")[0][:30] or "other"

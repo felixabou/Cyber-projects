@@ -24,3 +24,9 @@ telegram:
   notify_trades: true
   send_exports: true
   allow_controls: true
+
+longterm:
+  watchlist:   # "chain:address"; these skip the one-year age rule
+    - robinhood:0xded852de9fe9ba9b6f27f39e8e81cf851a5c79cc   # ROBINCAT
+    - robinhood:0xa934ba4f59070149d37a93f8a002af79bae35563   # PFWA
+    - robinhood:0x385f4f8ae47651ce5f58f5265395a669f8281e18   # MEME
