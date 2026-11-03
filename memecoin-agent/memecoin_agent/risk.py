@@ -17,19 +17,28 @@ class RiskManager:
         if day not in pf.day_start_equity:
             pf.day_start_equity[day] = pf.equity_usd()
 
+    def daily_loss_limit_usd(self, day_start: float) -> float:
+        return self.cfg.max_daily_loss_usd if self.cfg.max_daily_loss_usd is not None \
+            else day_start * self.cfg.max_daily_loss_pct / 100
+
+    def daily_loss_reason(self) -> str:
+        c = self.cfg
+        return (f"daily loss limit (${c.max_daily_loss_usd:,.0f}) hit" if c.max_daily_loss_usd is not None
+                else f"daily loss limit ({c.max_daily_loss_pct:.0f}%) hit")
+
     def daily_loss_halted(self, pf: Portfolio, now: datetime) -> bool:
         day = now.date().isoformat()
         start = pf.day_start_equity.get(day) or pf.equity_usd()
         realized = pf.realized_pnl_by_day.get(day, 0.0)
         # Count open losers too, so a pile of underwater bags also stops new entries.
         unrealized = sum(min(0.0, p.market_value_usd() - p.cost_basis_usd) for p in pf.positions.values())
-        return start > 0 and (realized + unrealized) <= -start * self.cfg.max_daily_loss_pct / 100
+        return start > 0 and (realized + unrealized) <= -self.daily_loss_limit_usd(start)
 
     def entry_block_reason(self, pf: Portfolio, now: datetime) -> str | None:
         if len(pf.active_positions()) >= self.cfg.max_open_positions:
             return f"max open positions ({self.cfg.max_open_positions})"
         if self.daily_loss_halted(pf, now):
-            return f"daily loss limit ({self.cfg.max_daily_loss_pct:.0f}%) hit"
+            return self.daily_loss_reason()
         hour_ago = now - timedelta(hours=1)
         recent = sum(1 for t in pf.entry_times if datetime.fromisoformat(t) >= hour_ago)
         if recent >= self.cfg.max_entries_per_hour:

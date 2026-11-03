@@ -413,7 +413,7 @@ class AgentRunner:
         day_start = pf.day_start_equity.get(day, equity)
         realized_today = pf.realized_pnl_by_day.get(day, 0.0)
         unrealized_losses = sum(min(0.0, p.market_value_usd() - p.cost_basis_usd) for p in pf.positions.values())
-        loss_limit = day_start * cfg.risk.max_daily_loss_pct / 100
+        loss_limit = a.risk.daily_loss_limit_usd(day_start)
         loss_now = max(0.0, -(realized_today + unrealized_losses))
         hour_ago = now - timedelta(hours=1)
         entries_last_hour = sum(1 for t in pf.entry_times if datetime.fromisoformat(t) >= hour_ago)
@@ -484,7 +484,7 @@ class AgentRunner:
                 "open_positions": len(pf.active_positions()), "max_open_positions": cfg.risk.max_open_positions,
                 "entries_last_hour": entries_last_hour, "max_entries_per_hour": cfg.risk.max_entries_per_hour,
                 "daily_loss_usd": loss_now, "daily_loss_limit_usd": loss_limit,
-                "daily_loss_limit_pct": cfg.risk.max_daily_loss_pct,
+                "daily_loss_limit_pct": round(loss_limit / day_start * 100, 1) if day_start else cfg.risk.max_daily_loss_pct,
             },
             "session": {
                 "round_trips": len(closed), "wins": len(wins),

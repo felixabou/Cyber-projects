@@ -376,7 +376,7 @@ class Agent:
             return f"kill switch file '{self.cfg.agent.kill_switch_file}' present"
         if lane == "longterm":  # its own slots, and no hourly entry limit
             if self.risk.daily_loss_halted(self.pf, now):
-                return f"daily loss limit ({self.cfg.risk.max_daily_loss_pct:.0f}%) hit"
+                return self.risk.daily_loss_reason()
             return None
         return self.risk.entry_block_reason(self.pf, now)
 
