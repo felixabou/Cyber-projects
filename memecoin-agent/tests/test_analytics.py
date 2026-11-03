@@ -59,3 +59,46 @@ def test_watch_survives_a_restart(tmp_path):
     an.watch("M", "SYM", 0.01, NOW, "time stop")
     again = Analytics(tmp_path)
     assert again.watches["M"].exit_price == 0.01 and again.watches["M"].reason == "time stop"
+
+
+def _trips(pcts_by_day, cost=20.0):
+    from datetime import datetime, timezone
+
+    from memecoin_agent.analytics import RoundTrip
+
+    out, start = [], datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
+    for d, pcts in enumerate(pcts_by_day):
+        for i, p in enumerate(pcts):
+            t = start + timedelta(days=d, minutes=10 * i)
+            out.append(RoundTrip(f"M{d}_{i}", "X", t, t + timedelta(minutes=5), cost, cost * p / 100))
+    return out
+
+
+def test_edge_check_verdicts():
+    from memecoin_agent.analytics import edge_check, edge_lines
+
+    assert edge_check([]).level == "early"
+    assert edge_check(_trips([[10.0] * 10])).verdict == "too early: 10 trades, wait for 30+"
+    assert edge_check(_trips([[10.0] * 40])).level == "early"  # one day: same-day trades share a market
+    assert edge_check(_trips([[-20.0, -15.0, -30.0, 5.0]] * 8)).level == "losing"
+    steady = edge_check(_trips([[8.0, 12.0, -5.0, 6.0]] * 8))
+    assert steady.level == "promising" and steady.without_best3 > 0 and steady.days == 8 and steady.days_up == 8
+    assert edge_check(_trips([[8.0, 12.0, -5.0, 6.0]] * 10 + [[9.0, 7.0, -4.0, 5.0, 10.0, 3.0] * 2] * 6)).level == "real"
+    # One runner carrying a pile of small losers: positive, but only because of the best trades.
+    lucky = edge_check(_trips([[-6.0, -4.0, -5.0, -3.0]] * 8 + [[900.0, 400.0, 300.0]]))
+    assert lucky.level in ("fragile", "unclear") and lucky.without_best3 < 0
+    assert any("3 best trades made" in n for n in lucky.notes)
+    text = "\n".join(edge_lines(_trips([[8.0, 12.0, -5.0, 6.0]] * 8)))
+    assert text.startswith("Edge check") and "promising" in text
+
+
+def test_paper_fills_drift_against_fast_movers():
+    from memecoin_agent.config import ExecutionConfig
+
+    calm, fast = make_snap(price_change_m5=0.0), make_snap(price_change_m5=60.0)
+    ex = PaperExecutor(ExecutionConfig(paper_price_impact=False, paper_fee_pct=0.0))
+    assert abs(ex.buy(calm, 100).price_usd - calm.price_usd) < 1e-12
+    # 60% in 5 minutes over a 6 s fill delay: 1.2% worse.
+    assert abs(ex.buy(fast, 100).price_usd / fast.price_usd - 1.012) < 1e-9
+    off = PaperExecutor(ExecutionConfig(paper_price_impact=False, paper_fee_pct=0.0, paper_latency_s=0))
+    assert abs(off.buy(fast, 100).price_usd - fast.price_usd) < 1e-12

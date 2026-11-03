@@ -69,14 +69,22 @@ class CopySignal:
 def vet_wallet(cfg: CopyConfig, stats: dict[str, Any], now: float) -> tuple[list[str], dict[str, Any]]:
     """(why not, numbers) for one wallet's 30-day stats from GMGN."""
     why: list[str] = []
+    # Live responses carry the win rate and holding period under pnl_stat (GMGN's own wallet-score
+    # script reads them there); the documented top-level names are read first.
+    pnl_stat = stats.get("pnl_stat") if isinstance(stats.get("pnl_stat"), dict) else {}
     win = _f(stats.get("winrate"))
+    if win is None:
+        win = _f(pnl_stat.get("winrate"))
     buys = int(_f(stats.get("buy_count", stats.get("buy"))) or 0)
     sells = int(_f(stats.get("sell_count", stats.get("sell"))) or 0)
-    cost = _f(stats.get("total_cost")) or 0.0
+    cost = _f(stats.get("total_cost")) or _f(stats.get("bought_cost")) or 0.0
     realized = _f(stats.get("realized_profit"))
     pnl = _f(stats.get("pnl"))
+    if pnl is None:
+        pnl = _f(stats.get("realized_profit_pnl"))
     if pnl is None and realized is not None and cost > 0:
         pnl = realized / cost
+    hold_s = _f(pnl_stat.get("avg_holding_period"))
     common = stats.get("common") if isinstance(stats.get("common"), dict) else {}
     created = _f(common.get("created_at"))
     age_days = (now - created) / 86400 if created else None
@@ -95,7 +103,37 @@ def vet_wallet(cfg: CopyConfig, stats: dict[str, Any], now: float) -> tuple[list
         why.append(f"{buys + sells} trades in 30 days (min {cfg.min_trades_30d})")
     if cfg.min_pnl is not None and (pnl is None or pnl < cfg.min_pnl):
         why.append("30-day profit unknown" if pnl is None else f"30-day return {pnl * 100:+.0f}%")
-    return why, {"win_rate": win, "pnl": pnl, "trades": buys + sells, "losses": losses, "age_days": age_days}
+    # Copyable at all? By the time a copy lands, a wallet that holds for seconds or trades like a bot
+    # has already sold, and the copy is its exit liquidity (GMGN's copy-tradeability score).
+    if cfg.max_trades_30d is not None and buys + sells > cfg.max_trades_30d:
+        why.append(f"{buys + sells} trades in 30 days: bot pace, too fast to copy")
+    if cfg.min_avg_hold_s and hold_s is not None and 0 < hold_s < cfg.min_avg_hold_s:
+        why.append(f"holds {hold_s:.0f}s on average: too fast to copy")
+    return why, {"win_rate": win, "pnl": pnl, "trades": buys + sells, "losses": losses, "age_days": age_days,
+                 "avg_hold_s": hold_s}
+
+
+def fast_flip_rate(rows: list[dict[str, Any]], within_s: float = 5.0) -> tuple[float | None, int]:
+    """Share of a wallet's round trips (a buy, then a sell of the same token) sold within `within_s`
+    of the buy, from its activity rows; None without round trips. GMGN: above ~30% it can't be copied."""
+    by_token: dict[str, list[tuple[float, str]]] = {}
+    for r in rows:
+        kind = str(r.get("event_type") or r.get("type") or "").lower()
+        tok = (r.get("token") or {}).get("address") if isinstance(r.get("token"), dict) else r.get("token_address")
+        ts = _f(r.get("timestamp"))
+        if kind in ("buy", "sell") and tok and ts is not None:
+            by_token.setdefault(str(tok), []).append((ts, kind))
+    pairs = fast = 0
+    for events in by_token.values():
+        last_buy = None
+        for ts, kind in sorted(events):
+            if kind == "buy":
+                last_buy = ts
+            elif last_buy is not None:
+                pairs += 1
+                fast += ts - last_buy <= within_s
+                last_buy = None
+    return (fast / pairs if pairs else None), pairs
 
 
 class CopyTracker:
@@ -223,6 +261,14 @@ class CopyTracker:
                     log.info("Copy tracker: stats for %s unavailable: %s", address, exc)
                     continue
                 why, nums = vet_wallet(self.cfg, stats, now)
+                if not why and self.cfg.max_fast_flip_rate is not None:  # one more call, only for the survivors
+                    try:
+                        rows = self.gmgn.wallet_activity(chain, address, 100, ("buy", "sell"))
+                        flips, pairs = fast_flip_rate(rows)
+                        if flips is not None and pairs >= 5 and flips > self.cfg.max_fast_flip_rate:
+                            why.append(f"{flips * 100:.0f}% of its round trips sold within 5s: too fast to copy")
+                    except (httpx.HTTPError, GmgnError) as exc:
+                        log.info("Copy tracker: activity for %s unavailable: %s", address, exc)
                 with self._lock:
                     if why and not (w and w.pinned):
                         self.wallets.pop(key, None)

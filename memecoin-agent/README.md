@@ -113,7 +113,25 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
   | bundler / insider trading volume | above 30% |
   | sell tax | above 10% |
 
+  On top of those hard limits runs **GMGN's own pre-buy checklist** (from its official
+  [gmgn-skills](https://github.com/GMGNAI/gmgn-skills)): soft warnings that are each tolerable alone,
+  where two or more refuse the buy. The warnings are:
+  - top 10 holding over 50%;
+  - the creator holding over 5%;
+  - insider ("rat") traders over 15% of volume;
+  - entrapment traders over 30%;
+  - bot traders over 60%;
+  - bundler wallets over 5% of holders;
+  - fresh wallets over 30%;
+  - fewer than 200 holders.
+
+  GMGN's trader-profile items caught coins that its holder checks let through.
+
   Optional rules, off by default: fresh-wallet share, serial deployers, and a minimum smart-money holder count. All are in the `gmgn:` section of the config.
+
+  **Rate limits, as GMGN's docs require:**
+  - When GMGN bans the key, every GMGN call stops until the ban's `reset_at`. Each call made during a ban extends it, up to 5 minutes.
+  - A route the plan can't serve (`PLAN_UPGRADE_REQUIRED`) is never called again that run.
 
 **Setup** (on the machine that runs the agent; GMGN ties each key to a key pair made there):
 1. `npx gmgn-cli config` prints a link. Open it and create the API key. Read-only access is enough.
@@ -238,6 +256,12 @@ $150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer bu
   funded **over 2 months ago**, they have **taken real losses** (3+ losing trades), they still trade
   (10+ trades) and the wins outweigh the losses (`min_pnl: 0`; `null` turns that off). Up to 15 per
   chain. Add your own under `copy.wallets` (`chain:address`).
+
+  A wallet must also be **copyable at all**: under 4,000 trades in 30 days (faster is bot pace), at
+  least a minute's average hold, and no more than 30% of its round trips sold within 5 seconds of the
+  buy. These come from GMGN's copy-tradeability score: by the time a copy lands, a wallet that fast
+  has already sold, and the copy is its exit liquidity. Win rate and hold time are read where GMGN's
+  live responses put them (`pnl_stat`).
 - **Copying**: a tracked wallet's **buy** of a token between $5k and $150k market cap. Activity is read
   as buys only, so tokens **sent** to the wallet never count, and a token the wallet **created** is
   skipped. The signal is good for 10 minutes.
@@ -287,6 +311,11 @@ Added after a run of bad buys. Each one blocks a pattern that showed up on real 
 | **Painted chart** | Under a day old, price rising, but an hour's volume under 2% of the market cap (real young coins traded 2.5% or more). Bots walking the price up on no real buying. | TREMP's smooth climb on about $8k an hour |
 | **Just dumped** | More than 50% below the high the agent itself saw in the last 2 hours. | Robinhood's dev-dump candle |
 | **First hour** | Minimum age back to 15 minutes, and anything under 60 minutes old (or under $50k market cap) must pass the wallet scan. | Research on 6.4 million Solana memecoins found most show rug-pull traits within an hour of launch. |
+| **Coin factory** | A creator who has minted 1,000+ coins (Jupiter's free token data; most real devs launch 1–5), on a coin with under 2,000 holders. Some factory coins do find a real crowd (DJT: 71k holders from a 1,146-coin creator), so those pass. | the 🖖 coin's creator: 179,773 coins |
+| **Bot volume** | Jupiter's organic score under 20/100 on a coin over an hour old with $20k+ of hourly volume. Fresh coins sit at 0 until Jupiter scores them, so they aren't judged on it. In a live sample, all 4 coins past an hour with a 0 score fell 33–100% within 20 minutes. | "LeTwerk": $677k an hour, score 0, then −99% |
+| **Shell** | A market cap of $1M+ held by fewer than 100 wallets. | "Wanted": $1.4M across 38 holders |
+| **Wash trading** | 24h volume far above what the pool explains (over 15x below $100k of liquidity, 12x below $1M, 30x above) among fewer than 150 holders. | |
+| **Falling knife** | A copy or long-term buy waits while the price is down 10%+ over 5 minutes; a manual buy gets a warning. | |
 
 These run alongside the fake-chart checks, wallet scan, RugCheck, GMGN and LarpCheck. All of them
 are free and run before any LarpCheck credit is spent. Every limit is under `authenticity:` and
@@ -341,6 +370,13 @@ Besides `state/trades.csv`, the agent now writes two files that turn trades into
 memecoin-agent -c config.yaml report                                  # state/trades.csv (all time)
 memecoin-agent -c config.yaml report --trades trades_last_24h_to_*.csv  # or a downloaded slice
 ```
+
+The report ends with an **edge check** per lane: is the profit real, or luck? It shows:
+- the 90% range of the average trade, resampled a whole day at a time (trades on one day share that day's market);
+- the profit without the three best trades;
+- a verdict: too early (under 30 trades or 5 days), losing, unclear, fragile (it's the best trades), promising, or real (profitable without the best 3, over a week and 100+ trades).
+
+Use that last line before trusting any lane with real money.
 
 The report shows win rate, average result and profit for each way a trade ended (stop loss, trailing stop, time stop, take profit, LarpCheck flag, liquidity pulled, manual), and, for trades bought after this update, by lane, liquidity, token age, 1h change at entry, score and LarpCheck verdict. The "after the sale" table shows, per exit kind, the average high and low in the next 12 hours and the share of coins that rose more than 50%. Use it to see whether the stop loss is too tight or the hold too short, and which kinds of tokens lose. Below about 30 trades per row it's an anecdote, not a pattern.
 
@@ -482,6 +518,12 @@ The server keeps its own paper portfolio, separate from your PC's. Two more thin
 To change the strategy on the server, copy settings from `config.example.yaml` into `deploy/server.yaml` and redeploy.
 
 ## Going live
+
+Before you do, run `memecoin-agent -c config.yaml report` and read the edge check at the end: paper
+results only count as an edge once they're profitable without the three best trades, over a week and
+100+ trades. Paper fills already charge fees, price impact and the drift a real order suffers while it
+lands (`execution.paper_latency_s`), but expect live to do somewhat worse: failed transactions,
+priority fees and MEV aren't modelled.
 
 1. `pip install -e '.[live]'` (adds `solders` for transaction signing).
 2. Create a fresh wallet just for the bot, fund it with SOL, and export its key:

@@ -112,7 +112,9 @@ def test_dashboard_backtest_uses_a_config_copy(dashboard, tmp_path):
     assert bad.status_code == 400 and "filters.nope" in bad.json()["error"]
 
     kill_before = runner.agent.cfg.agent.kill_switch_file
-    r = client.post("/api/backtest", json={"dir": str(tmp_path / "rec"), "overrides": ["filters.min_score=0.6"]})
+    # A normal tick: the fixture's 0.05 s one would replay the 2 hours as 144,000 ticks.
+    r = client.post("/api/backtest", json={"dir": str(tmp_path / "rec"),
+                                           "overrides": ["filters.min_score=0.6", "agent.tick_seconds=10"]})
     assert r.status_code == 200
     _wait(lambda: client.get("/api/backtest").json()["status"] != "running", timeout=60)
     res = client.get("/api/backtest").json()

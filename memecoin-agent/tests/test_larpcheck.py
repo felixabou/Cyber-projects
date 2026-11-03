@@ -164,6 +164,7 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
 
     cfg = Config()
     cfg.filters.require_rugcheck = False  # isolate the LarpCheck wiring (and stay off the network)
+    cfg.jupiter.enabled = False
     cfg.larpcheck.api_key_file = str(tmp_path / "key")
     monkeypatch.delenv("LARPCHECK_API_KEY", raising=False)
     assert load_api_key(cfg.larpcheck) is None
