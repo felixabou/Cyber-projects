@@ -1,9 +1,27 @@
 # On a VPS with Docker: copy .env.example to .env, fill it in, then `docker compose up -d --build`.
 # Logs: `docker compose logs -f`. Every trade: ./data/state/trades.csv.
+# The dashboard is served only through Caddy, over HTTPS, behind the MEMECOIN_UI_PASSWORD login.
 services:
   agent:
     build: .
     restart: unless-stopped
     env_file: .env
+    expose:
+      - "8787"
     volumes:
       - ./data:/data
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - agent
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+volumes:
+  caddy_data:
