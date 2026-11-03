@@ -149,14 +149,61 @@ def test_safety_rules(field, value, reason):
 
 def test_info_rules_only_fetch_info_when_needed():
     fake = FakeGmgn()
-    assert GmgnSafety(GmgnConfig(), make_client(fake)).check("GOOD").ok
+    assert GmgnSafety(GmgnConfig(max_warnings=None), make_client(fake)).check("GOOD").ok
     assert not any(r.url.path == "/v1/token/info" for r in fake.requests)  # no info-based rule: one call
+    assert GmgnSafety(GmgnConfig(), make_client(fake)).check("GOOD").ok  # the warning checklist reads info
+    assert any(r.url.path == "/v1/token/info" for r in fake.requests)
     strict = GmgnSafety(GmgnConfig(max_fresh_wallet_rate=0.5, max_creator_launches=20, min_smart_wallets=3),
                         make_client(fake))
     reasons = strict.check("GOOD").reasons
     assert any("fresh wallets 53%" in r for r in reasons)
     assert any("creator's past launches 31 > 20" in r for r in reasons)
     assert any("smart-money holders 2 < 3" in r for r in reasons)
+
+
+def test_warning_checklist_refuses_at_two():
+    # GMGN's own checklist: each warning alone is tolerable, two refuse the buy. Counts of bundler
+    # wallets are turned into a share of holders.
+    safety = GmgnSafety(GmgnConfig(), make_client(FakeGmgn()))
+    clean = {"holder_count": 900, "stat": {"fresh_wallet_rate": "0.1"}, "wallet_tags_stat": {"bundler_wallets": 10}}
+    assert safety.evaluate(CLEAN_SEC, clean).ok and safety.warnings(CLEAN_SEC, clean) == []
+    one = {**clean, "stat": {"top_entrapment_trader_percentage": "0.56"}}
+    assert safety.warnings(CLEAN_SEC, one) == ["entrapment volume 56%"] and safety.evaluate(CLEAN_SEC, one).ok
+    # The live case GMGN's docs cite: entrapment 55.6%, bots 76.8%, 971 bundlers among 11,423 holders.
+    meme = {"holder_count": 11423, "stat": {"top_entrapment_trader_percentage": "0.5557", "top_bot_degen_percentage": "0.7678"},
+            "wallet_tags_stat": {"bundler_wallets": 971}}
+    rep = safety.evaluate(CLEAN_SEC, meme)
+    assert not rep.ok and rep.reasons == ["gmgn 3 warnings: entrapment volume 56%; bot traders 77%; bundler wallets 9%"]
+    few = {"holder_count": 120, "stat": {"creator_hold_rate": "0.08"}}
+    assert safety.warnings(CLEAN_SEC, few) == ["creator holds 8%", "120 holders"]
+    assert GmgnSafety(GmgnConfig(max_warnings=None), make_client(FakeGmgn())).evaluate(CLEAN_SEC, meme).ok
+
+
+def test_bans_and_plan_limits_stop_the_calls():
+    clock = Clock()
+    hits: list[str] = []
+
+    def api(req: httpx.Request) -> httpx.Response:
+        hits.append(req.url.path)
+        if req.url.path == "/v1/market/token_top_traders":  # weighs more than the free bucket holds
+            return httpx.Response(403, json={"code": 403, "error": "PLAN_UPGRADE_REQUIRED", "message": "upgrade"})
+        # A ban says when it ends in the body; the header only has the bucket's next refill.
+        return httpx.Response(429, headers={"x-ratelimit-reset": str(int(clock.t) + 1)},
+                              json={"code": 429, "error": "RATE_LIMIT_BANNED_MAX", "reset_at": int(clock.t) + 300})
+
+    client = GmgnClient("gm_test", client=httpx.Client(transport=httpx.MockTransport(api)), clock=clock)
+    with pytest.raises(GmgnError) as err:
+        client.top_traders("sol", "MINT")
+    assert err.value.plan_upgrade
+    with pytest.raises(GmgnError, match="not available on this GMGN plan"):
+        client.top_traders("sol", "OTHER")  # never sent again
+    with pytest.raises(GmgnError) as err:
+        client.security("GOOD")
+    assert err.value.rate_limited
+    clock.t += 60
+    with pytest.raises(GmgnError, match="rate limited for another 240s"):
+        client.security("GOOD")  # inside the ban: every call during it would extend it
+    assert hits == ["/v1/market/token_top_traders", "/v1/token/security"]
 
 
 def test_missing_fields_dont_reject_and_outages_follow_fail_mode():

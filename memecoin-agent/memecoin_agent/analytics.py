@@ -263,6 +263,93 @@ def _bucket(value: str | None, edges: list[float], unit: str = "") -> str:
     return "unknown"
 
 
+EDGE_MIN_TRADES = 30
+EDGE_MIN_DAYS = 5
+
+
+@dataclass
+class EdgeCheck:
+    label: str
+    n: int
+    verdict: str
+    level: str  # "early", "losing", "unclear", "fragile", "promising", "real"
+    pnl: float = 0.0
+    mean_pct: float = 0.0
+    lo_pct: float = 0.0  # 90% range of the average trade
+    hi_pct: float = 0.0
+    without_best3: float = 0.0
+    days: int = 0
+    days_up: int = 0
+    span_days: float = 0.0
+    notes: list[str] = field(default_factory=list)
+
+
+def edge_check(trips: list[RoundTrip], label: str = "ALL", boots: int = 2000, seed: int = 7) -> EdgeCheck:
+    """Is a set of trades' profit real, or luck? The average trade's 90% range, resampled whole days at a
+    time (trades on one day share that day's market, so treating them as independent overstates the
+    certainty), what's left without the three best trades, and enough trades and days to say anything.
+    Measures only: it changes no setting."""
+    import random
+    import statistics
+
+    trips = sorted((r for r in trips if r.cost > 0), key=lambda r: r.opened)
+    n = len(trips)
+    if not n:
+        return EdgeCheck(label, 0, "no completed trades", "early")
+    days: dict[str, list[RoundTrip]] = {}
+    for r in trips:
+        days.setdefault(r.opened.strftime("%Y-%m-%d"), []).append(r)
+    rng = random.Random(seed)
+    groups = [[r.pnl / r.cost for r in g] for g in days.values()]
+    means = sorted(statistics.fmean([x for g in rng.choices(groups, k=len(groups)) for x in rng.choices(g, k=len(g))])
+                   for _ in range(boots))
+    lo, hi = means[int(0.05 * boots)] * 100, means[int(0.95 * boots) - 1] * 100
+    pnl = sum(r.pnl for r in trips)
+    without3 = sum(r.pnl for r in sorted(trips, key=lambda r: -r.pnl)[3:])
+    span = ((trips[-1].closed or trips[-1].opened) - trips[0].opened).total_seconds() / 86400
+    e = EdgeCheck(label, n, "", "", pnl=pnl, mean_pct=statistics.fmean(r.pct for r in trips), lo_pct=lo, hi_pct=hi,
+                  without_best3=without3, days=len(days), days_up=sum(sum(r.pnl for r in g) > 0 for g in days.values()),
+                  span_days=span)
+    if n < EDGE_MIN_TRADES:
+        e.level, e.verdict = "early", f"too early: {n} trades, wait for {EDGE_MIN_TRADES}+"
+    elif hi < 0:
+        e.level, e.verdict = "losing", "losing, and not by bad luck: even the top of the range is below zero"
+    elif len(days) < EDGE_MIN_DAYS:
+        e.level, e.verdict = "early", f"too early: trades on {len(days)} day(s), wait for {EDGE_MIN_DAYS}+"
+    elif lo > 0 and without3 > 0 and n >= 100 and span >= 7:
+        e.level, e.verdict = "real", "looks real: profitable without its 3 best trades, over a week and 100+ trades"
+    elif lo > 0 and without3 > 0:
+        e.level, e.verdict = "promising", "promising: profitable without its 3 best trades; run it unchanged to a week and 100 trades"
+    elif lo > 0:
+        e.level, e.verdict = "fragile", f"fragile: it's the 3 best trades; without them {without3:+.2f}"
+    else:
+        lean = ", leaning negative: the average trade loses" if e.mean_pct < 0 and pnl < 0 else ""
+        e.level, e.verdict = "unclear", f"unclear: the range includes zero{lean}"
+    if pnl > 0 and (pnl - without3) / pnl > 0.5:
+        e.notes.append(f"its 3 best trades made {(pnl - without3) / pnl:.0%} of the profit")
+    if span < 7:
+        e.notes.append(f"only {span:.1f} days of trades; meme markets change week to week")
+    return e
+
+
+def edge_lines(trips: list[RoundTrip]) -> list[str]:
+    """The edge check for all trades, then per lane when entry details say which lane bought."""
+    checks = [edge_check(trips)]
+    lanes: dict[str, list[RoundTrip]] = {}
+    for r in trips:
+        if r.entry.get("lane"):
+            lanes.setdefault(r.entry["lane"], []).append(r)
+    checks += [edge_check(g, lane) for lane, g in sorted(lanes.items())]
+    out = ["Edge check: is the profit real, or luck? (90% range of the average trade, by whole days)"]
+    for c in checks:
+        if not c.n:
+            continue
+        out.append(f"  {c.label:<10} {c.n:>4} trades, {c.days} days ({c.days_up} up)  avg {c.mean_pct:+.1f}% "
+                   f"[{c.lo_pct:+.1f}% to {c.hi_pct:+.1f}%]  pnl {c.pnl:+.2f}, without best 3 {c.without_best3:+.2f}")
+        out.append(f"  {'':<10} {c.verdict}" + "".join(f"; {note}" for note in c.notes))
+    return out + [""]
+
+
 def build_report(trades_csv: str | Path | list[str | Path], entries_csv: str | Path | None = None,
                  after_csv: str | Path | None = None) -> str:
     trips = round_trips(trades_csv, entries_csv, after_csv)
@@ -297,6 +384,7 @@ def build_report(trades_csv: str | Path | list[str | Path], entries_csv: str | P
         out.append("")
     else:
         out += ["After the sale: nothing recorded yet (each sold coin is watched for 12h, then listed here).", ""]
+    out += edge_lines(trips)
     n = len(trips)
     if n < 30:
         out.append(f"Only {n} completed trades: treat every number above as an anecdote, not a pattern (30+ per row to lean on).")

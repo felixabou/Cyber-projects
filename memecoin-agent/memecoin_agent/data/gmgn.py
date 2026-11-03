@@ -43,7 +43,12 @@ class GmgnError(RuntimeError):
 
     @property
     def rate_limited(self) -> bool:
-        return self.error in ("RATE_LIMIT_EXCEEDED", "RATE_LIMIT_BANNED")
+        return self.error in ("RATE_LIMIT_EXCEEDED", "RATE_LIMIT_BANNED", "RATE_LIMIT_BANNED_MAX")
+
+    @property
+    def plan_upgrade(self) -> bool:
+        """The route weighs more than the plan's bucket holds: it can never succeed on this plan."""
+        return self.error == "PLAN_UPGRADE_REQUIRED"
 
 
 def load_api_key(cfg: GmgnConfig) -> str | None:
@@ -73,10 +78,12 @@ def _truthy(v: Any) -> bool:
     return v is True or (isinstance(v, (int, float)) and v == 1) or str(v).strip().lower() in ("true", "yes", "1")
 
 
-# Rate-limit weight of each route (GMGN's docs): the free plan refills 5 a second, holding at most 5.
+# Rate-limit weight of each route (GMGN's gmgn-skills docs): the free plan refills 5 a second,
+# holding at most 5. Unlisted routes are assumed to weigh 2.
 WEIGHTS = {"/v1/market/rank": 3, "/v1/user/wallet_activity": 3, "/v1/user/wallet_stats": 3,
            "/v1/market/token_top_traders": 5, "/v1/market/token_top_holders": 5, "/v1/market/token_kline": 2,
-           "/v1/user/smartmoney": 1, "/v1/user/kol": 1}
+           "/v1/user/smartmoney": 1, "/v1/user/kol": 1, "/v1/token/info": 1, "/v1/token/security": 1,
+           "/v1/token/pool_info": 1, "/v1/user/created_tokens": 2}
 
 
 class GmgnClient:
@@ -92,6 +99,7 @@ class GmgnClient:
         self.clock = clock
         self.sleep = sleep
         self.blocked_until = 0.0  # set when GMGN reports a rate limit
+        self.off_plan: set[str] = set()  # routes GMGN answered PLAN_UPGRADE_REQUIRED for
         self.rate = max(rate_per_s, 0.1)
         self._lock = threading.Lock()
         self._free_at = 0.0  # when the bucket has room for the next request
@@ -106,9 +114,13 @@ class GmgnClient:
             self.sleep(start - now)
 
     def get(self, path: str, params: dict[str, Any], body: dict[str, Any] | None = None) -> Any:
+        # No request at all while banned: GMGN extends a ban by 5 s for every call made during it, up to
+        # 5 minutes (RATE_LIMIT_BANNED_MAX), and any call before reset_at restarts the 5 minutes.
         if self.clock() < self.blocked_until:
             raise GmgnError(f"GMGN rate limited for another {self.blocked_until - self.clock():.0f}s",
                             error="RATE_LIMIT_EXCEEDED")
+        if path in self.off_plan:
+            raise GmgnError(f"GET {path}: not available on this GMGN plan", error="PLAN_UPGRADE_REQUIRED")
         self._wait_turn(path)
         query = {**params, "timestamp": int(self.clock()), "client_id": str(uuid.uuid4())}
         if body is None:
@@ -121,11 +133,17 @@ class GmgnClient:
             raise GmgnError(f"GET {path}: HTTP {resp.status_code}, non-JSON response") from None
         if not isinstance(body, dict) or body.get("code") != 0:
             body = body if isinstance(body, dict) else {}
-            reset = _f(resp.headers.get("x-ratelimit-reset"))
+            # A ban carries its end in the body (reset_at); the header has the bucket's next refill.
+            reset = _f(body.get("reset_at")) or _f(resp.headers.get("x-ratelimit-reset"))
             err = GmgnError(f"GET {path}: {body.get('error') or resp.status_code}: {body.get('message', '')}".strip(),
                             code=body.get("code"), error=body.get("error"), reset_at=reset)
             if err.rate_limited:
                 self.blocked_until = reset if reset and reset > self.clock() else self.clock() + 60
+                log.warning("GMGN %s: pausing every GMGN call until %s", err.error,
+                            time.strftime("%H:%M:%S", time.localtime(self.blocked_until)))
+            elif err.plan_upgrade:
+                self.off_plan.add(path)
+                log.warning("GMGN %s needs a bigger plan; not calling it again this run", path)
             raise err
         return body.get("data")
 
@@ -287,7 +305,38 @@ class GmgnSafety:
         smart = _f(tags.get("smart_wallets"))
         if c.min_smart_wallets > 0 and (smart or 0) < c.min_smart_wallets:
             reasons.append(f"gmgn smart-money holders {int(smart or 0)} < {c.min_smart_wallets}")
+        warnings = self.warnings(sec, info) if c.max_warnings is not None else []
+        if len(warnings) > (c.max_warnings or 0):
+            reasons.append(f"gmgn {len(warnings)} warnings: " + "; ".join(warnings))
         return SafetyReport(ok=not reasons, score=_f(sec.get("rug_ratio")), reasons=reasons)
+
+    def warnings(self, sec: dict[str, Any], info: dict[str, Any]) -> list[str]:
+        """GMGN's soft checklist. Its trader-profile items (entrapment, bots, bundlers, fresh wallets)
+        are what caught coins its holder checks passed. Missing fields raise no warning."""
+        c = self.cfg
+        stat = info.get("stat") or {}
+        tags = info.get("wallet_tags_stat") or {}
+        out: list[str] = []
+
+        def over(label: str, value: Any, limit: float) -> None:
+            v = _f(value)
+            if v is not None and v > limit:
+                out.append(f"{label} {v * 100:.0f}%")
+
+        over("top-10 hold", sec.get("top_10_holder_rate", stat.get("top_10_holder_rate")), c.warn_top10_holder_rate)
+        over("creator holds", stat.get("creator_hold_rate", sec.get("creator_balance_rate")), c.warn_creator_hold_rate)
+        over("insider volume", stat.get("top_rat_trader_percentage", sec.get("rat_trader_amount_rate")),
+             c.warn_rat_trader_rate)
+        over("entrapment volume", stat.get("top_entrapment_trader_percentage"), c.warn_entrapment_rate)
+        over("bot traders", stat.get("top_bot_degen_percentage", stat.get("bot_degen_rate")), c.warn_bot_degen_rate)
+        over("fresh wallets", stat.get("fresh_wallet_rate"), c.warn_fresh_wallet_rate)
+        holders = _f(info.get("holder_count") or stat.get("holder_count"))
+        bundlers = _f(tags.get("bundler_wallets"))
+        if holders and bundlers is not None:  # a count of wallets, not a share
+            over("bundler wallets", bundlers / holders, c.warn_bundler_wallet_share)
+        if c.warn_min_holders and holders is not None and holders < c.warn_min_holders:
+            out.append(f"{holders:.0f} holders")
+        return out
 
     def check(self, mint: str) -> SafetyReport:
         hit = self._cache.get(mint)
@@ -298,7 +347,7 @@ class GmgnSafety:
             # token/info adds smart money, fresh wallets and the creator's history; only needed for
             # the rules that use it (saves a call per candidate otherwise).
             needs_info = (self.cfg.max_fresh_wallet_rate is not None or self.cfg.max_creator_launches is not None
-                          or self.cfg.min_smart_wallets > 0)
+                          or self.cfg.min_smart_wallets > 0 or self.cfg.max_warnings is not None)
             info = self.client.info(mint) if needs_info else {}
         except (httpx.HTTPError, GmgnError) as exc:
             log.warning("GMGN safety lookup failed for %s: %s", mint, exc)

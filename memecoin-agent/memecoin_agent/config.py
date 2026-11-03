@@ -46,6 +46,9 @@ class FilterConfig:
     # (launch-block bundles, linked wallets, top holders, creator: limits under `launch:`).
     wallet_scan_below_age_minutes: float = 60
     wallet_scan_below_market_cap_usd: float = 50_000
+    # Copy and long-term buys wait while the price is down this much over 5 minutes: a market buy into
+    # a falling knife fills far below the quote (GMGN's one hard stop). null = off.
+    max_drop_m5_pct: float | None = 10.0
 
 
 @dataclass
@@ -117,6 +120,9 @@ class ExecutionConfig:
     # Paper mode: flat per-swap cost (DEX fee + priority fee) and a price-impact model.
     paper_fee_pct: float = 0.5
     paper_price_impact: bool = True
+    # Seconds between deciding and a real fill landing. Paper fills move against you by the coin's
+    # 5-minute move scaled to this delay, so fast movers cost what they would live. 0 = off.
+    paper_latency_s: float = 6.0
     rpc_url: str = "https://api.mainnet-beta.solana.com"
     jupiter_base_url: str = "https://lite-api.jup.ag/swap/v1"
     jupiter_api_key: str | None = None
@@ -247,10 +253,40 @@ class GmgnConfig:
     max_fresh_wallet_rate: float | None = None
     max_creator_launches: int | None = None  # creator's previous launches (serial deployers)
     min_smart_wallets: int = 0  # require this many smart-money holders (0 = off)
+    # GMGN's own pre-buy checklist (gmgn-skills gmgn-token-buy): soft warnings that are each
+    # tolerable alone; a buy is refused once more than max_warnings of them fire (GMGN refuses at
+    # two). null = off.
+    max_warnings: int | None = 1
+    warn_top10_holder_rate: float = 0.50
+    warn_creator_hold_rate: float = 0.05
+    warn_rat_trader_rate: float = 0.15  # insider ("rat") traders' share of volume
+    warn_entrapment_rate: float = 0.30  # entrapment traders' share of volume
+    warn_bot_degen_rate: float = 0.60
+    warn_bundler_wallet_share: float = 0.05  # bundler wallets / holders
+    warn_fresh_wallet_rate: float = 0.30
+    warn_min_holders: int = 200
     # GMGN unreachable / rate limited: false = the other checks decide, true = skip the buy.
     fail_closed: bool = False
     # Your plan's rate (free 5, Plus 20, Pro 50): the agent, copy tracker and long-term scanner share it.
     rate_per_s: float = 5.0
+
+
+@dataclass
+class JupiterConfig:
+    """Pre-buy check on Jupiter's free token data (Solana): coin factories, bot volume, shells and
+    wash trading. See data/jupiter_tokens.py. null / 0 turns a rule off."""
+
+    enabled: bool = True
+    max_dev_mints: int | None = 1000  # the creator's coin count; most real devs launch 1-5
+    factory_max_holders: int = 2000  # ...ruling out only coins that haven't found a crowd yet
+    # Organic score (0-100, Jupiter's share of real, non-bot trading), judged only on coins old and
+    # busy enough to have one: Jupiter leaves fresh coins at 0 until it scores them.
+    min_organic_score: float | None = 20
+    organic_min_age_hours: float = 1.0  # live: 4 of 4 unscored coins past an hour fell 33-100% in 20 min
+    organic_min_volume_1h_usd: float = 20_000
+    shell_min_market_cap_usd: float = 1_000_000
+    shell_max_holders: int = 100
+    wash_max_holders: int = 150  # 24h turnover beyond GMGN's band among fewer holders = wash
 
 
 @dataclass
@@ -366,6 +402,11 @@ class CopyConfig:
     min_losing_trades: int = 3  # has taken losses, not a 100%-hit insider wallet
     min_trades_30d: int = 10  # still active
     min_pnl: float | None = 0.0  # 30-day realized profit / cost: wins must outweigh the losses (null = off)
+    # Copyable at all (GMGN's copy-tradeability score): a wallet that sells within seconds or trades at
+    # bot pace has already exited by the time a copy lands. null / 0 = off.
+    max_trades_30d: int | None = 4000  # ~1,000 a week is bot pace
+    min_avg_hold_s: float = 60
+    max_fast_flip_rate: float | None = 0.30  # share of round trips sold within 5 s (one activity call per wallet)
     max_wallets_per_chain: int = 15
     refresh_hours: float = 6.0
     wallets: list[str] = field(default_factory=list)  # always tracked: "chain:address" (plain address = sol)
@@ -421,6 +462,7 @@ class Config:
     recorder: RecorderConfig = field(default_factory=RecorderConfig)
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
+    jupiter: JupiterConfig = field(default_factory=JupiterConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     authenticity: AuthenticityConfig = field(default_factory=AuthenticityConfig)
     honeypot: HoneypotConfig = field(default_factory=HoneypotConfig)
@@ -488,6 +530,7 @@ _SECTIONS: dict[str, type] = {
     "recorder": RecorderConfig,
     "larpcheck": LarpCheckConfig,
     "gmgn": GmgnConfig,
+    "jupiter": JupiterConfig,
     "classify": ClassifyConfig,
     "authenticity": AuthenticityConfig,
     "honeypot": HoneypotConfig,

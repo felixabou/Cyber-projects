@@ -44,6 +44,36 @@ def test_wallet_vetting_follows_the_rules():
     assert vet_wallet(CopyConfig(min_pnl=None), stats(pnl=-0.2), T0)[0] == []
 
 
+def test_wallet_vetting_reads_pnl_stat_and_skips_uncopyable_wallets():
+    c = CopyConfig()
+    # Live stats (as GMGN's own wallet-score script reads them): win rate and hold time under pnl_stat,
+    # counts as buy/sell, return as realized_profit_pnl.
+    live = {"buy": 40, "sell": 30, "realized_profit_pnl": 0.35, "pnl_stat": {"winrate": 0.22, "avg_holding_period": 5400},
+            "common": {"created_at": T0 - 200 * DAY}}
+    why, nums = vet_wallet(c, live, T0)
+    assert why == [] and nums["win_rate"] == 0.22 and nums["pnl"] == 0.35 and nums["avg_hold_s"] == 5400
+    bot = {**live, "buy": 3000, "sell": 2500}
+    assert vet_wallet(c, bot, T0)[0] == ["5500 trades in 30 days: bot pace, too fast to copy"]
+    flipper = {**live, "pnl_stat": {"winrate": 0.22, "avg_holding_period": 12}}
+    assert vet_wallet(c, flipper, T0)[0] == ["holds 12s on average: too fast to copy"]
+    assert vet_wallet(CopyConfig(max_trades_30d=None, min_avg_hold_s=0), {**bot, **flipper, "buy": 3000}, T0)[0] == []
+
+
+def test_fast_flip_rate():
+    from memecoin_agent.data.copytrade import fast_flip_rate
+
+    def row(kind, tok, ts):
+        return {"event_type": kind, "token": {"address": tok}, "timestamp": ts}
+
+    rows = [row("buy", "A", 100), row("sell", "A", 103),  # 3 s: a flip
+            row("buy", "B", 100), row("sell", "B", 900),
+            row("buy", "C", 200), {"type": "sell", "token": {"address": "C"}, "timestamp": 204},  # `type` on some chains
+            row("transferIn", "D", 50), row("sell", "D", 52)]  # a transfer isn't a buy
+    rate, pairs = fast_flip_rate(rows)
+    assert pairs == 3 and abs(rate - 2 / 3) < 1e-9
+    assert fast_flip_rate([]) == (None, 0)
+
+
 class FakeGmgn:
     def __init__(self):
         self.activity: dict[str, list] = {}
@@ -276,6 +306,19 @@ def test_copy_lane_buys_low_caps_on_any_chain(tmp_path):
     assert len(tr.consumed) == 4
     # Held copy positions on other chains are priced from DexScreener on their chain.
     assert set(a._fetch([GEM, "LOWSOL"])) == {GEM, "LOWSOL"}
+
+
+def test_copy_and_long_term_buys_wait_out_a_falling_knife(tmp_path):
+    knife = make_snap(mint="KNIFE", market_cap_usd=60_000, liquidity_usd=20_000, price_change_m5=-14.0)
+    tr = FakeTracker([sig("sol", "KNIFE")])
+    a = lane_agent(tmp_path, sol=[knife], tracker=tr)
+    a.enter_copy_signals(NOW)
+    assert not a.pf.positions and a.lane_outcomes[-1]["outcome"] == "waiting: falling knife (-14% in 5 min)"
+    assert tr.consumed == []  # still a live signal: bought if it steadies before it goes stale
+    knife.price_change_m5 = -3.0
+    a.enter_copy_signals(NOW)
+    assert "KNIFE" in a.pf.positions
+    assert "falling knife (-14% in 5 min)" in a.manual_check(make_snap(price_change_m5=-14.0), 10)  # manual: a warning
 
 
 def test_other_chains_are_paper_only(tmp_path):

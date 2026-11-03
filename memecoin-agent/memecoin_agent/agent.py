@@ -474,6 +474,8 @@ class Agent:
 
     def token_checks(self, snap: TokenSnapshot, size: float, now: datetime, lane: str) -> str | None:
         """The checks every non-momentum buy gets, by chain. None: buy it."""
+        if lane in ("copy", "longterm") and (knife := self.falling_knife(snap)):
+            return f"waiting: {knife}"
         if snap.chain != "solana":
             if self.cfg.execution.mode == "live":
                 return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
@@ -634,13 +636,28 @@ class Agent:
             raise ValueError(f"No market data for that token on {chain}")
         return snap
 
+    def falling_knife(self, snap: TokenSnapshot) -> str | None:
+        drop = self.cfg.filters.max_drop_m5_pct
+        if drop is not None and snap.price_change_m5 <= -drop:
+            return f"falling knife ({snap.price_change_m5:+.0f}% in 5 min)"
+        return None
+
+    def jupiter_check(self) -> Any:
+        from .data.jupiter_tokens import JupiterTokenSafety
+
+        find = getattr(self.safety, "find", None)
+        return self.safety if isinstance(self.safety, JupiterTokenSafety) else (find(JupiterTokenSafety) if find else None)
+
     def manual_check(self, snap: TokenSnapshot, usd: float) -> list[str]:
         """Warnings for a manual buy (shown, never blocking: it's your call)."""
+        knife = [knife] if (knife := self.falling_knife(snap)) else []
         if snap.chain != "solana":
             if self.chain_safety is None:
-                return [f"no honeypot check available for {snap.chain}"]
-            return list(self.chain_safety.check(snap.chain, snap.mint).reasons)
-        warnings: list[str] = []
+                return knife + [f"no honeypot check available for {snap.chain}"]
+            return knife + list(self.chain_safety.check(snap.chain, snap.mint).reasons)
+        warnings: list[str] = knife
+        if (jup := self.jupiter_check()) is not None:
+            warnings += jup.check(snap.mint).reasons
         if self.profiler is not None:
             try:
                 prof = self.profiler.profile(snap)

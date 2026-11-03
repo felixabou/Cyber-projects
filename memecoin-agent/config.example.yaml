@@ -22,6 +22,9 @@ filters:
   # limits under launch:). 0 turns either trigger off.
   wallet_scan_below_age_minutes: 60
   wallet_scan_below_market_cap_usd: 50000
+  # Copy and long-term buys wait while the price is down this much over 5 minutes (a market buy into a
+  # falling knife fills far below the quote); manual buys get a warning. null = off.
+  max_drop_m5_pct: 10
   max_rugcheck_score: 50
   reject_danger_risks: true  # mint/freeze authority, unlocked LP, whale concentration...
   blacklist: []
@@ -64,6 +67,9 @@ execution:
   slippage_bps: 300
   paper_fee_pct: 0.5
   paper_price_impact: true
+  # Seconds before a real order would land: paper fills move against you by the coin's 5-minute move
+  # scaled to this delay, so fast movers cost on paper what they would live. 0 = off.
+  paper_latency_s: 6
   # Use a private RPC (Helius, Triton, QuickNode...) for live trading; the public one is rate-limited.
   rpc_url: https://api.mainnet-beta.solana.com
   jupiter_base_url: https://lite-api.jup.ag/swap/v1
@@ -186,8 +192,33 @@ gmgn:
   max_fresh_wallet_rate: null      # e.g. 0.5 to skip coins held mostly by brand-new wallets
   max_creator_launches: null       # e.g. 20 to skip serial deployers
   min_smart_wallets: 0             # e.g. 1 to require at least one smart-money holder
+  # GMGN's own pre-buy checklist: soft warnings, each tolerable alone; more than max_warnings refuses
+  # the buy (GMGN refuses at two). null = off.
+  max_warnings: 1
+  warn_top10_holder_rate: 0.50
+  warn_creator_hold_rate: 0.05
+  warn_rat_trader_rate: 0.15       # insider traders' share of volume
+  warn_entrapment_rate: 0.30       # entrapment traders' share of volume
+  warn_bot_degen_rate: 0.60
+  warn_bundler_wallet_share: 0.05  # bundler wallets / holders
+  warn_fresh_wallet_rate: 0.30
+  warn_min_holders: 200
   fail_closed: false               # GMGN down / rate limited: false = the other checks decide
   rate_per_s: 5                    # your plan's rate (free 5, Plus 20, Pro 50), shared by every GMGN user here
+
+jupiter:
+  # Pre-buy check on Jupiter's free token data (Solana, no key). Runs after RugCheck, before GMGN.
+  enabled: true
+  max_dev_mints: 1000              # creator's coin count: most real devs launch 1-5; null = off
+  factory_max_holders: 2000        # ...but only for coins under this many holders (some factory coins find a real crowd)
+  # Organic score (0-100, Jupiter's share of real trading), judged only on coins this old and busy:
+  # Jupiter leaves fresh coins at 0 until it has scored them.
+  min_organic_score: 20            # null = off
+  organic_min_age_hours: 1          # live: 4 of 4 unscored coins past an hour fell 33-100% within 20 min
+  organic_min_volume_1h_usd: 20000
+  shell_min_market_cap_usd: 1000000  # a market cap this big held by fewer than shell_max_holders: a shell
+  shell_max_holders: 100
+  wash_max_holders: 150            # 24h volume far past what the pool explains, among fewer holders: wash
 
 launch:
   # Launch lane: a token whose pool traded $400k+ within its first 30 minutes is bought without the
@@ -226,6 +257,10 @@ copy:
   min_losing_trades: 3          # has taken real losses
   min_trades_30d: 10
   min_pnl: 0.0                  # wins outweigh the losses over 30 days; null = off
+  # Copyable at all: a wallet that sells within seconds or trades at bot pace has exited before a copy lands.
+  max_trades_30d: 4000          # ~1,000 a week; null = off
+  min_avg_hold_s: 60            # 0 = off
+  max_fast_flip_rate: 0.30      # share of round trips sold within 5 s (one extra GMGN call per wallet); null = off
   max_wallets_per_chain: 15
   refresh_hours: 6
   wallets: []                   # always tracked, e.g. ["sol:WalletAddr", "base:0x..."]

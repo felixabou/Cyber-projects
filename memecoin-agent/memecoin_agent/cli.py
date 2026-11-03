@@ -82,15 +82,21 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
 
 
 def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
-    """The agent's pre-buy checks, cheapest first: RugCheck, then GMGN, then LarpCheck (which can spend
-    credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False and no
-    GMGN client: it vets hundreds of tokens, and these checks are for the few the agent would buy."""
+    """The agent's pre-buy checks, cheapest first: RugCheck, Jupiter, GMGN, then LarpCheck (which can
+    spend credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False
+    and no GMGN client: it vets hundreds of tokens, and the later checks are for the few the agent would
+    buy."""
     from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
 
     f = cfg.filters
     rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
                           min_lp_locked_pct=f.min_lp_locked_pct) if f.require_rugcheck else NoSafetyCheck())
     checks: list = [rug]
+    if with_larpcheck and cfg.jupiter.enabled:  # free, so before GMGN's rate budget
+        from .data.jupiter_tokens import JupiterTokens, JupiterTokenSafety
+
+        checks.append(JupiterTokenSafety(cfg.jupiter, JupiterTokens()))
+        log.info("Jupiter token check on (coin factories, bot volume, shells, wash trading)")
     if gmgn is not None and cfg.gmgn.safety:
         from .data.gmgn import GmgnSafety
 
