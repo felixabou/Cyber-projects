@@ -1,4 +1,4 @@
-# The agent as a 24/7 paper trader on a server or cloud host (Railway, any VPS with Docker).
+# The agent as a 24/7 paper trader with the web dashboard, on a server or cloud host (any VPS with Docker).
 # Everything it keeps (portfolio, the all-time trade journal, equity curve) is written under /data:
 # attach a persistent volume there or each redeploy starts from a fresh $1,000 paper wallet.
 # Keys come from environment variables; see .env.example.
@@ -13,4 +13,4 @@ RUN pip install . && rm -rf /app/memecoin_agent
 COPY deploy/server.yaml /app/server.yaml
 
 WORKDIR /data
-CMD ["memecoin-agent", "-c", "/app/server.yaml", "run"]
+CMD ["memecoin-agent", "-c", "/app/server.yaml", "ui", "--host", "0.0.0.0", "--port", "8787", "--no-browser"]

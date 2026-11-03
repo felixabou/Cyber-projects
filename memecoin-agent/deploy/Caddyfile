@@ -1,0 +1,4 @@
+# HTTPS for the dashboard: Caddy gets a free certificate for $DOMAIN by itself.
+{$DOMAIN} {
+	reverse_proxy agent:8787
+}
