@@ -156,3 +156,20 @@ def test_example_config_loads():
     from pathlib import Path
 
     load_config(Path(__file__).parent.parent / "config.example.yaml")
+
+
+def test_dollar_daily_loss_limit_replaces_the_percentage():
+    from datetime import datetime, timezone
+
+    from memecoin_agent.portfolio import Portfolio as P
+
+    now = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
+    pf = P(cash_usd=2000)
+    pf.day_start_equity[now.date().isoformat()] = 2000.0
+    pf.realized_pnl_by_day[now.date().isoformat()] = -300.0
+    pct = RiskManager(RiskConfig(max_daily_loss_pct=15))  # 15% of $2,000 = $300: halted
+    assert pct.daily_loss_halted(pf, now) and pct.entry_block_reason(pf, now) == "daily loss limit (15%) hit"
+    usd = RiskManager(RiskConfig(max_daily_loss_usd=500))
+    assert not usd.daily_loss_halted(pf, now)
+    pf.realized_pnl_by_day[now.date().isoformat()] = -500.0
+    assert usd.daily_loss_halted(pf, now) and usd.entry_block_reason(pf, now) == "daily loss limit ($500) hit"

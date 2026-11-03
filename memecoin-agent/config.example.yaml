@@ -59,6 +59,7 @@ risk:
   min_position_usd: 10
   max_open_positions: 20      # runners, long-term holds, manual trades and dust don't count
   max_daily_loss_pct: 15
+  max_daily_loss_usd: null          # e.g. 500: a fixed dollar limit instead of the percentage
   token_cooldown_minutes: 180
   max_entries_per_hour: 6
 

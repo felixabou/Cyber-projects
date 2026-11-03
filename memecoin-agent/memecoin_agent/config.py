@@ -109,6 +109,7 @@ class RiskConfig:
     min_position_usd: float = 10.0
     max_open_positions: int = 20  # dust doesn't count
     max_daily_loss_pct: float = 15.0
+    max_daily_loss_usd: float | None = None  # a fixed dollar limit instead of the percentage
     token_cooldown_minutes: float = 180.0
     max_entries_per_hour: int = 6
 
