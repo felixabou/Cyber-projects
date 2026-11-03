@@ -7,6 +7,12 @@
 execution:
   mode: paper
 
+filters:
+  min_market_cap_usd: 150000
+
+risk:
+  max_daily_loss_usd: 500   # fixed dollar limit; replaces the percentage one
+
 agent:
   state_file: state/state.json
   trades_csv: state/trades.csv
