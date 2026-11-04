@@ -174,6 +174,22 @@ class DexScreenerClient:
                     continue
                 if snap.mint not in best or snap.liquidity_usd > best[snap.mint].liquidity_usd:
                     best[snap.mint] = snap
+        # The batch endpoint can answer with a single junk pool (no liquidity or price, quoted in some
+        # unrelated coin) while the token's real pools are only listed by the per-token endpoint.
+        for mint in wanted:
+            if mint in best and best[mint].liquidity_usd > 0:
+                continue
+            try:
+                data = self._get(f"/token-pairs/v1/{chain}/{mint}")
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("DexScreener %s pool lookup failed for %s: %s", chain, mint, exc)
+                continue
+            for pair in (data.get("pairs") or [] if isinstance(data, dict) else data) or []:
+                snap = parse_pair(pair) if pair.get("chainId") == chain else None
+                if snap is None or snap.mint != mint:
+                    continue
+                if mint not in best or snap.liquidity_usd > best[mint].liquidity_usd:
+                    best[mint] = snap
         return best
 
     def lookup(self, query: str, limit: int = 12) -> list[TokenSnapshot]:
