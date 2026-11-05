@@ -139,6 +139,25 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
 
 Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
 
+## Narrative lane (NewsCheck)
+
+[NewsCheck](https://newscheck.app) reads X, the chain, the coin's site and the news, and writes why a coin is moving.
+The agent reads the rundown of every candidate it is about to buy:
+
+- **Gate:** a coin rated `RED FLAG` / `DEV EXIT`, or whose legit-or-larp verdict is `LARP` / `LIKELY LARP` / `SCAM`
+  (or scores under `narrative.min_legit_score`), is not bought, whatever its chart says.
+- **Early entry:** a coin 3-120 minutes old, $10K-$400K market cap, with a strong story (`VIRAL POST`, `META`,
+  `NARRATIVE`, `PRODUCT`, `KOL PUSH`, `LISTING`, `REAL NEWS`) at 50%+ confidence is bought on looser filters than
+  momentum's (the "narrative" lane). It still passes the wallet scan, RugCheck, Jupiter, GMGN and LarpCheck checks.
+- **Discovery:** the newest checks anyone ran (free) are added to the scan, so coins people are researching are seen early.
+
+Setup: make a free key at newscheck.app/developers, then set `NEWSCHECK_API_KEY` or save it to
+`~/.config/newscheck/api_key`. Without a key the lane is off.
+
+The free plan reads existing rundowns only (30 calls a minute). A brand new coin usually has none yet, so it
+isn't blocked, but it doesn't get the early entry either. A paid plan ($49 for 150 checks a month) lets the agent
+request checks itself: set `narrative.max_new_checks_per_day`.
+
 ## Launch lane
 
 A second way in, next to the momentum filters: a token whose pool trades **$400k or more within
