@@ -291,6 +291,44 @@ class JupiterConfig:
 
 
 @dataclass
+class NarrativeConfig:
+    """Narrative lane and gate (NewsCheck, newscheck.app; see data/newscheck.py). Needs a NewsCheck API key
+    (free; NEWSCHECK_API_KEY or api_key_file). Every candidate's rundown is read (free plan: existing
+    rundowns only); a coin with a strong story and a clean legit-or-larp verdict is bought while young and
+    small, past the momentum filters. Coins the rundown calls RED FLAG / DEV EXIT / LARP are never bought."""
+
+    enabled: bool = True
+    api_key_file: str | None = "~/.config/newscheck/api_key"
+    calls_per_minute: int = 24  # the free plan allows 30
+    ttl_s: float = 600.0  # how long a rundown is reused
+    miss_ttl_s: float = 120.0  # how long "nobody has checked it" is reused
+    feed_limit: int = 50  # newest checks read as a discovery feed
+    max_lookups_per_scan: int = 12
+    # Stories that justify an early entry, and ones that rule a coin out.
+    strong_catalysts: list[str] = field(default_factory=lambda: [
+        "REAL NEWS", "PRODUCT", "LISTING", "VIRAL POST", "META", "NARRATIVE", "KOL PUSH"])
+    block_catalysts: list[str] = field(default_factory=lambda: ["RED FLAG", "DEV EXIT"])
+    block_verdicts: list[str] = field(default_factory=lambda: ["LARP", "LIKELY LARP", "SCAM"])
+    min_confidence: int = 50
+    min_legit_score: int = 35
+    max_rundown_age_hours: float = 24.0
+    require_rundown: bool = False  # true: buy nothing NewsCheck hasn't covered
+    # Paid plans only: request a check for the best young coins that have no rundown yet (0 = never).
+    max_new_checks_per_day: int = 0
+    # -- the early-entry filters (looser than `filters:`; a story is the reason to buy) --------------
+    min_age_minutes: float = 3.0
+    max_age_minutes: float = 120.0
+    min_liquidity_usd: float = 8_000.0
+    min_market_cap_usd: float = 10_000.0
+    max_market_cap_usd: float = 400_000.0
+    min_txns_h1: int = 30
+    min_buy_sell_ratio_h1: float = 1.1
+    min_buy_sell_ratio_m5: float = 0.9
+    min_price_change_m5: float = -8.0
+    max_price_change_h1: float = 600.0
+
+
+@dataclass
 class ClassifyConfig:
     """Tech or meme, from the token's name, description and links (data/profile.py). Tech tokens
     (launchpads, AI agents, apps, protocols...) get the full LarpCheck gate; see larpcheck.memes."""
@@ -464,6 +502,7 @@ class Config:
     larpcheck: LarpCheckConfig = field(default_factory=LarpCheckConfig)
     gmgn: GmgnConfig = field(default_factory=GmgnConfig)
     jupiter: JupiterConfig = field(default_factory=JupiterConfig)
+    narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
     classify: ClassifyConfig = field(default_factory=ClassifyConfig)
     authenticity: AuthenticityConfig = field(default_factory=AuthenticityConfig)
     honeypot: HoneypotConfig = field(default_factory=HoneypotConfig)
@@ -532,6 +571,7 @@ _SECTIONS: dict[str, type] = {
     "larpcheck": LarpCheckConfig,
     "gmgn": GmgnConfig,
     "jupiter": JupiterConfig,
+    "narrative": NarrativeConfig,
     "classify": ClassifyConfig,
     "authenticity": AuthenticityConfig,
     "honeypot": HoneypotConfig,

@@ -42,6 +42,7 @@ class Agent:
         copy_tracker: object | None = None,
         longterm: object | None = None,
         chain_safety: object | None = None,
+        newscheck: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -72,6 +73,11 @@ class Agent:
         self.longterm = longterm
         # data.evm_safety.ChainSafety: honeypot and tax checks for tokens on other chains.
         self.chain_safety = chain_safety
+        # data.newscheck.NewsCheckClient: the story behind each candidate (narrative lane and buy gate).
+        self.newscheck = newscheck
+        self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
+        self._nc_notes: dict[str, str] = {}  # mint -> the story that qualified it
+        self._nc_warned = False
         self._longterm_exits: Any = None
         self.lane_outcomes: deque[dict[str, Any]] = deque(maxlen=100)  # copy / long-term decisions, newest last
         self._lane_last: dict[str, str] = {}  # mint -> last outcome noted (log each change once)
@@ -260,6 +266,12 @@ class Agent:
             log.warning("Discovery failed: %s", exc)
             discovered = []
         f = self.cfg.filters
+        if self.newscheck is not None:  # coins with a strong story among the newest checks
+            try:
+                discovered = [*self.newscheck.discover(now), *discovered]
+            except Exception as exc:
+                self._newscheck_failed(exc)
+        self._nc_scan.clear()
         mints = [m for m in dict.fromkeys([*f.watchlist, *discovered])
                  if m not in f.blacklist and not self.risk.token_blocked(self.pf, m, now)]
         mints = mints[: self.cfg.agent.max_candidates_per_scan]
@@ -269,6 +281,8 @@ class Agent:
             ev = evaluate_entry(s, f, now)
             if not ev.passed and self.cfg.launch.enabled:
                 ev = self._launch_lane(ev, now) or ev
+            if not ev.passed and self.newscheck is not None:
+                ev = self._narrative_lane(ev, now) or ev
             evals.append(ev)
         window = timedelta(minutes=self.cfg.launch.buy_window_minutes)
         self.launch_qualified = {m: t for m, t in self.launch_qualified.items() if now - t <= window}
@@ -290,6 +304,71 @@ class Agent:
             log.info("Launch lane: %s traded $%.0f in its first %.0fm (liq $%.0f) | %s", s.symbol, s.volume_h1,
                      s.age_minutes(now) or 0, s.liquidity_usd, s.url)
         return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="launch")
+
+    # -- narrative lane (NewsCheck) -----------------------------------------------------------------
+    def _newscheck_failed(self, exc: Exception) -> None:
+        code = getattr(exc, "status", None)
+        if code == 401:
+            log.warning("NewsCheck rejected the API key: narrative checks are off for this run")
+            self.newscheck = None
+        elif not self._nc_warned:
+            self._nc_warned = True
+            log.warning("NewsCheck unavailable (%s); trading without narrative checks until it recovers", exc)
+
+    def _story(self, snap: TokenSnapshot, now: datetime, request: bool = False) -> tuple[str, str] | None:
+        """("block" | "strong" | "neutral", why) from the coin's NewsCheck rundown; None: no rundown (or no NewsCheck)."""
+        from .data.newscheck import judge
+
+        nc, cfg = self.newscheck, self.cfg.narrative
+        if nc is None:
+            return None
+        if snap.mint not in self._nc_scan and len(self._nc_scan) >= cfg.max_lookups_per_scan:
+            return None
+        self._nc_scan.add(snap.mint)
+        try:
+            r = nc.rundown(snap.chain, snap.mint)
+            if r is None and request and cfg.max_new_checks_per_day > 0:
+                if nc.request_check(snap.chain, snap.mint):
+                    log.info("NewsCheck: requested a check for %s", snap.symbol)
+        except Exception as exc:
+            self._newscheck_failed(exc)
+            return None
+        self._nc_warned = False
+        return None if r is None else judge(cfg, r, now)
+
+    def _narrative_lane(self, ev: EntryEvaluation, now: datetime) -> EntryEvaluation | None:
+        """A young, small coin with a strong story passes on looser filters than momentum's."""
+        s, c, f = ev.snapshot, self.cfg.narrative, self.cfg.filters
+        if not c.enabled or s.chain != "solana" or s.mint in f.blacklist:
+            return None
+        age = s.age_minutes(now)
+        if age is None or not (c.min_age_minutes <= age <= c.max_age_minutes):
+            return None
+        if (s.quote_symbol.upper() not in {q.upper() for q in f.quote_symbols}
+                or s.liquidity_usd < c.min_liquidity_usd or not (c.min_market_cap_usd <= s.market_cap_usd <= c.max_market_cap_usd)
+                or s.txns_h1 < c.min_txns_h1 or s.buy_sell_ratio_h1 < c.min_buy_sell_ratio_h1
+                or s.buy_sell_ratio_m5 < c.min_buy_sell_ratio_m5 or s.price_change_m5 < c.min_price_change_m5
+                or s.price_change_h1 > c.max_price_change_h1):
+            return None
+        verdict = self._story(s, now, request=True)
+        if verdict is None or verdict[0] != "strong":
+            return None
+        if s.mint not in self._nc_notes:
+            log.info("Narrative lane: %s (%.0fm old, mcap $%.0f) | %s | %s", s.symbol, age, s.market_cap_usd,
+                     verdict[1], s.url)
+        self._nc_notes[s.mint] = verdict[1]
+        if len(self._nc_notes) > 2000:
+            self._nc_notes.clear()
+        return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="narrative")
+
+    def _narrative_block(self, snap: TokenSnapshot, now: datetime) -> str | None:
+        """Why the coin's story rules it out (None: buy it)."""
+        if self.newscheck is None or not self.cfg.narrative.enabled:
+            return None
+        verdict = self._story(snap, now)
+        if verdict is None:
+            return "narrative: NewsCheck has no rundown for it" if self.cfg.narrative.require_rundown else None
+        return f"narrative: {verdict[1]}" if verdict[0] == "block" else None
 
     def _remember_price(self, s: TokenSnapshot, now: datetime) -> None:
         if s.price_usd <= 0:
@@ -315,7 +394,7 @@ class Agent:
         return None
 
     def _needs_wallet_scan(self, ev: EntryEvaluation, now: datetime) -> bool:
-        if ev.lane == "launch":
+        if ev.lane in ("launch", "narrative"):
             return True
         f, s = self.cfg.filters, ev.snapshot
         age = s.age_minutes(now)
@@ -421,6 +500,10 @@ class Agent:
                 if not ok:
                     outcomes[snap.mint] = note
                     continue
+            if blocked := self._narrative_block(snap, now):
+                outcomes[snap.mint] = blocked
+                log.info("Skip %s: %s", snap.symbol, blocked)
+                continue
             report = self.safety.check(snap.mint)
             if not report.ok:
                 outcomes[snap.mint] = "unsafe: " + "; ".join(report.reasons)
@@ -444,7 +527,9 @@ class Agent:
                 outcomes[snap.mint] = f"buy failed: {exc}"
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
-            pos = self.pf.open(snap, fill, now, ev.score, reason=note)
+            if ev.lane == "narrative":
+                note = f"narrative: {self._nc_notes.get(snap.mint, 'strong story')}" + (f" | {note}" if note else "")
+            pos = self.pf.open(snap, fill, now, ev.score, reason=note, lane=ev.lane)
             pos.kind = prof.kind if prof else ""
             if self.analytics is not None:
                 verdicts = getattr(self.guard, "last_verdicts", {}) or {}
@@ -503,6 +588,8 @@ class Agent:
                 ok, note = self._launch_check(snap, "copy")
                 if not ok:
                     return note
+        if lane == "copy" and (blocked := self._narrative_block(snap, now)):
+            return blocked
         report = self.safety.check(snap.mint)
         if not report.ok:
             return "unsafe: " + "; ".join(report.reasons)

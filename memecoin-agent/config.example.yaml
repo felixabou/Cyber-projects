@@ -207,6 +207,23 @@ gmgn:
   fail_closed: false               # GMGN down / rate limited: false = the other checks decide
   rate_per_s: 5                    # your plan's rate (free 5, Plus 20, Pro 50), shared by every GMGN user here
 
+narrative:
+  # NewsCheck (newscheck.app): the story behind each coin. Needs a free key: NEWSCHECK_API_KEY or the file below.
+  # A young, small coin whose rundown shows a strong story (viral post, meta, product, KOL push...) is bought
+  # early, past the momentum filters; a coin rated RED FLAG / DEV EXIT / LARP is never bought.
+  enabled: true
+  api_key_file: ~/.config/newscheck/api_key
+  max_new_checks_per_day: 0        # paid plans only: request checks for the best young coins that have no rundown (0 = never)
+  require_rundown: false           # true: buy nothing NewsCheck hasn't covered
+  min_confidence: 50
+  min_legit_score: 35              # under this, a coin is blocked
+  min_age_minutes: 3               # the early-entry filters (looser than `filters:`)
+  max_age_minutes: 120
+  min_liquidity_usd: 8000
+  min_market_cap_usd: 10000
+  max_market_cap_usd: 400000
+  min_txns_h1: 30
+
 jupiter:
   # Pre-buy check on Jupiter's free token data (Solana, no key). Runs after RugCheck, before GMGN.
   enabled: true

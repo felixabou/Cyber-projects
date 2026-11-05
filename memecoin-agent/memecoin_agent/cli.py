@@ -202,7 +202,19 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         lt = cfg.longterm
         log.info("Long-term lane on: %d watchlist token(s)%s; up to %d holds of $%.0f", len(lt.watchlist),
                  " + GMGN discovery" if gmgn is not None and lt.discovery else "", lt.max_positions, lt.position_usd)
-    return Agent(cfg, market, safety, executor, pf, guard=guard, launch_scan=launch_scan, analytics=analytics,
+    newscheck = None
+    if cfg.narrative.enabled:
+        from .data.newscheck import NewsCheckClient, load_api_key as newscheck_key
+
+        nc_key = newscheck_key(cfg.narrative)
+        if nc_key:
+            newscheck = NewsCheckClient(cfg.narrative, nc_key)
+            log.info("Narrative lane on (NewsCheck): young coins with a strong story are bought early; "
+                     "LARP / RED FLAG coins are blocked")
+        else:
+            log.info("Narrative lane off: no NewsCheck key (free at newscheck.app/developers; set NEWSCHECK_API_KEY "
+                     "or put it in %s)", cfg.narrative.api_key_file)
+    return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
