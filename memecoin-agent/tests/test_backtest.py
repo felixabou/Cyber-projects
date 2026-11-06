@@ -7,6 +7,7 @@ import pytest
 
 from memecoin_agent.backtest import ReplayMarket, ReplaySafety, format_report, run_backtest
 from memecoin_agent.config import Config, apply_override
+from memecoin_agent.data.wallets import WalletScan
 from memecoin_agent.models import SafetyReport
 from memecoin_agent.recording import Recorder, RecordingWriter, read_recordings
 from memecoin_agent.simulation import SimClock, SyntheticMarket, SyntheticSafety
@@ -77,6 +78,49 @@ def test_replay_tracks_pregraduation_marker_until_migration():
     assert market.is_pregraduation("A")
     market.advance_to(t2)
     assert not market.is_pregraduation("A")
+
+
+def test_sniper_replay_requires_a_recorded_wallet_scan(tmp_path):
+    cfg = Config()
+    cfg.sniper.enabled = True
+    cfg.feeds.pumpportal_new_tokens = True
+    cfg.agent.tick_seconds = 5
+    cfg.agent.scan_every_ticks = 1
+    snap = make_snap(mint="CURVE", pair_created_at=NOW - timedelta(minutes=1),
+                     liquidity_usd=10_000, market_cap_usd=20_000, volume_h1=5_000,
+                     buys_h1=25, sells_h1=10)
+
+    class Market:
+        def discover(self):
+            return ["CURVE"]
+
+        def snapshots(self, mints):
+            return {"CURVE": snap}
+
+        def is_pregraduation(self, mint):
+            return mint == "CURVE"
+
+    class Safety:
+        def check(self, mint):
+            return SafetyReport(True, 1, [])
+
+    class Wallet:
+        def check(self, mint):
+            return SafetyReport(True, 0, [])
+
+        def result(self, mint):
+            return WalletScan(mint=mint, scanned_at=0, bundle_bought_pct=5, top10_pct=20)
+
+    Recorder(cfg, Market(), Safety(), RecordingWriter(tmp_path), clock=SimClock(NOW),
+             wallet_scan=Wallet()).tick()
+    records = list(read_recordings(tmp_path))
+    wallet = next(r for r in records if r["type"] == "wallet")
+    assert wallet["mint"] == "CURVE" and wallet["scan"]["top10_pct"] == 20
+    assert run_backtest(cfg, records).trades[0].side == "buy"
+    assert run_backtest(cfg, [r for r in records if r["type"] != "wallet"]).trades == []
+    late_wallet = [{**r, "t": (NOW + timedelta(seconds=5)).isoformat()}
+                   if r["type"] == "wallet" else r for r in records]
+    assert run_backtest(cfg, late_wallet).trades[0].time == NOW + timedelta(seconds=5)
 
 
 def test_backtest_trades_only_on_information_available_at_the_time():

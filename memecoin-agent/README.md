@@ -171,8 +171,12 @@ This lane still requires the configured market filters and agent safety checks, 
 wallet scan. If a required check has no report, it may wait or reject the entry; the bot does not buy
 just because a token appeared on the feed. That makes it a pre-graduation entry path, not a guaranteed
 first-block fill. Five-second scanning and the small per-position cap are set only in the opt-in preset.
-Backtests need recordings that include Pump.fun curve snapshots and the new `pregraduation` marker;
-older recordings cannot evaluate this lane accurately.
+Backtests need recordings that include Pump.fun curve snapshots, the `pregraduation` marker,
+RugCheck reports and the point-in-time wallet scans the recorder collects for plausible
+curve candidates. Unknown scans block replay entries. If DexScreener has not indexed a
+bonding-curve pair, there is no price snapshot to assess that coin. Old recordings
+cannot evaluate this lane accurately; LarpCheck, GMGN, profile and live transaction
+checks are not replayed, so paper results still differ from live execution.
 
 A Pump.fun token is tradable on its bonding curve from creation. The lane targets that curve before
 graduation to PumpSwap; it cannot buy before the token itself exists.
@@ -220,8 +224,8 @@ creator 0.0%*.
 
 All of it is under `launch:` in [`config.example.yaml`](config.example.yaml); `enabled: false` turns
 it off. A paid RPC (Helius, QuickNode…) in `execution.rpc_url` makes scans faster. Solscan's API needs
-a paid key, so the scan doesn't use it. Backtests don't take launch-lane trades, because the wallet
-scan needs live chain data.
+a paid key, so the scan doesn't use it. Replay needs a recorded wallet scan for each early
+entry; the recorder currently captures these only for plausible pre-graduation candidates.
 
 ## Tech vs meme, and fake charts
 
@@ -258,7 +262,8 @@ flag, bundler and insider checks run later in the chain as before.
 **Earlier and smaller.** The filters now start at 15 minutes old, $20k market cap and $12k liquidity
 (was 20 minutes, $50k, $25k). Anything younger than 60 minutes or under $50k market cap must also pass the
 [wallet scan](#launch-lane) (launch-block bundles, linked wallets, top 10 holders, creator holdings),
-on top of the fake-chart check. Backtests don't take these early buys, since the scan needs live chain data.
+on top of the fake-chart check. A backtest needs a recorded wallet scan for each early buy;
+the recorder currently captures them only for plausible pre-graduation candidates.
 
 ## Exits: take the initials out, let the rest run
 
@@ -334,7 +339,8 @@ token, enter an amount and buy it with paper cash. The **Agent trades it** switc
 on, the agent's exits apply; off, the agent never sells it and you do. Every open position has the
 same switch, plus **25% / 50% / Sell all** buttons. **Check safety** runs the honeypot checks first
 (warnings only; it's your call). From Telegram: `/buy ADDRESS USD [chain] [manual]`,
-`/sell SYMBOL 50`, `/agent SYMBOL on|off`. Manual trades are paper-only and don't use a trading slot.
+`/sell SYMBOL 50`, `/agent SYMBOL on|off`. Manual trades are paper-only, do not use a trading slot,
+and each buy is capped at `risk.max_position_usd`.
 
 ## Rug and honeypot guards
 
@@ -587,8 +593,8 @@ Known live-mode limitations:
 
 ## Backtesting
 
-Backtests replay real recorded market data through the exact production code
-(agent, strategy, risk rules and paper fill model). So first, record. The easiest
+Backtests replay recorded market data through the production agent, strategy,
+risk rules and paper fill model. So first, record. The easiest
 way is to record while you paper trade: pass `--record`, set
 `recorder.record_while_trading: true`, or click **Start recording** on the
 dashboard's Backtest tab. To record without trading, use the standalone recorder:
@@ -600,7 +606,8 @@ memecoin-agent -c config.yaml record              # runs until Ctrl-C; --hours N
 The recorder polls discovery (DexScreener plus the launch feed) every 30 seconds.
 It samples every discovered token for 12 hours, so a backtest sees what happened
 after an entry, including for tokens your current filters would skip. It also
-stores each token's RugCheck verdict. Output goes to gzipped hourly files in
+stores each token's RugCheck verdict and, when the sniper lane is enabled,
+point-in-time wallet measurements for qualifying curve candidates. Output goes to gzipped hourly files in
 `recordings/`. Run it on an always-on machine for a few days: hours of data are
 noise.
 
@@ -633,6 +640,7 @@ recorded at or before T:
 - Discovery returns what discovery returned at the last recorded poll.
 - A token that stopped being sampled looks unavailable, as it would live.
 - Tokens with no recorded RugCheck verdict are rejected, as live (fail closed). `--assume-safe` overrides this.
+- Early curve entries require a recent recorded wallet scan. Missing or stale scans block the buy.
 - Open positions are sold at the last price when the replay ends. `--keep-open` leaves them open instead.
 
 **What a backtest can't capture:**
@@ -641,8 +649,10 @@ recorded at or before T:
 - Real slippage, MEV sandwiches and failed transactions.
 - Your own buys moving the price. The fill model includes x*y=k price impact, but not other traders reacting.
 - Tokens discovered 12h+ before they'd have been bought (outside `track_hours`).
+- External profile, LarpCheck, GMGN and live transaction checks; these can reject an entry that replay accepts.
+- New Pump.fun coins without a DexScreener curve-pair snapshot, including any price moves before indexing.
 
-Treat backtest results as an upper bound. Be wary of tuning parameters until one
+Treat backtest results as scenario estimates. Be wary of tuning parameters until one
 recording looks great: hold some days back and check the result holds on them.
 
 ## Layout

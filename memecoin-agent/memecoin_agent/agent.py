@@ -803,6 +803,9 @@ class Agent:
             raise ValueError("Enter an amount in USD")
         if usd > self.executor.available_usd(self.pf):
             raise ValueError(f"Only ${self.executor.available_usd(self.pf):,.2f} of paper cash available")
+        if usd > self.cfg.risk.max_position_usd:
+            raise ValueError(f"Manual buys are capped at ${self.cfg.risk.max_position_usd:,.2f} by "
+                             "risk.max_position_usd")
         now = self.clock()
         snap = self.snapshot_for(chain, mint)
         warnings = self.manual_check(snap, usd)

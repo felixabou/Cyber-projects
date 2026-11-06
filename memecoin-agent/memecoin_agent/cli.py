@@ -285,7 +285,8 @@ class Engine:
             agent, feed=self.feed, equity=EquityHistory(Path(cfg.agent.state_file).parent / "equity.csv"),
             record=record, max_ticks=getattr(args, "max_ticks", None),
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
-                                           RecordingWriter(cfg.recorder.dir), clock=agent.clock),
+                                           RecordingWriter(cfg.recorder.dir), clock=agent.clock,
+                                           wallet_scan=agent.launch_scan),
         )
         self.bot = build_telegram(cfg, self.runner)
         if self.bot is not None:

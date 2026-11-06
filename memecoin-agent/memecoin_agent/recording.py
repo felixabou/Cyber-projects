@@ -6,8 +6,10 @@ backtest sees the full path after any entry, including for tokens a given
 config would not have bought. It writes three kinds of records:
 
   {"type": "discover", "t": ..., "mints": [...]}   what discovery returned
-  {"type": "snap", ...TokenSnapshot fields...}      one per token per tick
+  {"type": "snap", ...TokenSnapshot fields..., "pregraduation": bool} one per token per tick
   {"type": "safety", "t": ..., "mint": ..., ...}   RugCheck verdict (once per token)
+  {"type": "wallet", "t": ..., "mint": ..., ...}   recent wallet scan for curve entries
+  {"type": "wallet", "t": ..., "scan": ...}        point-in-time early wallet scan
 
 Files are gzipped JSON lines, one per UTC hour. Each tick is appended as its
 own gzip member, so a crash loses at most the tick being written.
@@ -20,6 +22,7 @@ import json
 import logging
 import time
 import zlib
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -97,17 +100,24 @@ class Recorder:
         writer: RecordingWriter,
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], None] = time.sleep,
+        wallet_scan: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.rc = cfg.recorder
         self.market = market
         self.safety = safety if self.rc.record_safety else None
+        self.wallet_scan = wallet_scan
+        if self.wallet_scan is None and cfg.sniper.enabled and self.safety is not None:
+            from .data.wallets import WalletScanner
+
+            self.wallet_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
         self.writer = writer
         self.clock = clock
         self.sleep = sleep
         self.tracked: dict[str, datetime] = {}  # mint -> stop tracking at
         self.seen: dict[str, datetime] = {}  # mint -> first seen; never re-track an expired mint
         self.safety_done: set[str] = set()
+        self._wallet_requested_at: dict[str, datetime] = {}
         self.ticks = 0
         self.started_at: datetime | None = None
         self.last_tick_at: datetime | None = None
@@ -153,7 +163,56 @@ class Recorder:
             for s in snaps.values()
         )
         records.extend(self._safety_records(snaps, now))
+        records.extend(self._wallet_records(snaps, now))
         self.writer.write(now, records)
+
+    def _wallet_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
+        """Capture scans only for plausible early curve candidates; unresolved scans stay unknown."""
+        if self.wallet_scan is None or not self.cfg.sniper.enabled:
+            return []
+        c = self.cfg.sniper
+        eligible = [s for s in snaps.values() if (
+            s.age_minutes(now) is not None and 0 <= s.age_minutes(now) <= c.max_age_minutes
+            and s.chain == "solana" and s.liquidity_usd >= c.min_liquidity_usd
+            and c.min_market_cap_usd <= s.market_cap_usd <= c.max_market_cap_usd
+            and s.volume_h1 >= c.min_volume_h1_usd and s.txns_h1 >= c.min_txns_h1
+            and getattr(self.market, "is_pregraduation", lambda _: False)(s.mint)
+        )]
+        # Rotate requests so the oldest candidates do not monopolize a busy feed.
+        eligible.sort(key=lambda s: (self._wallet_requested_at.get(s.mint, datetime.min.replace(tzinfo=now.tzinfo)),
+                                     -(s.pair_created_at.timestamp() if s.pair_created_at else 0)))
+        for snap in eligible[:10]:
+            try:
+                self.wallet_scan.check(snap.mint)
+            except Exception as exc:
+                log.warning("Wallet scan recording failed for %s: %s", snap.mint, type(exc).__name__)
+            self._wallet_requested_at[snap.mint] = now
+        self._wallet_requested_at = {m: t for m, t in self._wallet_requested_at.items()
+                                     if t > now - timedelta(days=1)}
+        out: list[dict[str, Any]] = []
+        for snap in eligible:
+            try:
+                scan = self.wallet_scan.result(snap.mint)
+            except Exception as exc:
+                log.warning("Wallet scan recording failed for %s: %s", snap.mint, type(exc).__name__)
+                continue
+            if scan is None:
+                continue
+            scanner_clock = getattr(self.wallet_scan, "clock", None)
+            if scanner_clock is not None:
+                from .data.wallets import ERROR_TTL_S, RESULT_TTL_S
+
+                ttl = ERROR_TTL_S if scan.error else RESULT_TTL_S
+                if not 0 <= scanner_clock() - scan.scanned_at < ttl:
+                    continue
+            if scan.mint != snap.mint:
+                continue
+            raw = asdict(scan)
+            raw.pop("scanned_at", None)  # monotonic clock does not survive a recording
+            raw["launched_at"] = scan.launched_at.isoformat() if scan.launched_at else None
+            out.append({"type": "wallet", "t": max(now, snap.fetched_at).isoformat(), "mint": snap.mint,
+                        "scan": raw})
+        return out
 
     def _safety_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
         if self.safety is None:
