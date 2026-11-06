@@ -4,11 +4,12 @@ The replay is strictly point-in-time: at simulated time T the agent sees only
 records stamped at or before T, discovery returns what discovery returned at
 the last recorded poll, and a token with no sample in the last few intervals
 looks unavailable, as it would live. The agent, strategy, risk rules and paper
-fill model are the exact production code paths.
+fill model use the production code paths. A recorded wallet scan is required
+for early bonding-curve entries; missing or stale scans block those buys.
 
-What a backtest cannot tell you: real slippage and MEV on your fills, failed or
-delayed transactions, and whether your own buys would have moved the market.
-Treat results as an upper bound.
+External profile, GMGN, LarpCheck and live execution checks are not replayed.
+Real slippage, MEV, failed or delayed transactions and price impact from other
+traders are unknown. Treat results as estimates rather than live performance.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any, Iterable, Iterator
 
 from .agent import Agent
 from .config import Config
+from .data.wallets import ERROR_TTL_S, RESULT_TTL_S, SCANNING, WalletScan, WalletScanner
 from .data.rugcheck import UNAVAILABLE
 from .execution.paper import PaperExecutor
 from .models import ClosedTrade, SafetyReport, TokenSnapshot, TradeRecord
@@ -38,8 +40,10 @@ class ReplayMarket:
         self.stale_after = timedelta(seconds=stale_after_s)
         self.now: datetime | None = None
         self.latest: dict[str, TokenSnapshot] = {}
+        self.pregraduation: set[str] = set()
         self.discovered: list[str] = []
         self.safety: dict[str, SafetyReport] = {}
+        self.wallets: dict[str, tuple[datetime, WalletScan]] = {}
         self.records_read = 0
         self.exhausted = False
         self._peek()
@@ -62,10 +66,21 @@ class ReplayMarket:
             if kind == "snap":
                 snap = TokenSnapshot.from_dict(rec)
                 self.latest[snap.mint] = snap
+                if rec.get("pregraduation", False):
+                    self.pregraduation.add(snap.mint)
+                else:
+                    self.pregraduation.discard(snap.mint)
             elif kind == "discover":
                 self.discovered = list(rec.get("mints") or [])
             elif kind == "safety":
                 self.safety[rec["mint"]] = SafetyReport(bool(rec["ok"]), rec.get("score"), list(rec.get("reasons") or []))
+            elif kind == "wallet":
+                data = dict(rec["scan"])
+                launched_at = data.get("launched_at")
+                data["launched_at"] = datetime.fromisoformat(launched_at) if launched_at else None
+                self.wallets[rec["mint"]] = (
+                    datetime.fromisoformat(rec["t"]), WalletScan(scanned_at=0.0, **data)
+                )
 
     # -- MarketData interface ----------------------------------------------------------
     def discover(self) -> list[str]:
@@ -78,6 +93,9 @@ class ReplayMarket:
             if s is not None and self.now is not None and self.now - s.fetched_at <= self.stale_after:
                 out[m] = s
         return out
+
+    def is_pregraduation(self, mint: str) -> bool:
+        return mint in self.pregraduation
 
     def sol_price_usd(self) -> float:
         return 150.0  # paper fills are priced in USD; SOL price is not used in backtests
@@ -95,6 +113,28 @@ class ReplaySafety:
         if rep is not None:
             return rep
         return SafetyReport(ok=self.assume_safe, score=None, reasons=[] if self.assume_safe else [UNAVAILABLE])
+
+
+class ReplayWalletScanner:
+    """Rejudge recorded wallet measurements under the backtest's launch thresholds."""
+
+    def __init__(self, market: ReplayMarket, cfg: Config) -> None:
+        self.market = market
+        self.cfg = cfg.launch
+
+    def result(self, mint: str) -> WalletScan | None:
+        item = self.market.wallets.get(mint)
+        if item is None or self.market.now is None:
+            return None
+        observed, scan = item
+        ttl = ERROR_TTL_S if scan.error else RESULT_TTL_S
+        return scan if timedelta(0) <= self.market.now - observed < timedelta(seconds=ttl) else None
+
+    def check(self, mint: str, qualified_at: datetime | None = None) -> SafetyReport:
+        scan = self.result(mint)
+        if scan is None:
+            return SafetyReport(False, None, [SCANNING])
+        return WalletScanner.judge(self, scan, qualified_at)
 
 
 @dataclass
@@ -157,7 +197,7 @@ def run_backtest(
     clock = SimClock(start)
     pf = Portfolio(cash_usd=cfg.risk.starting_balance_usd)
     agent = Agent(cfg, market, ReplaySafety(market, assume_safe), PaperExecutor(cfg.execution), pf,
-                  clock=clock, persist=False)
+                  clock=clock, persist=False, launch_scan=ReplayWalletScanner(market, cfg))
     curve: list[tuple[datetime, float]] = []
     market.advance_to(start)
     while True:
@@ -196,3 +236,4 @@ def format_report(res: BacktestResult) -> str:
         lines.append("  Worst / best    " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[:3])
                      + "  |  " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[-3:][::-1]))
     return "\n".join(lines)
+

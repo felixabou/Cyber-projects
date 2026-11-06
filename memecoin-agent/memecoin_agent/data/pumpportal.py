@@ -118,6 +118,13 @@ class PumpPortalFeed:
             ev = self._events.get(mint)
         return None if ev is None else self.clock() - ev.seen_at
 
+    def is_pregraduation(self, mint: str) -> bool:
+        """Whether the latest feed event is a creation with no migration event seen yet."""
+        self._prune()
+        with self._lock:
+            event = self._events.get(mint)
+        return event is not None and event.kind == "launch"
+
     # -- persistence ----------------------------------------------------------------
     def save(self) -> None:
         if self.buffer_file is None:
@@ -227,5 +234,9 @@ class FeedAugmentedMarket:
                 self.feed.evict(mint)  # pool is dead; stop spending scan budget on it
         return snaps
 
+    def is_pregraduation(self, mint: str) -> bool:
+        return self.feed.is_pregraduation(mint)
+
     def sol_price_usd(self) -> float:
         return self.base.sol_price_usd()
+

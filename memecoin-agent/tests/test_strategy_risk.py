@@ -125,6 +125,16 @@ def test_risk_limits(snap):
     assert not rm.token_blocked(pf, snap.mint, NOW + timedelta(days=1))
 
 
+def test_sniper_entries_count_toward_hourly_limit(snap):
+    pf = Portfolio(cash_usd=1000)
+    rm = RiskManager(RiskConfig(max_entries_per_hour=1))
+    rm.start_day(pf, NOW)
+    pf.open(snap, Fill(100_000, 25.0, 0.00025), NOW, 0.5, lane="sniper")
+    assert len(pf.entry_times) == 1
+    pf.reduce(snap.mint, 1.0, Fill(100_000, 25.0, 0.00025), NOW, "close")
+    assert "max entries per hour" in rm.entry_block_reason(pf, NOW + timedelta(minutes=1))
+
+
 def test_paper_fills_cost_money(snap):
     ex = PaperExecutor(ExecutionConfig(paper_fee_pct=1.0))
     fill = ex.buy(snap, 100.0)
@@ -173,3 +183,4 @@ def test_dollar_daily_loss_limit_replaces_the_percentage():
     assert not usd.daily_loss_halted(pf, now)
     pf.realized_pnl_by_day[now.date().isoformat()] = -500.0
     assert usd.daily_loss_halted(pf, now) and usd.entry_block_reason(pf, now) == "daily loss limit ($500) hit"
+

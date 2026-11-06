@@ -201,6 +201,9 @@ def test_manual_trades_from_the_dashboard(tmp_path):
     try:
         found = client.get("/api/lookup", params={"q": rc.mint}).json()["results"]
         assert found[0]["symbol"] == "ROBINCAT" and found[0]["chain"] == "robinhood"
+        over_cap = client.post("/api/control", json={"action": "manual_buy", "chain": "robinhood",
+                                                  "address": rc.mint, "usd": 200}).json()
+        assert not over_cap["ok"] and "risk.max_position_usd" in over_cap["error"]
         r = client.post("/api/control", json={"action": "manual_buy", "chain": "robinhood", "address": rc.mint,
                                               "usd": 30, "managed": False}).json()
         assert r["ok"] and r["message"].startswith("Bought $30.00 of ROBINCAT")
@@ -218,3 +221,4 @@ def test_manual_trades_from_the_dashboard(tmp_path):
         server.shutdown()
         server.server_close()
         runner.stop()
+

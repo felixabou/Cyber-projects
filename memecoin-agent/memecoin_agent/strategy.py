@@ -27,7 +27,7 @@ class EntryEvaluation:
     passed: bool
     score: float
     reasons: list[str]
-    lane: str = "momentum"  # or "launch": passed on launch volume (see launch_reasons)
+    lane: str = "momentum"  # launch and sniper are opt-in entry paths
 
 
 @dataclass
@@ -246,3 +246,4 @@ def evaluate_exit(pos: Position, s: TokenSnapshot | None, e: ExitConfig, now: da
         if pnl >= lvl.at_pct:
             return ExitDecision(lvl.sell_fraction, f"take profit {idx + 1} ({pnl:+.1f}%)", tp_level=idx)
     return None
+
