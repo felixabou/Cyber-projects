@@ -25,8 +25,7 @@ Each tick (10s by default):
    - **Hard stop at −50%**, every tick. A dip past −30% starts 30-minute reviews: held while it consolidates between −30% and −40%, sold if it keeps sliding or is deeper than −40% at a review.
    - **Time stop.** Exit after 12 hours (`max_hold_minutes: 720`) if the initials never came out.
 2. **Scan & enter** (every 2nd tick, so every 20s):
-   - Discover mints from three sources:
-     - **Pump.fun graduations, in real time.** A background websocket to PumpPortal sees each token the moment it moves from the bonding curve to a real AMM pool. These go first in the scan.
+   - Discover mints from PumpPortal launch/migration events, DexScreener feeds, and your `watchlist`. The optional sniper profile subscribes to new-token events, before migration.
      - DexScreener's latest-profiles and boost feeds.
      - Your `watchlist`.
    - Keep tokens that pass every filter:
@@ -157,6 +156,26 @@ Setup: make a free key at newscheck.app/developers, then set `NEWSCHECK_API_KEY`
 The free plan reads existing rundowns only (30 calls a minute). A brand new coin usually has none yet, so it
 isn't blocked, but it doesn't get the early entry either. A paid plan ($49 for 150 checks a month) lets the agent
 request checks itself: set `narrative.max_new_checks_per_day`.
+
+## Pre-graduation sniper lane (opt-in)
+
+`config.sniper.example.yaml` enables PumpPortal new-token events and looks for qualifying Pump.fun
+snapshots while their create event is still current and before a migration event has been seen. In
+paper mode, fills use the normal price-impact simulation. In live mode, buys use PumpPortal's Local
+Transaction API with `pool: pump`, are signed by the configured local wallet, and are submitted through
+the configured Solana RPC. Sells for these positions use PumpPortal's `auto` pool routing so they can
+continue after migration. PumpPortal currently lists a 0.5% Local API fee per trade, before network
+and Pump.fun fees; see its [fee page](https://pumpportal.fun/fees/).
+
+This lane still requires the configured market filters and agent safety checks, including the early
+wallet scan. If a required check has no report, it may wait or reject the entry; the bot does not buy
+just because a token appeared on the feed. That makes it a pre-graduation entry path, not a guaranteed
+first-block fill. Five-second scanning and the small per-position cap are set only in the opt-in preset.
+Backtests need recordings that include Pump.fun curve snapshots and the new `pregraduation` marker;
+older recordings cannot evaluate this lane accurately.
+
+A Pump.fun token is tradable on its bonding curve from creation. The lane targets that curve before
+graduation to PumpSwap; it cannot buy before the token itself exists.
 
 ## Launch lane
 
@@ -660,3 +679,4 @@ deploy/server.yaml   config for the Docker image (Dockerfile, docker-compose.yml
 ```
 
 Run the tests with `pytest`.
+

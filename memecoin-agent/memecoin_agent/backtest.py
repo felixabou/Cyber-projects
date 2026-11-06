@@ -38,6 +38,7 @@ class ReplayMarket:
         self.stale_after = timedelta(seconds=stale_after_s)
         self.now: datetime | None = None
         self.latest: dict[str, TokenSnapshot] = {}
+        self.pregraduation: set[str] = set()
         self.discovered: list[str] = []
         self.safety: dict[str, SafetyReport] = {}
         self.records_read = 0
@@ -62,6 +63,10 @@ class ReplayMarket:
             if kind == "snap":
                 snap = TokenSnapshot.from_dict(rec)
                 self.latest[snap.mint] = snap
+                if rec.get("pregraduation", False):
+                    self.pregraduation.add(snap.mint)
+                else:
+                    self.pregraduation.discard(snap.mint)
             elif kind == "discover":
                 self.discovered = list(rec.get("mints") or [])
             elif kind == "safety":
@@ -78,6 +83,9 @@ class ReplayMarket:
             if s is not None and self.now is not None and self.now - s.fetched_at <= self.stale_after:
                 out[m] = s
         return out
+
+    def is_pregraduation(self, mint: str) -> bool:
+        return mint in self.pregraduation
 
     def sol_price_usd(self) -> float:
         return 150.0  # paper fills are priced in USD; SOL price is not used in backtests
@@ -196,3 +204,4 @@ def format_report(res: BacktestResult) -> str:
         lines.append("  Worst / best    " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[:3])
                      + "  |  " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[-3:][::-1]))
     return "\n".join(lines)
+

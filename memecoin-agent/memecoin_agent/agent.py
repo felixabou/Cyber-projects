@@ -112,7 +112,8 @@ class Agent:
                     self.analytics.update(now, self._fetch)
                 except Exception as exc:
                     log.warning("After-sale tracking failed: %s", exc)
-            if self.ticks % self.cfg.agent.scan_every_ticks == 0:
+            scan_every = 1 if self.cfg.sniper.enabled else self.cfg.agent.scan_every_ticks
+            if self.ticks % scan_every == 0:
                 self.scan_and_enter(now)
             for lane in (self.enter_copy_signals, self.enter_longterm):  # every tick: copy signals go stale fast
                 try:
@@ -279,10 +280,15 @@ class Agent:
         for s in self._fetch(mints).values():
             self._remember_price(s, now)
             ev = evaluate_entry(s, f, now)
-            if not ev.passed and self.cfg.launch.enabled:
-                ev = self._launch_lane(ev, now) or ev
-            if not ev.passed and self.newscheck is not None:
-                ev = self._narrative_lane(ev, now) or ev
+            if self.cfg.sniper.enabled and self._is_pregraduation(s.mint):
+                sniper = self._sniper_lane(s, now)
+                if sniper is not None:
+                    ev = sniper
+            else:
+                if not ev.passed and self.cfg.launch.enabled:
+                    ev = self._launch_lane(ev, now) or ev
+                if not ev.passed and self.newscheck is not None:
+                    ev = self._narrative_lane(ev, now) or ev
             evals.append(ev)
         window = timedelta(minutes=self.cfg.launch.buy_window_minutes)
         self.launch_qualified = {m: t for m, t in self.launch_qualified.items() if now - t <= window}
@@ -304,6 +310,25 @@ class Agent:
             log.info("Launch lane: %s traded $%.0f in its first %.0fm (liq $%.0f) | %s", s.symbol, s.volume_h1,
                      s.age_minutes(now) or 0, s.liquidity_usd, s.url)
         return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="launch")
+
+    def _is_pregraduation(self, mint: str) -> bool:
+        check = getattr(self.market, "is_pregraduation", None)
+        return bool(check and check(mint))
+
+    def _sniper_lane(self, s: TokenSnapshot, now: datetime) -> EntryEvaluation | None:
+        """Entry window for a PumpPortal creation event whose pool has not migrated yet."""
+        c, f = self.cfg.sniper, self.cfg.filters
+        age = s.age_minutes(now)
+        if (s.chain != "solana" or age is None or age < 0 or age > c.max_age_minutes
+                or s.quote_symbol.upper() not in {q.upper() for q in f.quote_symbols}
+                or s.price_usd <= 0 or s.liquidity_usd < c.min_liquidity_usd
+                or not (c.min_market_cap_usd <= s.market_cap_usd <= c.max_market_cap_usd)
+                or s.volume_h1 < c.min_volume_h1_usd or s.txns_h1 < c.min_txns_h1
+                or s.buy_sell_ratio_h1 < c.min_buy_sell_ratio_h1
+                or s.price_change_m5 < c.min_price_change_m5):
+            return None
+        return EntryEvaluation(snapshot=s, passed=True, score=evaluate_entry(s, f, now).score,
+                               reasons=[], lane="sniper")
 
     # -- narrative lane (NewsCheck) -----------------------------------------------------------------
     def _newscheck_failed(self, exc: Exception) -> None:
@@ -394,7 +419,7 @@ class Agent:
         return None
 
     def _needs_wallet_scan(self, ev: EntryEvaluation, now: datetime) -> bool:
-        if ev.lane in ("launch", "narrative"):
+        if ev.lane in ("launch", "narrative", "sniper"):
             return True
         f, s = self.cfg.filters, ev.snapshot
         age = s.age_minutes(now)
@@ -513,22 +538,30 @@ class Agent:
             if size <= 0:
                 log.info("Insufficient balance for a minimum-size position")
                 break
-            if self.route_check is not None and (why := self.route_check.check(snap.mint, size)):
+            if ev.lane == "sniper":
+                size = min(size, self.cfg.sniper.max_position_usd)
+            if self.route_check is not None and ev.lane != "sniper" \
+                    and (why := self.route_check.check(snap.mint, size)):
                 outcomes[snap.mint] = "unsafe: " + why
                 log.info("Skip %s: %s", snap.symbol, why)
                 continue
-            if reason := self.executor.preflight(snap, size):
+            preflight = getattr(self.executor, "preflight_pregraduation", self.executor.preflight) \
+                if ev.lane == "sniper" else self.executor.preflight
+            if reason := preflight(snap, size):
                 outcomes[snap.mint] = f"skipped: {reason}"
                 log.info("Skip %s: %s", snap.symbol, reason)
                 continue
             try:
-                fill = self.executor.buy(snap, size)
+                buy_curve = getattr(self.executor, "buy_pregraduation", None) if ev.lane == "sniper" else None
+                fill = buy_curve(snap, size) if buy_curve is not None else self.executor.buy(snap, size)
             except Exception as exc:
                 outcomes[snap.mint] = f"buy failed: {exc}"
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
             if ev.lane == "narrative":
                 note = f"narrative: {self._nc_notes.get(snap.mint, 'strong story')}" + (f" | {note}" if note else "")
+            elif ev.lane == "sniper":
+                note = "Pump.fun bonding-curve entry via PumpPortal" + (f" | {note}" if note else "")
             pos = self.pf.open(snap, fill, now, ev.score, reason=note, lane=ev.lane)
             pos.kind = prof.kind if prof else ""
             if self.analytics is not None:
@@ -816,3 +849,4 @@ class Agent:
             }
             for e in evals
         ]
+

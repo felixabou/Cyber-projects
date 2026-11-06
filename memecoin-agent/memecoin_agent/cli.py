@@ -133,6 +133,11 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
 
         keypair = load_keypair()
         executor = JupiterExecutor(cfg.execution, keypair, market)
+        if cfg.sniper.enabled:
+            from .execution.pumpportal import PumpPortalExecutor
+
+            executor = PumpPortalExecutor(executor, market, cfg.sniper)
+            log.warning("PumpPortal pre-graduation execution enabled; entries remain gated by agent checks")
         log.warning("LIVE TRADING ENABLED for wallet %s", keypair.pubkey())
     else:
         executor = PaperExecutor(cfg.execution)
@@ -586,3 +591,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

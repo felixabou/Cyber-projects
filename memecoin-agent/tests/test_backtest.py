@@ -66,6 +66,19 @@ def test_replay_has_no_lookahead_and_expires_stale_data():
     assert m.snapshots(["A"]) == {}  # token stopped being sampled -> looks unavailable
 
 
+def test_replay_tracks_pregraduation_marker_until_migration():
+    t1, t2 = NOW, NOW + timedelta(seconds=30)
+    records = [
+        {**snap_rec(t1, mint="A"), "pregraduation": True},
+        {**snap_rec(t2, mint="A"), "pregraduation": False},
+    ]
+    market = ReplayMarket(records)
+    market.advance_to(t1)
+    assert market.is_pregraduation("A")
+    market.advance_to(t2)
+    assert not market.is_pregraduation("A")
+
+
 def test_backtest_trades_only_on_information_available_at_the_time():
     cfg = Config()
     cfg.agent.tick_seconds = 15
@@ -109,6 +122,9 @@ def test_recorder_tracking_rules(tmp_path):
         def snapshots(self, mints):
             return {m: make_snap(mint=m, liquidity_usd=1_000 if m == "B" else 80_000) for m in mints}
 
+        def is_pregraduation(self, mint):
+            return mint == "A"
+
     class Safety:
         calls = []
 
@@ -124,6 +140,8 @@ def test_recorder_tracking_rules(tmp_path):
     rec = Recorder(cfg, market, safety, RecordingWriter(tmp_path), clock=clock)
     rec.tick()
     assert set(rec.tracked) == {"A", "B"}
+    snaps = [r for r in read_recordings(tmp_path) if r["type"] == "snap"]
+    assert all(r["pregraduation"] is (r["mint"] == "A") for r in snaps)
     assert safety.calls == ["A"]  # B is far below any plausible liquidity filter
 
     market.mints = ["C", "A", "B"]
@@ -169,3 +187,4 @@ def test_apply_override_validation():
     for bad in ("filters.min_scroe=1", "nosection.x=1", "filters", "exits.stop_loss_pct=150"):
         with pytest.raises(ValueError):
             apply_override(cfg, bad)
+

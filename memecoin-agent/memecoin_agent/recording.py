@@ -146,7 +146,12 @@ class Recorder:
         except Exception as exc:
             log.warning("Snapshot fetch failed: %s", exc)
             snaps = {}
-        records.extend({"type": "snap", **s.to_dict()} for s in snaps.values())
+        pregraduation = getattr(self.market, "is_pregraduation", None)
+        records.extend(
+            {"type": "snap", **s.to_dict(),
+             "pregraduation": bool(pregraduation(s.mint)) if pregraduation else False}
+            for s in snaps.values()
+        )
         records.extend(self._safety_records(snaps, now))
         self.writer.write(now, records)
 
@@ -182,3 +187,4 @@ class Recorder:
                 self.sleep(max(0.0, self.rc.interval_s - (time.monotonic() - started)))
         except KeyboardInterrupt:
             log.info("Recorder stopped.")
+

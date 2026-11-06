@@ -400,6 +400,22 @@ class LaunchConfig:
 
 
 @dataclass
+class SniperConfig:
+    """Opt-in, capped lane for Pump.fun tokens that are still trading on the bonding curve."""
+
+    enabled: bool = False
+    max_age_minutes: float = 15.0
+    min_liquidity_usd: float = 5_000.0
+    min_market_cap_usd: float = 5_000.0
+    max_market_cap_usd: float = 500_000.0
+    min_volume_h1_usd: float = 1_000.0
+    min_txns_h1: int = 10
+    min_buy_sell_ratio_h1: float = 1.0
+    min_price_change_m5: float = -15.0
+    max_position_usd: float = 25.0
+
+
+@dataclass
 class ExportConfig:
     """No longer used: the hourly trade files are gone. Every trade is in agent.trades_csv, and the
     dashboard and Telegram download this session's, the last 1-24 hours' or all of them. Kept so
@@ -511,6 +527,7 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     copy: CopyConfig = field(default_factory=CopyConfig)
     longterm: LongTermConfig = field(default_factory=LongTermConfig)
+    sniper: SniperConfig = field(default_factory=SniperConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -558,6 +575,12 @@ class Config:
             raise ValueError("launch.max_age_minutes must be > 0 and launch.buy_window_minutes >= 0")
         if self.launch.max_signature_pages < 1:
             raise ValueError("launch.max_signature_pages must be >= 1")
+        if self.sniper.enabled and not self.feeds.pumpportal_new_tokens:
+            raise ValueError("sniper.enabled requires feeds.pumpportal_new_tokens: true")
+        if self.sniper.max_age_minutes <= 0 or self.sniper.max_position_usd <= 0:
+            raise ValueError("sniper.max_age_minutes and sniper.max_position_usd must be > 0")
+        if self.sniper.min_market_cap_usd > self.sniper.max_market_cap_usd:
+            raise ValueError("sniper.min_market_cap_usd cannot exceed sniper.max_market_cap_usd")
 
 
 _SECTIONS: dict[str, type] = {
@@ -580,6 +603,7 @@ _SECTIONS: dict[str, type] = {
     "telegram": TelegramConfig,
     "copy": CopyConfig,
     "longterm": LongTermConfig,
+    "sniper": SniperConfig,
 }
 
 
@@ -620,3 +644,4 @@ def load_config(path: str | Path | None) -> Config:
         cfg = Config(**{name: _build_section(cls, raw.get(name) or {}, name) for name, cls in _SECTIONS.items()})
     cfg.validate()
     return cfg
+
