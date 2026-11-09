@@ -123,7 +123,7 @@ class Position:
     larp: dict[str, Any] | None = None
     kind: str = ""  # "tech" or "meme" (data/profile.py); memes get LarpCheck's free lookup only
     chain: str = "solana"
-    # How it was bought: momentum, launch, copy (a tracked wallet bought it), longterm, manual.
+    # How it was bought: momentum, launch, lowcap, copy (a tracked wallet bought it), longterm, manual.
     lane: str = "momentum"
     # False: a manual trade the agent never sells (dashboard toggle "Agent trades it").
     managed: bool = True
@@ -212,3 +212,4 @@ class ClosedTrade:
     @property
     def hold_minutes(self) -> float:
         return (self.closed_at - self.opened_at).total_seconds() / 60
+

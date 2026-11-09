@@ -187,7 +187,7 @@ def test_meme_kind_reaches_the_gate_position_and_scanner(tmp_path):
 
 @pytest.mark.parametrize("snap_kw, scanned, bought", [
     (dict(pair_created_at=NOW - timedelta(minutes=40)), True, False),  # young: under an hour
-    (dict(market_cap_usd=30_000, liquidity_usd=15_000, volume_h1=30_000), False, False),  # low cap: copy lane only
+    (dict(market_cap_usd=30_000, liquidity_usd=15_000, volume_h1=30_000), True, False),  # low cap: controlled lane, wallet scan blocks
     ({}, False, True),  # 3h old, $600k: no wallet scan
 ])
 def test_early_and_small_buys_need_the_wallet_scan(tmp_path, snap_kw, scanned, bought):
@@ -200,3 +200,4 @@ def test_early_and_small_buys_need_the_wallet_scan(tmp_path, snap_kw, scanned, b
     if scanned:
         assert scanner.calls[0] == ("E1", None)  # no launch-age check for early buys
         assert agent.last_scan[0]["outcome"] == f"waiting: {SCANNING}" and gate.checked == []
+

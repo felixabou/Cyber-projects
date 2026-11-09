@@ -87,6 +87,25 @@ def test_discovery_sends_the_agent_window_dedupes_and_refreshes_on_schedule():
     assert d.discover() == ["T3"]
 
 
+def test_discovery_can_poll_sol_and_bnb_alias_as_separate_chains():
+    class Multi:
+        def __init__(self):
+            self.calls = []
+
+        def trending(self, interval, params, chain="sol"):
+            self.calls.append(chain)
+            if chain == "bsc":
+                return [{"address": "0x" + "AB" * 20}]
+            return [{"address": "SOLMINT"}]
+
+    fake = Multi()
+    d = GmgnDiscovery(GmgnConfig(), FilterConfig(), fake, clock=Clock(0), chains=["sol", "bnb"])
+    found = d.discover()
+    assert fake.calls == ["sol", "bsc"]
+    assert found == ["SOLMINT", ("0x" + "ab" * 20)]
+    assert d.chain_of("0x" + "ab" * 20) == "bsc"
+
+
 def test_rate_limit_backs_off_until_reset_and_discovery_keeps_last_set():
     fake = FakeGmgn()
     clock, mono = Clock(), Clock(0.0)
@@ -236,3 +255,4 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
     assert isinstance(market, ExtraDiscoveryMarket)
     cfg.gmgn.enabled = False
     assert cli.build_gmgn(cfg) is None
+

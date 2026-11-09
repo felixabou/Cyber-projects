@@ -28,10 +28,46 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 # which skews toward actively promoted launches; add `filters.watchlist` for anything else.
 DISCOVERY_PATHS = ("/token-profiles/latest/v1", "/token-boosts/latest/v1", "/token-boosts/top/v1")
 TOKENS_PER_REQUEST = 30
+# Chain names are not consistent across feeds: DexScreener calls the BNB chain ``bsc`` while
+# wallets and users commonly call it ``bnb`` (and ``bnc`` is a frequent typo). Keep one canonical
+# id internally so discovery, market data and honeypot checks cannot silently split the same chain.
+CHAIN_ALIASES = {
+    "sol": "solana", "solana": "solana",
+    "eth": "ethereum", "ethereum": "ethereum",
+    "bsc": "bsc", "bnb": "bsc", "bnbchain": "bsc", "binance-smart-chain": "bsc", "bnc": "bsc",
+    "base": "base", "arb": "arbitrum", "arb1": "arbitrum", "arbitrum": "arbitrum",
+    "polygon": "polygon", "matic": "polygon", "poly": "polygon",
+    "optimism": "optimism", "op": "optimism",
+    "avalanche": "avalanche", "avax": "avalanche",
+    "fantom": "fantom", "ftm": "fantom", "linea": "linea", "scroll": "scroll",
+    "zksync": "zksync", "zksync-era": "zksync", "blast": "blast", "mantle": "mantle",
+    "celo": "celo", "gnosis": "gnosis", "xdai": "gnosis", "cronos": "cronos",
+    "moonbeam": "moonbeam", "metis": "metis", "opbnb": "opbnb", "manta": "manta",
+    "mode": "mode", "zora": "zora", "sui": "sui", "ton": "ton", "tron": "tron",
+    "monad": "monad", "robinhood": "robinhood", "hyperevm": "hyperevm",
+}
+
+
+def canonical_chain(chain: str | None) -> str:
+    """Return the chain id used internally and by DexScreener endpoints."""
+    raw = str(chain or CHAIN).strip().lower()
+    return CHAIN_ALIASES.get(raw, raw)
+
+
 # GMGN's chain names -> DexScreener's chain ids (copy trading and long-term holds span chains).
-GMGN_TO_DEX = {"sol": "solana", "eth": "ethereum", "bsc": "bsc", "base": "base", "arbitrum": "arbitrum",
-               "hyperevm": "hyperevm", "robinhood": "robinhood", "monad": "monad", "tron": "tron"}
-DEX_TO_GMGN = {v: k for k, v in GMGN_TO_DEX.items()}
+GMGN_TO_DEX = {
+    "sol": "solana", "eth": "ethereum", "bsc": "bsc", "bnb": "bsc", "bnc": "bsc",
+    "base": "base", "arb": "arbitrum", "arbitrum": "arbitrum",
+    "polygon": "polygon", "optimism": "optimism", "avalanche": "avalanche",
+    "hyperevm": "hyperevm", "robinhood": "robinhood", "monad": "monad", "tron": "tron",
+    "fantom": "fantom", "linea": "linea", "scroll": "scroll", "zksync": "zksync",
+    "blast": "blast", "mantle": "mantle", "celo": "celo", "gnosis": "gnosis", "cronos": "cronos",
+    "moonbeam": "moonbeam", "metis": "metis", "opbnb": "opbnb", "manta": "manta", "mode": "mode",
+    "zora": "zora", "sui": "sui", "ton": "ton",
+}
+# Keep canonical GMGN spellings when aliases are present (otherwise the last alias, e.g. ``bnc``,
+# would accidentally be sent to the API for every BSC safety request).
+DEX_TO_GMGN = {v: k for k, v in GMGN_TO_DEX.items() if k not in {"bnb", "bnc", "arb"}}
 EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -67,7 +103,7 @@ def parse_pair(pair: dict[str, Any]) -> TokenSnapshot | None:
     chg = pair.get("priceChange") or {}
     created_ms = pair.get("pairCreatedAt")
     created = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc) if created_ms else None
-    chain = pair.get("chainId") or CHAIN
+    chain = canonical_chain(pair.get("chainId") or CHAIN)
     return TokenSnapshot(
         mint=norm_address(chain, base["address"]),
         chain=chain,
@@ -105,10 +141,13 @@ class DexScreenerClient:
         quote_symbols: Iterable[str] = ("SOL", "USDC"),
         client: httpx.Client | None = None,
         base_url: str = BASE_URL,
+        discovery_chains: Iterable[str] = (CHAIN,),
     ) -> None:
         self.quote_symbols = {s.upper() for s in quote_symbols}
         self.http = client or httpx.Client(timeout=15.0, headers={"Accept": "application/json"})
         self.base_url = base_url.rstrip("/")
+        self.discovery_chains = {canonical_chain(c) for c in discovery_chains}
+        self._discovered_chains: dict[str, str] = {}
 
     def _get(self, path: str) -> Any:
         resp = self.http.get(f"{self.base_url}{path}")
@@ -132,9 +171,15 @@ class DexScreenerClient:
             if isinstance(items, dict):  # some endpoints have wrapped results historically
                 items = items.get("data") or items.get("tokens") or []
             for item in items or []:
-                if item.get("chainId") == CHAIN and item.get("tokenAddress"):
-                    seen.setdefault(item["tokenAddress"], None)
+                chain = canonical_chain(item.get("chainId")) if item.get("chainId") else ""
+                address = norm_address(chain, str(item.get("tokenAddress") or ""))
+                if ("*" in self.discovery_chains or chain in self.discovery_chains) and address:
+                    seen.setdefault(address, None)
+                    self._discovered_chains[address] = chain
         return list(seen)
+
+    def chain_of(self, mint: str) -> str | None:
+        return self._discovered_chains.get(mint)
 
     def _pairs_for(self, mints: list[str]) -> list[dict[str, Any]]:
         chunks = [mints[i : i + TOKENS_PER_REQUEST] for i in range(0, len(mints), TOKENS_PER_REQUEST)]
@@ -165,7 +210,16 @@ class DexScreenerClient:
     def snapshots(self, mints: Iterable[str]) -> dict[str, TokenSnapshot]:
         wanted = list(dict.fromkeys(mints))
         best: dict[str, TokenSnapshot] = {}
-        for pair in self._pairs_for(wanted):
+        # Discovery records the chain for each mint. Keep the historic Solana path (which applies the
+        # configured quote allow-list) but fetch non-Solana mints through the chain-aware endpoint so
+        # BSC/BNB and every other DexScreener chain can be recorded and paper-traded too.
+        solana = [m for m in wanted if canonical_chain(self._discovered_chains.get(m)) == CHAIN]
+        other: dict[str, list[str]] = {}
+        for mint in wanted:
+            chain = canonical_chain(self._discovered_chains.get(mint))
+            if chain != CHAIN:
+                other.setdefault(chain, []).append(mint)
+        for pair in self._pairs_for(solana):
             snap = parse_pair(pair)
             if snap is None or snap.mint not in wanted:
                 continue
@@ -174,10 +228,13 @@ class DexScreenerClient:
             cur = best.get(snap.mint)
             if cur is None or snap.liquidity_usd > cur.liquidity_usd:
                 best[snap.mint] = snap
+        for chain, mints in other.items():
+            best.update(self.snapshots_on(chain, mints))
         return best
 
     def snapshots_on(self, chain: str, addresses: Iterable[str]) -> dict[str, TokenSnapshot]:
         """Most liquid pair per token on any chain DexScreener covers (any quote token)."""
+        chain = canonical_chain(chain)
         wanted = list(dict.fromkeys(norm_address(chain, a) for a in addresses))
         best: dict[str, TokenSnapshot] = {}
         for i in range(0, len(wanted), TOKENS_PER_REQUEST):

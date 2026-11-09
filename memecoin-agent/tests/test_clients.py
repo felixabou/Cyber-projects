@@ -4,7 +4,7 @@ import httpx
 import pytest
 import threading
 
-from memecoin_agent.data.dexscreener import USDC_MINT, WSOL_MINT, DexScreenerClient
+from memecoin_agent.data.dexscreener import USDC_MINT, WSOL_MINT, DexScreenerClient, canonical_chain
 from memecoin_agent.data.rugcheck import RugCheckClient
 
 
@@ -45,6 +45,27 @@ def test_dexscreener_discover_and_snapshots():
     assert set(snaps) == {"A"}  # C has no price
     assert snaps["A"].liquidity_usd == 90_000  # best pair with an allowed quote
     assert snaps["A"].buys_h1 == 200 and snaps["A"].pair_created_at.year == 2026
+
+
+def test_dexscreener_wildcard_discovery_normalizes_bnb_and_fetches_bsc_pairs():
+    address = "0x" + "ab" * 20
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/token-profiles/latest/v1":
+            return httpx.Response(200, json=[{"chainId": "bnb", "tokenAddress": address}])
+        if req.url.path in ("/token-boosts/latest/v1", "/token-boosts/top/v1"):
+            return httpx.Response(200, json=[])
+        if req.url.path == f"/tokens/v1/bsc/{address.lower()}":
+            return httpx.Response(200, json=[pair(address.lower(), quote="WBNB", chain="bsc", quote_addr="0x" + "cd" * 20)])
+        return httpx.Response(404)
+
+    client = DexScreenerClient(client=httpx.Client(transport=httpx.MockTransport(handler)), discovery_chains=("*",))
+    assert canonical_chain("bnb") == "bsc" and canonical_chain("bnc") == "bsc"
+    assert client.discover() == [address.lower()]
+    assert client.chain_of(address.lower()) == "bsc"
+    snap = client.snapshots_on("bnb", [address])[address.lower()]
+    assert snap.chain == "bsc" and snap.quote_symbol == "WBNB"
+    assert client.snapshots([address])[address.lower()].chain == "bsc"
 
 
 def test_dexscreener_discovery_requests_run_concurrently_in_source_order():

@@ -31,6 +31,7 @@ from .config import Config
 from .data import MarketData, SafetyChecker
 from .data.rugcheck import UNAVAILABLE
 from .models import utcnow
+from .strategy import lowcap_reasons
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +108,9 @@ class Recorder:
         self.market = market
         self.safety = safety if self.rc.record_safety else None
         self.wallet_scan = wallet_scan
+        # Real engine wiring passes the same scanner used by Agent.launch_scan. Keep the historical
+        # auto-construction for the opt-in sniper, but do not create a live RPC scanner implicitly for
+        # synthetic/offline recordings just because the low-cap lane is enabled by default.
         if self.wallet_scan is None and cfg.sniper.enabled and self.safety is not None:
             from .data.wallets import WalletScanner
 
@@ -167,17 +171,28 @@ class Recorder:
         self.writer.write(now, records)
 
     def _wallet_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
-        """Capture scans only for plausible early curve candidates; unresolved scans stay unknown."""
-        if self.wallet_scan is None or not self.cfg.sniper.enabled:
+        """Capture scans for plausible Solana early/low-cap candidates; unresolved scans stay unknown."""
+        if self.wallet_scan is None or not (self.cfg.sniper.enabled or self.cfg.lowcap.enabled):
             return []
-        c = self.cfg.sniper
-        eligible = [s for s in snaps.values() if (
-            s.age_minutes(now) is not None and 0 <= s.age_minutes(now) <= c.max_age_minutes
-            and s.chain == "solana" and s.liquidity_usd >= c.min_liquidity_usd
-            and c.min_market_cap_usd <= s.market_cap_usd <= c.max_market_cap_usd
-            and s.volume_h1 >= c.min_volume_h1_usd and s.txns_h1 >= c.min_txns_h1
-            and getattr(self.market, "is_pregraduation", lambda _: False)(s.mint)
-        )]
+        sniper = self.cfg.sniper
+        is_pregraduation = getattr(self.market, "is_pregraduation", lambda _: False)
+        eligible: list[Any] = []
+        for snap in snaps.values():
+            if snap.chain != "solana":
+                continue
+            age = snap.age_minutes(now)
+            if self.cfg.sniper.enabled and (
+                    age is not None and 0 <= age <= sniper.max_age_minutes
+                    and snap.liquidity_usd >= sniper.min_liquidity_usd
+                    and sniper.min_market_cap_usd <= snap.market_cap_usd <= sniper.max_market_cap_usd
+                    and snap.volume_h1 >= sniper.min_volume_h1_usd and snap.txns_h1 >= sniper.min_txns_h1
+                    and is_pregraduation(snap.mint)):
+                eligible.append(snap)
+                continue
+            # The low-cap lane uses the same Solana wallet scan as launches, but only after a token
+            # satisfies the cheap market-window rules. EVM low caps use ChainSafety instead.
+            if self.cfg.lowcap.enabled and not lowcap_reasons(snap, self.cfg.lowcap, self.cfg.filters, now):
+                eligible.append(snap)
         # Rotate requests so the oldest candidates do not monopolize a busy feed.
         eligible.sort(key=lambda s: (self._wallet_requested_at.get(s.mint, datetime.min.replace(tzinfo=now.tzinfo)),
                                      -(s.pair_created_at.timestamp() if s.pair_created_at else 0)))

@@ -563,8 +563,13 @@ function renderOverview(v) {
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
 }
 
-const LANE_LABELS = { copy: "Copy", longterm: "Long-term", manual: "Manual", launch: "Launch" };
-const CHAIN_LABELS = { solana: "SOL", ethereum: "ETH", bsc: "BSC", base: "Base", arbitrum: "ARB", robinhood: "Robinhood" };
+const LANE_LABELS = { copy: "Copy", lowcap: "Low cap", longterm: "Long-term", manual: "Manual", launch: "Launch" };
+const CHAIN_LABELS = {
+  solana: "SOL", ethereum: "ETH", bsc: "BSC", base: "Base", arbitrum: "ARB", polygon: "Polygon",
+  optimism: "OP", avalanche: "AVAX", fantom: "FTM", linea: "Linea", scroll: "Scroll", zksync: "zkSync",
+  blast: "Blast", mantle: "Mantle", celo: "Celo", gnosis: "Gnosis", cronos: "Cronos", monad: "Monad",
+  hyperevm: "HyperEVM", robinhood: "Robinhood", tron: "TRON", sui: "Sui", ton: "TON",
+};
 
 function positionPills(p) {
   const pills = [];
@@ -682,7 +687,8 @@ function renderScanner(v) {
     ? `Last scan ${ago(v.scan.at, v.now)} · ${all.length} candidates · ${passed} passed filters · scans every ${duration(v.scan.every_s / 60)}`
     : "No scan yet";
   replace($("#scan-table"), table([
-    { label: "Token", render: (c) => tokenCell(c.symbol, c.mint, c.url) },
+    { label: "Token", render: (c) => h("div", { class: "token-row" }, tokenCell(c.symbol, c.mint, c.url),
+      c.chain && c.chain !== "solana" ? h("span", { class: "pill pill-chain", text: CHAIN_LABELS[c.chain] || c.chain }) : null) },
     { label: "Score", num: true, render: (c) => num(c.score) },
     { label: "Liquidity", num: true, render: (c) => usd(c.liquidity_usd, { compact: true }) },
     { label: "Mkt cap", num: true, render: (c) => usd(c.market_cap_usd, { compact: true }) },

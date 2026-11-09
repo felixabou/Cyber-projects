@@ -291,6 +291,10 @@ class FeedAugmentedMarket:
                 self.feed.evict(mint)  # pool is dead; stop spending scan budget on it
         return snaps
 
+    def chain_of(self, mint: str) -> str | None:
+        chain_of = getattr(self.base, "chain_of", None)
+        return chain_of(mint) if chain_of is not None else "solana"
+
     def is_pregraduation(self, mint: str) -> bool:
         return self.feed.is_pregraduation(mint)
 

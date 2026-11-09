@@ -13,7 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .config import ExitConfig, FilterConfig, LaunchConfig
+from .config import ExitConfig, FilterConfig, LaunchConfig, LowCapConfig
+from .data.dexscreener import canonical_chain
 from .models import Position, TokenSnapshot
 
 
@@ -27,7 +28,7 @@ class EntryEvaluation:
     passed: bool
     score: float
     reasons: list[str]
-    lane: str = "momentum"  # launch and sniper are opt-in entry paths
+    lane: str = "momentum"  # launch, lowcap and sniper are separate entry paths
 
 
 @dataclass
@@ -114,9 +115,56 @@ def launch_reasons(s: TokenSnapshot, lc: LaunchConfig, f: FilterConfig, now: dat
     if s.liquidity_usd < lc.min_liquidity_usd:
         reasons.append(f"liquidity ${s.liquidity_usd:,.0f} < ${lc.min_liquidity_usd:,.0f}")
     if s.market_cap_usd < f.min_market_cap_usd:
-        reasons.append(f"low cap ${s.market_cap_usd:,.0f} (under ${f.min_market_cap_usd:,.0f} is the copy lane's)")
+        reasons.append(f"low cap ${s.market_cap_usd:,.0f} (handled by the low-cap or copy lane)")
     if lc.min_price_change_m5 is not None and s.price_change_m5 < lc.min_price_change_m5:
         reasons.append(f"crashing: {s.price_change_m5:+.0f}% in 5m")
+    return reasons
+
+
+def lowcap_reasons(s: TokenSnapshot, lc: LowCapConfig, f: FilterConfig, now: datetime) -> list[str]:
+    """Why a post-launch small token does not qualify for the controlled low-cap lane."""
+    reasons: list[str] = []
+    enabled_chains = {canonical_chain(c) for c in lc.chains}
+    if "*" not in enabled_chains and canonical_chain(s.chain) not in enabled_chains:
+        reasons.append(f"chain {s.chain} not enabled for the low-cap lane")
+    if s.mint in f.blacklist:
+        reasons.append("blacklisted")
+    quote_symbols = lc.quote_symbols if canonical_chain(s.chain) != "solana" else f.quote_symbols
+    if s.quote_symbol.upper() not in {q.upper() for q in quote_symbols}:
+        reasons.append(f"quote {s.quote_symbol} not allowed")
+    age = s.age_minutes(now)
+    if age is None:
+        reasons.append("unknown pair age")
+    else:
+        if age < lc.min_age_minutes:
+            reasons.append(f"age {age:.0f}m < {lc.min_age_minutes:.0f}m")
+        if age > lc.max_age_minutes:
+            reasons.append(f"age {age:.0f}m > {lc.max_age_minutes:.0f}m")
+    if not lc.min_market_cap_usd <= s.market_cap_usd < f.min_market_cap_usd:
+        reasons.append(f"mcap ${s.market_cap_usd:,.0f} outside low-cap range")
+    if s.market_cap_usd > lc.max_market_cap_usd:
+        reasons.append(f"mcap ${s.market_cap_usd:,.0f} > ${lc.max_market_cap_usd:,.0f}")
+    if s.liquidity_usd < lc.min_liquidity_usd:
+        reasons.append(f"liquidity ${s.liquidity_usd:,.0f} < ${lc.min_liquidity_usd:,.0f}")
+    if s.volume_h1 < lc.min_volume_h1_usd:
+        reasons.append(f"vol1h ${s.volume_h1:,.0f} < ${lc.min_volume_h1_usd:,.0f}")
+    if s.txns_h1 < lc.min_txns_h1:
+        reasons.append(f"txns1h {s.txns_h1} < {lc.min_txns_h1}")
+    if s.buy_sell_ratio_h1 < lc.min_buy_sell_ratio_h1:
+        reasons.append(f"b/s1h {s.buy_sell_ratio_h1:.2f} < {lc.min_buy_sell_ratio_h1:.2f}")
+    if s.buy_sell_ratio_m5 < lc.min_buy_sell_ratio_m5:
+        reasons.append(f"b/s5m {s.buy_sell_ratio_m5:.2f} < {lc.min_buy_sell_ratio_m5:.2f}")
+    if s.price_change_m5 < lc.min_price_change_m5:
+        reasons.append(f"chg5m {s.price_change_m5:+.1f}% < {lc.min_price_change_m5:+.1f}%")
+    if s.price_change_h1 < lc.min_price_change_h1:
+        reasons.append(f"chg1h {s.price_change_h1:+.1f}% < {lc.min_price_change_h1:+.1f}%")
+    if s.price_change_h1 > lc.max_price_change_h1:
+        reasons.append(f"chg1h {s.price_change_h1:+.1f}% too extended")
+    if s.volume_to_liquidity_h1 < lc.min_volume_to_liquidity_h1:
+        reasons.append(f"vol/liq {s.volume_to_liquidity_h1:.2f} < {lc.min_volume_to_liquidity_h1:.2f}")
+    score = momentum_score(s)
+    if score < lc.min_score:
+        reasons.append(f"score {score:.2f} < {lc.min_score:.2f}")
     return reasons
 
 

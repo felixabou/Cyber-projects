@@ -2,9 +2,10 @@
 
 An automated trading agent for memecoins. Its main lane finds new Solana tokens on
 DexScreener, screens out obvious rugs, enters tokens with real liquidity and steady buy
-pressure, takes its initial stake out early and lets the rest run. Two more lanes reach
-every chain GMGN and DexScreener cover: a **copy lane** buys low caps only when tracked
-wallets buy them, and a **long-term lane** holds old, worn-down coins that still trade
+pressure, takes its initial stake out early and lets the rest run. Separate lanes handle
+controlled low-cap entries, pre-graduation snipes, tracked-wallet copies, and long-term
+holds across the chains GMGN and DexScreener cover. The **copy lane** buys low caps only
+when tracked wallets buy them, and the **long-term lane** holds old, worn-down coins that still trade
 daily. You can also **paper-trade any token yourself** from the dashboard. It **paper trades
 by default**. Live trading goes through Jupiter (Solana only) and has to be switched on explicitly.
 
@@ -33,7 +34,7 @@ Each tick (10s by default):
      - 1h volume, transaction count and volume/liquidity turnover;
      - buy/sell ratio over 5m and 1h;
      - positive 5m/1h momentum, but not already parabolic (>250% in 1h).
-   - Low caps (under $150k) are left to the [copy lane](#copy-lane-low-caps-only-when-tracked-wallets-buy).
+   - Low caps below the normal $150k floor use the controlled [`lowcap:` lane](#low-cap-lane), or the copy lane when a tracked wallet buys them.
    - Rank the survivors by a 0–1 momentum score.
    - Run RugCheck on each one. A danger-level risk (live mint or freeze authority, unlocked LP, concentrated holders…) or a high risk score rejects the token. If RugCheck can't be reached, the token is rejected.
    - **Live only:** quote the buy, then quote selling the tokens straight back. Skip the token if that round trip loses more than 12%. This catches honeypots and thin routes.
@@ -295,11 +296,33 @@ out, but it loses more on coins that keep falling. Taking the initials at +25% d
 −$200. Every number is under `exits:` in [`config.example.yaml`](config.example.yaml);
 `style: classic` brings back the old stop loss, take-profit levels and trailing stop.
 
+## Low-cap lane
+
+The default configuration includes a controlled post-launch low-cap lane for tokens on every chain
+DexScreener can discover, including BSC/BNB (the internal id is `bsc`). It accepts market caps between
+$25k and $150k, waits until a pool is at least 20 minutes old, requires $15k liquidity, $15k in 1-hour
+volume, 100 transactions, buy pressure, and a non-parabolic chart. Each low-cap entry is capped at $25
+and counts toward the normal six entries per hour and daily loss limits. Set `lowcap.chains` to an
+explicit list if you do not want wildcard discovery.
+
+Solana low-cap candidates must pass the wallet scan before the paid or external safety checks. They then go
+through the same profile and fake-chart checks, RugCheck, Jupiter token checks, GMGN checks when configured,
+LarpCheck, sell-back route check, and executor preflight as the other automated lanes. EVM/other-chain
+candidates use the chain-specific GMGN or GoPlus honeypot/tax check; a missing verdict fails closed. The
+paper executor can model every discovered chain. Live execution remains explicitly Solana-only until a
+chain executor is configured, so a BSC candidate is skipped rather than risking a wrong-chain swap.
+Change the thresholds or set `lowcap.enabled: false` in your config to turn this lane off.
+
+The low-cap lane is deliberately separate from momentum: a token below the normal market-cap floor does
+not bypass safety checks just because it has activity. The pre-graduation sniper and tracked-wallet copy
+lanes remain separate entry paths with their own limits.
+
 ## Copy lane: low caps only when tracked wallets buy
 
-The agent's own low-cap buys lost: entries under $150k market cap won 9 of 29 trades (−$261), while
-$150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer buy under
-`filters.min_market_cap_usd` ($150k), and low caps come only from wallets worth following:
+The historical agent data showed weaker results from unrestricted low-cap entries, so the normal momentum
+and launch lanes still stop at `filters.min_market_cap_usd` ($150k). The controlled low-cap lane above
+handles ordinary small-cap candidates; this copy lane remains the stricter path that requires a wallet
+worth following:
 
 - **Finding wallets** (every 6 hours, on `copy.chains`: Solana, BSC, Base, Ethereum, Robinhood):
   addresses from GMGN's smart-money and KOL trade feeds and the top traders of each chain's trending
@@ -320,7 +343,8 @@ $150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer bu
   GMGN, LarpCheck and the sell-back quote; other chains get GMGN's (or GoPlus's) honeypot and tax
   check. Other chains are paper-only.
 
-It needs a GMGN API key. Without one the copy lane is off and the agent buys no low caps.
+It needs a GMGN API key. Without one the copy lane is off; the separate low-cap lane does not require GMGN,
+but still fails closed on the wallet scan and the configured safety checks.
 
 ## Long-term lane
 

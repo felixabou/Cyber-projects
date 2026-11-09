@@ -123,6 +123,52 @@ def test_sniper_replay_requires_a_recorded_wallet_scan(tmp_path):
     assert run_backtest(cfg, late_wallet).trades[0].time == NOW + timedelta(seconds=5)
 
 
+def test_recorder_captures_lowcap_wallet_scans_for_replay(tmp_path):
+    cfg = Config()
+    cfg.sniper.enabled = False
+    low = make_snap(mint="LOW", market_cap_usd=80_000, liquidity_usd=20_000, volume_h1=30_000,
+                    pair_created_at=NOW - timedelta(minutes=45))
+
+    class Market:
+        def discover(self):
+            return ["LOW"]
+
+        def snapshots(self, mints):
+            return {"LOW": low}
+
+        def is_pregraduation(self, mint):
+            return False
+
+    class Safety:
+        def check(self, mint):
+            return SafetyReport(True, 1.0, [])
+
+    class Wallet:
+        def check(self, mint):
+            return SafetyReport(True, 0.0, [])
+
+        def result(self, mint):
+            return WalletScan(mint=mint, scanned_at=0.0, bundle_bought_pct=5.0, top10_pct=20.0)
+
+    Recorder(cfg, Market(), Safety(), RecordingWriter(tmp_path), clock=SimClock(NOW), wallet_scan=Wallet()).tick()
+    records = list(read_recordings(tmp_path))
+    assert any(r["type"] == "wallet" and r["mint"] == "LOW" for r in records)
+    res = run_backtest(cfg, records)
+    assert [t.side for t in res.trades] == ["buy", "sell"]
+
+
+def test_lowcap_bsc_replay_uses_chain_snapshot_and_safety(tmp_path):
+    cfg = Config()
+    address = "0x" + "ab" * 20
+    records = [disc(NOW, [address]), snap_rec(NOW, mint=address, chain="bsc", quote_symbol="WBNB",
+                                                market_cap_usd=80_000, liquidity_usd=20_000,
+                                                volume_h1=30_000, pair_created_at=NOW - timedelta(minutes=45)),
+               safe(NOW, address)]
+    res = run_backtest(cfg, records)
+    assert [t.side for t in res.trades] == ["buy", "sell"]
+    assert res.closed[0].mint == address and res.closed[0].exit_reason == "end of backtest"
+
+
 def test_backtest_trades_only_on_information_available_at_the_time():
     cfg = Config()
     cfg.agent.tick_seconds = 15

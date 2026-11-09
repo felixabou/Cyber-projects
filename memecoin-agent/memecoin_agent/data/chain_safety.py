@@ -14,7 +14,7 @@ from typing import Any, Callable
 import httpx
 
 from ..models import SafetyReport
-from .dexscreener import DEX_TO_GMGN
+from .dexscreener import DEX_TO_GMGN, canonical_chain
 from .gmgn import GmgnClient, GmgnError, _f, _truthy
 
 log = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ class ChainSafety:
 
     def check(self, chain: str, address: str) -> SafetyReport:
         """chain: DexScreener's chain id."""
+        chain = canonical_chain(chain)
         hit = self._cache.get((chain, address))
         if hit and hit[0] > self.clock():
             return hit[1]
@@ -92,3 +93,4 @@ class ChainSafety:
             except (httpx.HTTPError, ValueError, AttributeError) as exc:
                 log.info("GoPlus for %s on %s unavailable: %s", address, chain, exc)
         return SafetyReport(ok=not self.fail_closed, score=None, reasons=[NO_CHECK] if self.fail_closed else [])
+

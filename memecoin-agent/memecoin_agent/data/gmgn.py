@@ -28,6 +28,7 @@ import httpx
 
 from ..config import FilterConfig, GmgnConfig
 from ..models import SafetyReport, TokenSnapshot
+from .dexscreener import DEX_TO_GMGN, GMGN_TO_DEX, canonical_chain, norm_address
 
 log = logging.getLogger(__name__)
 
@@ -202,15 +203,30 @@ class GmgnClient:
 
 
 class GmgnDiscovery:
-    """Trending Solana tokens, pre-filtered server-side to the agent's own entry window."""
+    """Trending tokens across configured GMGN chains, pre-filtered to the entry window."""
 
     def __init__(self, cfg: GmgnConfig, filters: FilterConfig, client: GmgnClient,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 chains: Iterable[str] = (CHAIN,)) -> None:
         self.cfg = cfg
         self.client = client
         self.clock = clock
         self._next = 0.0
         self._last: list[str] = []
+        # Config accepts either GMGN names (``sol``, ``bsc``) or user-facing aliases (``bnb``,
+        # ``eth``). GMGN itself needs the canonical short names on the request.
+        self._chains = []
+        for value in chains:
+            raw = str(value).strip().lower()
+            if raw == "*":
+                # GMGN has no wildcard endpoint; the configured list is still the authoritative
+                # set for this source. DexScreener discovery remains wildcard-capable.
+                continue
+            dex_chain = canonical_chain(raw)
+            gmgn_chain = DEX_TO_GMGN.get(dex_chain, raw)
+            if gmgn_chain not in self._chains:
+                self._chains.append(gmgn_chain)
+        self._chain_by_mint: dict[str, str] = {}
         self.params: dict[str, Any] = {
             "limit": cfg.trending_limit,
             "order_by": cfg.trending_order_by,
@@ -230,13 +246,27 @@ class GmgnDiscovery:
         if now < self._next:
             return list(self._last)  # between refreshes, keep offering the last trending set
         self._next = now + self.cfg.discover_every_s
-        try:
-            rows = self.client.trending(self.cfg.trending_interval, self.params)
-        except (httpx.HTTPError, GmgnError) as exc:
-            log.warning("GMGN trending failed: %s", exc)
-            return list(self._last)
-        self._last = list(dict.fromkeys(str(r["address"]) for r in rows if r.get("address")))
+        found: list[str] = []
+        for chain in self._chains:
+            try:
+                rows = self.client.trending(self.cfg.trending_interval, self.params, chain=chain)
+            except (httpx.HTTPError, GmgnError) as exc:
+                log.warning("GMGN trending failed on %s: %s", chain, exc)
+                continue
+            dex_chain = GMGN_TO_DEX.get(chain, chain)
+            for row in rows:
+                address = str(row.get("address") or "")
+                if address:
+                    address = norm_address(dex_chain, address)
+                    if address not in found:
+                        found.append(address)
+                    self._chain_by_mint[address] = dex_chain
+        if found:
+            self._last = found
         return list(self._last)
+
+    def chain_of(self, mint: str) -> str | None:
+        return self._chain_by_mint.get(mint)
 
 
 class ExtraDiscoveryMarket:
@@ -258,6 +288,16 @@ class ExtraDiscoveryMarket:
         except Exception as exc:
             log.warning("Base discovery failed: %s", exc)
         return list(dict.fromkeys(found))
+
+    def chain_of(self, mint: str) -> str | None:
+        for source in self.sources:
+            chain_of = getattr(source, "chain_of", None)
+            if chain_of is not None:
+                chain = chain_of(mint)
+                if chain:
+                    return chain
+        chain_of = getattr(self.base, "chain_of", None)
+        return chain_of(mint) if chain_of is not None else None
 
     def snapshots(self, mints: Iterable[str]) -> dict[str, TokenSnapshot]:
         return self.base.snapshots(mints)
@@ -357,3 +397,4 @@ class GmgnSafety:
         # Holder structure moves fast on young coins: keep verdicts briefly.
         self._cache[mint] = (self.clock() + (900 if not report.ok else 300), report)
         return report
+

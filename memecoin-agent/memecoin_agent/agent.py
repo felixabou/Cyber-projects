@@ -12,11 +12,12 @@ from typing import Any, Callable
 
 from .config import Config
 from .data import MarketData, SafetyChecker
+from .data.dexscreener import canonical_chain
 from .execution import Executor
 from .models import TokenSnapshot, TradeRecord, utcnow
 from .portfolio import Portfolio
 from .risk import RiskManager
-from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit, launch_reasons
+from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit, launch_reasons, lowcap_reasons
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class Agent:
     # -- exits ----------------------------------------------------------------------
     def chain_of(self, mint: str) -> str:
         pos = self.pf.positions.get(mint)
-        return pos.chain if pos is not None else self.chains.get(mint, "solana")
+        return canonical_chain(pos.chain if pos is not None else self.chains.get(mint, "solana"))
 
     def _fetch(self, mints: list[str], any_quote: bool = False) -> dict[str, TokenSnapshot]:
         """Snapshots for Solana mints from the market (with its discovery wrappers), and for tokens on
@@ -159,7 +160,7 @@ class Agent:
             return {}
         groups: dict[tuple[str, bool], list[str]] = {}
         for m in mints:
-            chain, pos = self.chain_of(m), self.pf.positions.get(m)
+            chain, pos = canonical_chain(self.chain_of(m)), self.pf.positions.get(m)
             loose = chain == "solana" and (any_quote or (pos is not None and pos.lane in ANY_QUOTE_LANES))
             groups.setdefault((chain, loose), []).append(m)
         out: dict[str, TokenSnapshot] = {}
@@ -288,6 +289,12 @@ class Agent:
                     discovered = [*self.newscheck.discover(now), *discovered]
                 except Exception as exc:
                     self._newscheck_failed(exc)
+        chain_of = getattr(self.market, "chain_of", None)
+        if chain_of is not None:
+            for mint in discovered:
+                chain = chain_of(mint)
+                if chain:
+                    self.chains[mint] = canonical_chain(chain)
         self._nc_scan.clear()
         mints = [m for m in dict.fromkeys([*f.watchlist, *discovered])
                  if m not in f.blacklist and not self.risk.token_blocked(self.pf, m, now)]
@@ -303,6 +310,8 @@ class Agent:
             else:
                 if not ev.passed and self.cfg.launch.enabled:
                     ev = self._launch_lane(ev, now) or ev
+                if not ev.passed and self.cfg.lowcap.enabled:
+                    ev = self._lowcap_lane(ev, now) or ev
                 if not ev.passed and self.newscheck is not None:
                     ev = self._narrative_lane(ev, now) or ev
             evals.append(ev)
@@ -315,7 +324,8 @@ class Agent:
         if self.cfg.sniper.enabled:
             priority = {"sniper": 2, "launch": 1}
             return sorted(evals, key=lambda e: (e.passed, priority.get(e.lane, 0), e.score), reverse=True)
-        return sorted(evals, key=lambda e: (e.passed, e.lane == "launch", e.score), reverse=True)
+        priority = {"launch": 3, "lowcap": 2, "narrative": 1}
+        return sorted(evals, key=lambda e: (e.passed, priority.get(e.lane, 0), e.score), reverse=True)
 
     def _cached_story_discovery(self, now: datetime) -> list[str]:
         with self._story_discovery_lock:
@@ -382,6 +392,13 @@ class Agent:
         return EntryEvaluation(snapshot=s, passed=True, score=evaluate_entry(s, f, now).score,
                                reasons=[], lane="sniper")
 
+    def _lowcap_lane(self, ev: EntryEvaluation, now: datetime) -> EntryEvaluation | None:
+        """Controlled post-launch entry below the normal momentum market-cap floor."""
+        c, f, s = self.cfg.lowcap, self.cfg.filters, ev.snapshot
+        if not c.enabled or lowcap_reasons(s, c, f, now):
+            return None
+        return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="lowcap")
+
     # -- narrative lane (NewsCheck) -----------------------------------------------------------------
     def _newscheck_failed(self, exc: Exception) -> None:
         code = getattr(exc, "status", None)
@@ -440,7 +457,7 @@ class Agent:
 
     def _narrative_block(self, snap: TokenSnapshot, now: datetime) -> str | None:
         """Why the coin's story rules it out (None: buy it)."""
-        if self.newscheck is None or not self.cfg.narrative.enabled:
+        if snap.chain != "solana" or self.newscheck is None or not self.cfg.narrative.enabled:
             return None
         verdict = self._story(snap, now)
         if verdict is None:
@@ -473,6 +490,8 @@ class Agent:
     def _needs_wallet_scan(self, ev: EntryEvaluation, now: datetime) -> bool:
         if ev.lane in ("launch", "narrative", "sniper"):
             return True
+        if ev.lane == "lowcap":
+            return ev.snapshot.chain == "solana"
         f, s = self.cfg.filters, ev.snapshot
         age = s.age_minutes(now)
         return (age is not None and age < f.wallet_scan_below_age_minutes) or s.market_cap_usd < f.wallet_scan_below_market_cap_usd
@@ -497,11 +516,12 @@ class Agent:
         res = self.launch_scan.result(snap.mint)
         summary = res.summary() if res else "wallet scan passed"
         return True, (f"launch lane: ${snap.volume_h1:,.0f} volume; {summary}" if lane == "launch"
+                      else "low-cap wallet scan passed" if lane == "lowcap"
                       else f"early buy: {summary}")
 
     def _profile_check(self, snap: TokenSnapshot, now: datetime) -> tuple[Any, str | None]:
         """(profile, why not): tech vs meme, then the fake-chart check. Free; before any paid check."""
-        if self.profiler is None:
+        if snap.chain != "solana" or self.profiler is None:
             return None, None
         from .data.profile import authenticity_reasons
 
@@ -583,7 +603,16 @@ class Agent:
                 outcomes[snap.mint] = blocked
                 log.info("Skip %s: %s", snap.symbol, blocked)
                 continue
-            report = self.safety.check(snap.mint)
+            if snap.chain == "solana":
+                report = self.safety.check(snap.mint)
+            elif self.cfg.execution.mode == "live":
+                outcomes[snap.mint] = f"skipped: live trading is Solana-only ({snap.chain} needs a chain executor)"
+                continue
+            elif self.chain_safety is None:
+                outcomes[snap.mint] = f"unsafe: no honeypot check available on {snap.chain}"
+                continue
+            else:
+                report = self.chain_safety.check(snap.chain, snap.mint)
             if not report.ok:
                 outcomes[snap.mint] = "unsafe: " + "; ".join(report.reasons)
                 log.info("Skip %s: %s", snap.symbol, "; ".join(report.reasons))
@@ -594,7 +623,12 @@ class Agent:
                 break
             if ev.lane == "sniper":
                 size = min(size, self.cfg.sniper.max_position_usd)
-            if self.route_check is not None and ev.lane != "sniper" \
+            elif ev.lane == "lowcap":
+                size = min(size, self.cfg.lowcap.max_position_usd)
+                if size < self.cfg.risk.min_position_usd:
+                    outcomes[snap.mint] = "skipped: low-cap position cap is below the risk minimum"
+                    continue
+            if self.route_check is not None and snap.chain == "solana" and ev.lane != "sniper" \
                     and (why := self.route_check.check(snap.mint, size)):
                 outcomes[snap.mint] = "unsafe: " + why
                 log.info("Skip %s: %s", snap.symbol, why)
@@ -616,6 +650,8 @@ class Agent:
                 note = f"narrative: {self._nc_notes.get(snap.mint, 'strong story')}" + (f" | {note}" if note else "")
             elif ev.lane == "sniper":
                 note = "Pump.fun bonding-curve entry via PumpPortal" + (f" | {note}" if note else "")
+            elif ev.lane == "lowcap":
+                note = "low-cap lane" + (f" | {note}" if note else "")
             pos = self.pf.open(snap, fill, now, ev.score, reason=note, lane=ev.lane)
             pos.kind = prof.kind if prof else ""
             if self.analytics is not None:
@@ -712,7 +748,7 @@ class Agent:
             if self.risk.token_blocked(self.pf, mint, now) or mint in f.blacklist:
                 tracker.consume(sig.chain, sig.token)
                 continue
-            self.chains[mint] = chain
+            self.chains[mint] = canonical_chain(chain)
             pending.append((sig, chain, mint))
         if not pending:
             return
@@ -772,7 +808,7 @@ class Agent:
             if block := self._entry_block_reason(now, "longterm"):
                 self._lane_note(now, "longterm", v.symbol, v.chain, v.address, f"waiting: {block}")
                 return
-            self.chains[v.address] = v.chain
+            self.chains[v.address] = canonical_chain(v.chain)
             snap = self._fetch([v.address], any_quote=True).get(v.address)
             if snap is None:
                 continue
@@ -804,7 +840,7 @@ class Agent:
         chain = (chain or "solana").strip().lower()
         mint = norm_address(chain, address)
         if mint not in self.pf.positions:  # a held token keeps the chain it was bought on
-            self.chains[mint] = chain
+            self.chains[mint] = canonical_chain(chain)
         snap = self._fetch([mint], any_quote=True).get(mint)
         if snap is None:
             raise ValueError(f"No market data for that token on {chain}")
@@ -895,7 +931,7 @@ class Agent:
         self.last_scan_at = now
         self.last_scan = [
             {
-                "mint": e.snapshot.mint, "symbol": e.snapshot.symbol, "url": e.snapshot.url,
+                "mint": e.snapshot.mint, "symbol": e.snapshot.symbol, "chain": e.snapshot.chain, "url": e.snapshot.url,
                 "score": e.score, "passed": e.passed, "reasons": e.reasons, "lane": e.lane,
                 "kind": self.kinds.get(e.snapshot.mint),
                 "volume_h1": e.snapshot.volume_h1,
