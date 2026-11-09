@@ -143,6 +143,19 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
 
 Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
 
+## Scan log: data to tune the filters on
+
+Every coin the agent scans (not just the ones it buys) is written to `state/scans.csv` when it has been followed for
+4 hours: its features when first seen (age, market cap, liquidity, volume, buy/sell ratio, score), whether it passed the
+filters, why it was rejected or skipped, and what the price and liquidity did 15 minutes, 1 hour and 4 hours later, the
+best and worst it got, and whether it rugged (liquidity down 80% or the coin gone). Pending coins are saved in
+`state/scans_pending.json`, so a restart loses nothing.
+
+`memecoin-agent scans` prints what the data says: how coins did by what the agent did with them, **which filter blocks the
+most coins that later ran** (high "runners" on a rejection reason means that filter costs winners), which let rugs
+through, and results by age, market cap, liquidity, score and buy/sell ratio. It needs about a day to fill in. Tune the
+filters on this, not on a few dozen trades. Turn it off with `agent.scan_log: false`.
+
 ## Narrative lane (NewsCheck)
 
 [NewsCheck](https://newscheck.app) reads X, the chain, the coin's site and the news, and writes why a coin is moving.

@@ -232,7 +232,14 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         else:
             log.info("Narrative lane off: no NewsCheck key (free at newscheck.app/developers; set NEWSCHECK_API_KEY "
                      "or put it in %s)", cfg.narrative.api_key_file)
-    return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, guard=guard, launch_scan=launch_scan, analytics=analytics,
+    scanlog = None
+    if cfg.agent.scan_log and cfg.agent.scan_log_file:
+        from .scanlog import ScanLog
+
+        scanlog = ScanLog(cfg.agent.scan_log_file)
+        log.info("Scan log on: every scanned coin is followed for 4 hours (%s); read it with `memecoin-agent scans`",
+                 cfg.agent.scan_log_file)
+    return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
@@ -379,6 +386,12 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> None:
 
     state = Path(cfg.agent.state_file).parent
     print(build_report(args.trades or cfg.agent.trades_csv, state / "entries.csv", state / "after_exit.csv"))
+
+
+def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
+    from .scanlog import build_scan_report
+
+    print(build_scan_report(args.file or cfg.agent.scan_log_file or "state/scans.csv"))
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
@@ -573,6 +586,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. a downloaded slice (default: agent.trades_csv)")
     p.set_defaults(func=cmd_report)
 
+    p = sub.add_parser("scans", help="what the scan-everything log says: which filters block winners, which let rugs through")
+    p.add_argument("--file", default=None, help="a scans.csv (default: agent.scan_log_file)")
+    p.set_defaults(func=cmd_scans)
+
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)
     sub.add_parser("close-all", help="sell every open position now").set_defaults(func=cmd_close_all)
 
@@ -601,7 +618,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
-    offline = args.command in ("status", "demo", "backtest", "report") or getattr(args, "synthetic", False)
+    offline = args.command in ("status", "demo", "backtest", "report", "scans") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
@@ -609,7 +626,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in ("run", "ui"):
         # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
         signal.signal(signal.SIGTERM, _raise_interrupt)
-    quiet = args.command in ("status", "scan", "demo", "backtest", "report") or (args.command == "record" and args.synthetic)
+    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)
