@@ -94,6 +94,7 @@ def young(**kw):
 def agent_with(snaps, rundowns, **cfg_kw):
     cfg = Config()
     cfg.launch.enabled = False
+    cfg.lowcap.enabled = False  # keep this fixture focused on the narrative lane
     for k, v in cfg_kw.items():
         setattr(cfg.narrative, k, v)
     nc, _, _ = client(rundowns)
@@ -129,3 +130,5 @@ def test_require_rundown():
     agent2 = agent_with([make_snap(mint="GOOD")], {})
     agent2.scan_and_enter(NOW)
     assert "GOOD" in agent2.pf.positions  # no rundown is not a reason to refuse
+
+
