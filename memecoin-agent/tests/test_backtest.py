@@ -23,8 +23,9 @@ def disc(t, mints):
     return {"type": "discover", "t": t.isoformat(), "mints": mints}
 
 
-def safe(t, mint, ok=True):
-    return {"type": "safety", "t": t.isoformat(), "mint": mint, "ok": ok, "score": 5, "reasons": [] if ok else ["x"]}
+def safe(t, mint, ok=True, chain="solana"):
+    return {"type": "safety", "t": t.isoformat(), "chain": chain, "mint": mint, "ok": ok,
+            "score": 5, "reasons": [] if ok else ["x"]}
 
 
 # -- storage ----------------------------------------------------------------------------
@@ -163,10 +164,44 @@ def test_lowcap_bsc_replay_uses_chain_snapshot_and_safety(tmp_path):
     records = [disc(NOW, [address]), snap_rec(NOW, mint=address, chain="bsc", quote_symbol="WBNB",
                                                 market_cap_usd=80_000, liquidity_usd=20_000,
                                                 volume_h1=30_000, pair_created_at=NOW - timedelta(minutes=45)),
-               safe(NOW, address)]
+               safe(NOW, address, chain="bsc")]
     res = run_backtest(cfg, records)
     assert [t.side for t in res.trades] == ["buy", "sell"]
     assert res.closed[0].mint == address and res.closed[0].exit_reason == "end of backtest"
+
+
+def test_recorder_records_non_solana_safety_for_replay(tmp_path):
+    cfg = Config()
+    address = "0x" + "ef" * 20
+    snap = make_snap(mint=address, chain="bsc", quote_symbol="WBNB", market_cap_usd=80_000,
+                     liquidity_usd=20_000, volume_h1=30_000, pair_created_at=NOW - timedelta(minutes=45))
+
+    class Market:
+        def discover(self):
+            return [address]
+
+        def snapshots(self, mints):
+            return {address: snap}
+
+    class SolanaSafety:
+        def check(self, mint):
+            raise AssertionError("EVM snapshot was sent to Solana safety")
+
+    class ChainSafety:
+        def __init__(self):
+            self.calls = []
+
+        def check(self, chain, mint):
+            self.calls.append((chain, mint))
+            return SafetyReport(True, 1.0, [])
+
+    chain_safety = ChainSafety()
+    Recorder(cfg, Market(), SolanaSafety(), RecordingWriter(tmp_path), clock=SimClock(NOW),
+             chain_safety=chain_safety).tick()
+    records = list(read_recordings(tmp_path))
+    safety = next(r for r in records if r["type"] == "safety")
+    assert safety["chain"] == "bsc" and chain_safety.calls == [("bsc", address)]
+    assert [t.side for t in run_backtest(cfg, records).trades] == ["buy", "sell"]
 
 
 def test_backtest_trades_only_on_information_available_at_the_time():
@@ -277,4 +312,5 @@ def test_apply_override_validation():
     for bad in ("filters.min_scroe=1", "nosection.x=1", "filters", "exits.stop_loss_pct=150"):
         with pytest.raises(ValueError):
             apply_override(cfg, bad)
+
 

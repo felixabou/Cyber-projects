@@ -102,11 +102,15 @@ class Recorder:
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], None] = time.sleep,
         wallet_scan: Any | None = None,
+        chain_safety: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.rc = cfg.recorder
         self.market = market
         self.safety = safety if self.rc.record_safety else None
+        # Solana RugCheck and the EVM/other-chain honeypot checker have different call
+        # signatures. Keep both so replay can preserve a real verdict for every chain.
+        self.chain_safety = chain_safety if self.rc.record_safety else None
         self.wallet_scan = wallet_scan
         # Real engine wiring passes the same scanner used by Agent.launch_scan. Keep the historical
         # auto-construction for the opt-in sniper, but do not create a live RPC scanner implicitly for
@@ -120,7 +124,7 @@ class Recorder:
         self.sleep = sleep
         self.tracked: dict[str, datetime] = {}  # mint -> stop tracking at
         self.seen: dict[str, datetime] = {}  # mint -> first seen; never re-track an expired mint
-        self.safety_done: set[str] = set()
+        self.safety_done: set[tuple[str, str]] = set()
         self._wallet_requested_at: dict[str, datetime] = {}
         self.ticks = 0
         self.started_at: datetime | None = None
@@ -230,18 +234,26 @@ class Recorder:
         return out
 
     def _safety_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
-        if self.safety is None:
+        if self.safety is None and self.chain_safety is None:
             return []
         out = []
         # Only tokens that could plausibly pass a liquidity filter; RugCheck isn't free to hammer.
         floor = self.cfg.filters.min_liquidity_usd * 0.5
-        todo = [m for m, s in snaps.items() if m not in self.safety_done and s.liquidity_usd >= floor]
-        for mint in todo[:10]:
-            rep = self.safety.check(mint)
+        todo = [(m, s) for m, s in snaps.items()
+                if (s.chain, m) not in self.safety_done and s.liquidity_usd >= floor]
+        for mint, snap in todo[:10]:
+            if snap.chain == "solana":
+                if self.safety is None:
+                    continue
+                rep = self.safety.check(mint)
+            else:
+                if self.chain_safety is None:
+                    continue
+                rep = self.chain_safety.check(snap.chain, mint)
             if rep.reasons == [UNAVAILABLE]:
                 continue  # retry next tick rather than recording an outage as a verdict
-            self.safety_done.add(mint)
-            out.append({"type": "safety", "t": now.isoformat(), "mint": mint,
+            self.safety_done.add((snap.chain, mint))
+            out.append({"type": "safety", "t": now.isoformat(), "chain": snap.chain, "mint": mint,
                         "ok": rep.ok, "score": rep.score, "reasons": rep.reasons})
         return out
 
@@ -261,4 +273,5 @@ class Recorder:
                 self.sleep(max(0.0, self.rc.interval_s - (time.monotonic() - started)))
         except KeyboardInterrupt:
             log.info("Recorder stopped.")
+
 

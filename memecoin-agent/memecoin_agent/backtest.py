@@ -44,7 +44,7 @@ class ReplayMarket:
         self.chains: dict[str, str] = {}
         self.pregraduation: set[str] = set()
         self.discovered: list[str] = []
-        self.safety: dict[str, SafetyReport] = {}
+        self.safety: dict[tuple[str, str], SafetyReport] = {}
         self.wallets: dict[str, tuple[datetime, WalletScan]] = {}
         self.records_read = 0
         self.exhausted = False
@@ -76,7 +76,9 @@ class ReplayMarket:
             elif kind == "discover":
                 self.discovered = list(rec.get("mints") or [])
             elif kind == "safety":
-                self.safety[rec["mint"]] = SafetyReport(bool(rec["ok"]), rec.get("score"), list(rec.get("reasons") or []))
+                chain = canonical_chain(rec.get("chain", "solana"))
+                self.safety[(chain, rec["mint"])] = SafetyReport(
+                    bool(rec["ok"]), rec.get("score"), list(rec.get("reasons") or []))
             elif kind == "wallet":
                 data = dict(rec["scan"])
                 launched_at = data.get("launched_at")
@@ -120,10 +122,10 @@ class ReplaySafety:
 
     def check(self, mint: str, address: str | None = None) -> SafetyReport:
         # Agent.scan_and_enter calls chain safety as (chain, address) for non-Solana candidates;
-        # replay has one verdict store, so the chain value is intentionally ignored.
-        if address is not None:
-            mint = address
-        rep = self.market.safety.get(mint)
+        # use the recorded chain as part of the key. Old recordings omitted it and default to Solana.
+        chain = canonical_chain(mint) if address is not None else "solana"
+        address = address if address is not None else mint
+        rep = self.market.safety.get((chain, address))
         if rep is not None:
             return rep
         return SafetyReport(ok=self.assume_safe, score=None, reasons=[] if self.assume_safe else [UNAVAILABLE])
@@ -252,4 +254,5 @@ def format_report(res: BacktestResult) -> str:
         lines.append("  Worst / best    " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[:3])
                      + "  |  " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[-3:][::-1]))
     return "\n".join(lines)
+
 

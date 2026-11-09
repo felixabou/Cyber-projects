@@ -299,7 +299,7 @@ class Engine:
             record=record, max_ticks=getattr(args, "max_ticks", None),
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
                                            RecordingWriter(cfg.recorder.dir), clock=agent.clock,
-                                           wallet_scan=agent.launch_scan),
+                                           wallet_scan=agent.launch_scan, chain_safety=agent.chain_safety),
         )
         self.bot = build_telegram(cfg, self.runner)
         if self.bot is not None:
@@ -419,7 +419,8 @@ def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
         Recorder(cfg, market, SyntheticSafety(market), writer, clock=clock, sleep=advance).run(args.hours or 12)
         print(f"Wrote {writer.records_written:,} synthetic records to {writer.dir}")
         return
-    market, feed = build_market(cfg, gmgn=build_gmgn(cfg))
+    gmgn = build_gmgn(cfg)
+    market, feed = build_market(cfg, gmgn=gmgn)
     if feed is not None:
         feed.start()
     try:
@@ -428,7 +429,10 @@ def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
             from .data.wallets import WalletScanner
 
             wallet_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
-        Recorder(cfg, market, build_safety(cfg), writer, wallet_scan=wallet_scan).run(args.hours)
+        from .data.chain_safety import ChainSafety
+
+        Recorder(cfg, market, build_safety(cfg, gmgn=gmgn), writer, wallet_scan=wallet_scan,
+                 chain_safety=ChainSafety(gmgn, fail_closed=cfg.copy.fail_closed)).run(args.hours)
     finally:
         if feed is not None:
             feed.stop()
@@ -614,4 +618,5 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
 
