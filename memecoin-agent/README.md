@@ -45,6 +45,10 @@ Each tick (10s by default):
    - new entries stop for the rest of the day once realized plus unrealized losses reach 15% of the day's starting equity;
    - a kill-switch file (`touch STOP`) stops new entries, while exits keep running.
 
+In normal scans, DexScreener's independent discovery requests and token batches run concurrently.
+This reduces time spent waiting for market data while keeping the same number of API requests
+and the same token order. The safety checks and order execution still run before a buy.
+
 Every parameter is in [`config.example.yaml`](config.example.yaml).
 
 ## Quick start

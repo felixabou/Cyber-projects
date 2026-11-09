@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import quote
@@ -116,12 +117,18 @@ class DexScreenerClient:
 
     def discover(self) -> list[str]:
         seen: dict[str, None] = {}
-        for path in DISCOVERY_PATHS:
-            try:
-                items = self._get(path)
-            except (httpx.HTTPError, ValueError) as exc:
-                log.warning("DexScreener discovery %s failed: %s", path, exc)
-                continue
+        # These endpoints are independent. Preserve their configured priority while
+        # waiting only as long as the slowest response, not the sum of all three.
+        with ThreadPoolExecutor(max_workers=len(DISCOVERY_PATHS)) as pool:
+            requests = [(path, pool.submit(self._get, path)) for path in DISCOVERY_PATHS]
+            pages = []
+            for path, request in requests:
+                try:
+                    pages.append(request.result())
+                except (httpx.HTTPError, ValueError) as exc:
+                    log.warning("DexScreener discovery %s failed: %s", path, exc)
+                    pages.append([])
+        for items in pages:
             if isinstance(items, dict):  # some endpoints have wrapped results historically
                 items = items.get("data") or items.get("tokens") or []
             for item in items or []:
@@ -130,17 +137,29 @@ class DexScreenerClient:
         return list(seen)
 
     def _pairs_for(self, mints: list[str]) -> list[dict[str, Any]]:
-        pairs: list[dict[str, Any]] = []
-        for i in range(0, len(mints), TOKENS_PER_REQUEST):
-            chunk = mints[i : i + TOKENS_PER_REQUEST]
+        chunks = [mints[i : i + TOKENS_PER_REQUEST] for i in range(0, len(mints), TOKENS_PER_REQUEST)]
+
+        def fetch(chunk: list[str]) -> list[dict[str, Any]]:
             try:
                 data = self._get(f"/tokens/v1/{CHAIN}/{','.join(chunk)}")
             except (httpx.HTTPError, ValueError) as exc:
                 log.warning("DexScreener token lookup failed for %d mints: %s", len(chunk), exc)
-                continue
+                return []
             if isinstance(data, dict):
                 data = data.get("pairs") or []
-            pairs.extend(p for p in data or [] if p.get("chainId") == CHAIN)
+            return [p for p in data or [] if p.get("chainId") == CHAIN]
+
+        if not chunks:
+            return []
+        if len(chunks) == 1:
+            return fetch(chunks[0])
+        # A standard scan may request 150 tokens (five batches); each remains
+        # independent and results retain input order for stable pair selection.
+        with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as pool:
+            pages = list(pool.map(fetch, chunks))
+        pairs: list[dict[str, Any]] = []
+        for page in pages:
+            pairs.extend(page)
         return pairs
 
     def snapshots(self, mints: Iterable[str]) -> dict[str, TokenSnapshot]:
@@ -226,3 +245,4 @@ class DexScreenerClient:
         if price <= 0:
             raise RuntimeError("Could not determine SOL/USD price from DexScreener")
         return price
+
