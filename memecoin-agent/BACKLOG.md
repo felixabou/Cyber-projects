@@ -26,9 +26,10 @@ narrative is winning the "vamp war" (many copycat coins of one story race; usual
    funding source and linked wallets, launch-block bundles, top-holder and insider share, creator holding,
    sniper share; then the existing RugCheck / Jupiter / GMGN / LarpCheck / honeypot checks.
 6. **Deep research** (30-90 s, started early on a cheap prefilter so it is ready by buy time): NewsCheck
-   full check, Claude with web search, optional other models. Confirms or denies the story.
-7. **Decision:** staged size. Small starter on fast layers passing; add when deep research confirms;
-   sell when it denies. Every decision is logged with its reasons.
+   full check, Grok (live X) and OpenAI (web search), plus data from the X API. Confirms or denies the story.
+7. **Decision:** reviewed before the buy and again after it. Staged size: small starter when the fast layers
+   pass; add when deep research confirms; **auto-sell when the story is denied**. Every decision is logged
+   with its reasons.
 8. **Delivery:** Telegram message within seconds of the buy, edited in place when deep research finishes,
    with Buy more / Skip buttons; dashboard Reviews tab. Claude only writes text; it cannot trade.
 
@@ -67,12 +68,31 @@ from a wider sample of launches it only watches (what happened to every launch, 
 - Budgets: a daily cap on paid research (Claude, NewsCheck checks, X data) and rate limits respected.
 - Not built yet. Earlier context: narrative lane (NewsCheck gate + early entry) is already in main.
 
-### Open decisions
-1. Which models do the deep research (Claude only, or + Grok for live X, + OpenAI)?
-2. Which launchpads to track first.
-3. Review before the buy (slower, safer) or after it (faster), and an auto-sell on a denied story?
-4. X data source and budget (official API, a data vendor, or only NewsCheck / Stalkchain).
+### Decisions made (by the owner)
+1. **Deep research:** Grok (xAI) and OpenAI do it, alongside NewsCheck. Needs `XAI_API_KEY` and `OPENAI_API_KEY`
+   (billed separately from any chat plan). Claude writes the text briefs (section below).
+2. **Launchpads:** no preferred one. The agent tracks all of them and **reports on each launchpad**: how well it
+   has been doing and how many runners it has had, compared with the other launchpads, *for vamps of the same
+   narrative* (the same story launched on several launchpads). This report goes in the Telegram message / Reviews tab.
+3. **Several vamps on the same launchpad:** the agent picks the one whose **name + ticker pairing matches the
+   narrative's real name** (the pairing the original source account, KOL or news item used), and sends the owner
+   the reason that coin is the best (and why the others are not). "Stock pairing" is read as this name/ticker
+   pairing; if a different meaning was intended (e.g. a coin paired with a real stock or ticker), update here.
+4. **X data:** from the official X API. No spending cap was set for it. The agent still logs what it spends
+   per day and shows it in the dashboard, and respects X's rate limits.
+5. **Review timing: both.** Review **before** the buy and again **after** it, in parallel with the staged buy
+   (a fast first pass gates the starter; deep research confirms or denies).
+6. **A denied story auto-sells.** If the after-buy review denies the story, the agent sells the position.
+   Denial = NewsCheck RED FLAG / DEV EXIT / LARP / SCAM, or the Grok and OpenAI reviews calling the story fake
+   or borrowed. Each auto-sell is logged and sent to the owner with the reason.
+   Note for the build: a model's opinion can flip, so a denial should need agreement (e.g. 2 of the 3 reviewers,
+   or any hard flag like DEV EXIT) to avoid selling winners on one noisy answer, and a reviewer failing or
+   timing out is never a denial.
 
+### Still open
+1. Which launchpads to include in the first version (all that the feeds expose, or start with pump.fun,
+   Bonk and Raydium LaunchLab).
+2. Whether a "Buy more / Skip" button in Telegram should use the same paper / live mode as the agent (paper for now).
 
 ## Claude-written token briefs in Telegram
 
