@@ -93,6 +93,11 @@ def test_lowcap_rules_accept_bsc_but_keep_guardrails():
     assert lowcap_reasons(snap, Config().lowcap, Config().filters, NOW) == []
     assert any("liquidity" in r for r in lowcap_reasons(bsc_snap(liquidity_usd=5_000), Config().lowcap,
                                                          Config().filters, NOW))
+    cfg = Config()
+    cfg.filters.max_liquidity_usd = 19_000
+    assert any("max" in r for r in lowcap_reasons(snap, cfg.lowcap, cfg.filters, NOW))
+    assert any("positive price" in r for r in lowcap_reasons(bsc_snap(price_usd=0), Config().lowcap,
+                                                               Config().filters, NOW))
     assert not any("chain" in r for r in lowcap_reasons(snap, Config().lowcap, Config().filters, NOW))
     assert any("quote" in r for r in lowcap_reasons(bsc_snap(quote_symbol="CAKE"), Config().lowcap,
                                                      Config().filters, NOW))
@@ -121,4 +126,5 @@ def test_lowcap_bsc_live_mode_fails_closed_without_chain_executor():
 
     assert not agent.pf.positions
     assert agent.last_scan[0]["outcome"] == "skipped: live trading is Solana-only (bsc needs a chain executor)"
+
 

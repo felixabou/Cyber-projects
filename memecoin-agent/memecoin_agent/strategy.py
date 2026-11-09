@@ -129,6 +129,8 @@ def lowcap_reasons(s: TokenSnapshot, lc: LowCapConfig, f: FilterConfig, now: dat
         reasons.append(f"chain {s.chain} not enabled for the low-cap lane")
     if s.mint in f.blacklist:
         reasons.append("blacklisted")
+    if s.price_usd <= 0:
+        reasons.append("no positive price")
     quote_symbols = lc.quote_symbols if canonical_chain(s.chain) != "solana" else f.quote_symbols
     if s.quote_symbol.upper() not in {q.upper() for q in quote_symbols}:
         reasons.append(f"quote {s.quote_symbol} not allowed")
@@ -146,6 +148,8 @@ def lowcap_reasons(s: TokenSnapshot, lc: LowCapConfig, f: FilterConfig, now: dat
         reasons.append(f"mcap ${s.market_cap_usd:,.0f} > ${lc.max_market_cap_usd:,.0f}")
     if s.liquidity_usd < lc.min_liquidity_usd:
         reasons.append(f"liquidity ${s.liquidity_usd:,.0f} < ${lc.min_liquidity_usd:,.0f}")
+    if f.max_liquidity_usd is not None and s.liquidity_usd > f.max_liquidity_usd:
+        reasons.append(f"liquidity ${s.liquidity_usd:,.0f} > max")
     if s.volume_h1 < lc.min_volume_h1_usd:
         reasons.append(f"vol1h ${s.volume_h1:,.0f} < ${lc.min_volume_h1_usd:,.0f}")
     if s.txns_h1 < lc.min_txns_h1:
@@ -294,4 +298,5 @@ def evaluate_exit(pos: Position, s: TokenSnapshot | None, e: ExitConfig, now: da
         if pnl >= lvl.at_pct:
             return ExitDecision(lvl.sell_fraction, f"take profit {idx + 1} ({pnl:+.1f}%)", tp_level=idx)
     return None
+
 
