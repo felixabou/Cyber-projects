@@ -2,9 +2,10 @@
 
 An automated trading agent for memecoins. Its main lane finds new Solana tokens on
 DexScreener, screens out obvious rugs, enters tokens with real liquidity and steady buy
-pressure, takes its initial stake out early and lets the rest run. Two more lanes reach
-every chain GMGN and DexScreener cover: a **copy lane** buys low caps only when tracked
-wallets buy them, and a **long-term lane** holds old, worn-down coins that still trade
+pressure, takes its initial stake out early and lets the rest run. Separate lanes handle
+controlled low-cap entries, pre-graduation snipes, tracked-wallet copies, and long-term
+holds across the chains GMGN and DexScreener cover. The **copy lane** buys low caps only
+when tracked wallets buy them, and the **long-term lane** holds old, worn-down coins that still trade
 daily. You can also **paper-trade any token yourself** from the dashboard. It **paper trades
 by default**. Live trading goes through Jupiter (Solana only) and has to be switched on explicitly.
 
@@ -33,7 +34,7 @@ Each tick (10s by default):
      - 1h volume, transaction count and volume/liquidity turnover;
      - buy/sell ratio over 5m and 1h;
      - positive 5m/1h momentum, but not already parabolic (>250% in 1h).
-   - Low caps (under $150k) are left to the [copy lane](#copy-lane-low-caps-only-when-tracked-wallets-buy).
+   - Low caps below the normal $150k floor use the controlled [`lowcap:` lane](#low-cap-lane), or the copy lane when a tracked wallet buys them.
    - Rank the survivors by a 0–1 momentum score.
    - Run RugCheck on each one. A danger-level risk (live mint or freeze authority, unlocked LP, concentrated holders…) or a high risk score rejects the token. If RugCheck can't be reached, the token is rejected.
    - **Live only:** quote the buy, then quote selling the tokens straight back. Skip the token if that round trip loses more than 12%. This catches honeypots and thin routes.
@@ -44,6 +45,10 @@ Each tick (10s by default):
    - a 3-hour cooldown per token after an exit;
    - new entries stop for the rest of the day once realized plus unrealized losses reach 15% of the day's starting equity;
    - a kill-switch file (`touch STOP`) stops new entries, while exits keep running.
+
+In normal scans, DexScreener's independent discovery requests and token batches run concurrently.
+This reduces time spent waiting for market data while keeping the same number of API requests
+and the same token order. The safety checks and order execution still run before a buy.
 
 Every parameter is in [`config.example.yaml`](config.example.yaml).
 
@@ -171,6 +176,10 @@ This lane still requires the configured market filters and agent safety checks, 
 wallet scan. If a required check has no report, it may wait or reject the entry; the bot does not buy
 just because a token appeared on the feed. That makes it a pre-graduation entry path, not a guaranteed
 first-block fill. Five-second scanning and the small per-position cap are set only in the opt-in preset.
+With this preset enabled, fresh feed launches enter the scan ahead of older graduations. Slower
+DexScreener/GMGN and NewsCheck discovery refresh in the background, while eligible older launches
+rotate through the capped scan. Snapshot lookup, wallet checks, safety checks and order confirmation
+still take time; these changes improve discovery and queue latency, not guaranteed fill time.
 Backtests need recordings that include Pump.fun curve snapshots, the `pregraduation` marker,
 RugCheck reports and the point-in-time wallet scans the recorder collects for plausible
 curve candidates. Unknown scans block replay entries. If DexScreener has not indexed a
@@ -287,11 +296,33 @@ out, but it loses more on coins that keep falling. Taking the initials at +25% d
 −$200. Every number is under `exits:` in [`config.example.yaml`](config.example.yaml);
 `style: classic` brings back the old stop loss, take-profit levels and trailing stop.
 
+## Low-cap lane
+
+The default configuration includes a controlled post-launch low-cap lane for tokens on every chain
+DexScreener can discover, including BSC/BNB (the internal id is `bsc`). It accepts market caps between
+$25k and $150k, waits until a pool is at least 20 minutes old, requires $15k liquidity, $15k in 1-hour
+volume, 100 transactions, buy pressure, and a non-parabolic chart. Each low-cap entry is capped at $25
+and counts toward the normal six entries per hour and daily loss limits. Set `lowcap.chains` to an
+explicit list if you do not want wildcard discovery.
+
+Solana low-cap candidates must pass the wallet scan before the paid or external safety checks. They then go
+through the same profile and fake-chart checks, RugCheck, Jupiter token checks, GMGN checks when configured,
+LarpCheck, sell-back route check, and executor preflight as the other automated lanes. EVM/other-chain
+candidates use the chain-specific GMGN or GoPlus honeypot/tax check; a missing verdict fails closed. The
+paper executor can model every discovered chain. Live execution remains explicitly Solana-only until a
+chain executor is configured, so a BSC candidate is skipped rather than risking a wrong-chain swap.
+Change the thresholds or set `lowcap.enabled: false` in your config to turn this lane off.
+
+The low-cap lane is deliberately separate from momentum: a token below the normal market-cap floor does
+not bypass safety checks just because it has activity. The pre-graduation sniper and tracked-wallet copy
+lanes remain separate entry paths with their own limits.
+
 ## Copy lane: low caps only when tracked wallets buy
 
-The agent's own low-cap buys lost: entries under $150k market cap won 9 of 29 trades (−$261), while
-$150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer buy under
-`filters.min_market_cap_usd` ($150k), and low caps come only from wallets worth following:
+The historical agent data showed weaker results from unrestricted low-cap entries, so the normal momentum
+and launch lanes still stop at `filters.min_market_cap_usd` ($150k). The controlled low-cap lane above
+handles ordinary small-cap candidates; this copy lane remains the stricter path that requires a wallet
+worth following:
 
 - **Finding wallets** (every 6 hours, on `copy.chains`: Solana, BSC, Base, Ethereum, Robinhood):
   addresses from GMGN's smart-money and KOL trade feeds and the top traders of each chain's trending
@@ -312,7 +343,8 @@ $150k–300k won 10 of 13 (+$167). So the momentum and launch lanes no longer bu
   GMGN, LarpCheck and the sell-back quote; other chains get GMGN's (or GoPlus's) honeypot and tax
   check. Other chains are paper-only.
 
-It needs a GMGN API key. Without one the copy lane is off and the agent buys no low caps.
+It needs a GMGN API key. Without one the copy lane is off; the separate low-cap lane does not require GMGN,
+but still fails closed on the wallet scan and the configured safety checks.
 
 ## Long-term lane
 
@@ -457,10 +489,29 @@ history is saved to `state/equity.csv`, so the chart survives restarts.
 
 - It listens on 127.0.0.1 only.
 - Every API call needs a random per-session token that only the served page holds. Other websites can't trigger actions or read your data.
-- It rejects requests addressed to any other hostname (blocking DNS-rebinding attacks).
+- Local mode without a password rejects unexpected Host headers (blocking DNS-rebinding attacks).
 - Other sites can't embed it in a frame (blocking clickjacking).
 
 To reach it from another device, set `MEMECOIN_UI_PASSWORD` and pass `--host 0.0.0.0`. It refuses to bind publicly without a password. Put it behind HTTPS (for example, an SSH tunnel or a reverse proxy) before exposing it beyond your LAN.
+
+### Share a read-only website with friends
+
+The dashboard also serves a separate view at `/share`. Friends can see percentage returns,
+open token symbols, trade counts, and recent buy/sell activity. It does not expose cash,
+position amounts, wallet details, configuration, logs, downloads, or trading controls.
+Sharing is off until `MEMECOIN_SHARE_PASSWORD` is set. Use a different, long password from
+`MEMECOIN_UI_PASSWORD`; the owner password still grants full control at `/`.
+
+For a website reachable on the internet, run the existing Docker Compose setup on a server
+with a domain pointed at it and ports 80/443 available. Set `DOMAIN`, `MEMECOIN_UI_PASSWORD`,
+and `MEMECOIN_SHARE_PASSWORD` in `.env`, then run `docker compose up -d --build`.
+Caddy serves HTTPS; give friends `https://your-domain/share` and the share password.
+Keep the owner password private. Running a separate copy on the server starts a separate
+portfolio; the site reflects the agent running there. A local `ui` run can show the friend
+view at `http://127.0.0.1:8787/share` before you deploy.
+The server's default config is a paper trader without the sniper lane; to use the faster
+sniper scan there, copy the `agent`, `feeds`, and `sniper` settings from
+`config.sniper.example.yaml` into `deploy/server.yaml` and redeploy.
 
 ## Trade files
 
@@ -526,24 +577,27 @@ of them gets each command. The log then warns that another program is reading th
 To keep paper trading while your computer is off, run the agent on a server. The
 [`Dockerfile`](Dockerfile) packages it for that:
 
-- It runs headless (`run`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
+- It runs the web dashboard (`ui`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
 - Everything it keeps is written to `/data/state/`: portfolio, `trades.csv` (every trade), equity curve.
 - Keys come from environment variables; see [`.env.example`](.env.example).
 - It shuts down cleanly when the host stops or redeploys it, saving its state first.
 
-Telegram is your window into it: there's no web dashboard on the server.
+The Docker Compose setup serves the owner dashboard and optional friend page through Caddy over HTTPS.
+Set separate `MEMECOIN_UI_PASSWORD` and `MEMECOIN_SHARE_PASSWORD` values in `.env` before exposing it.
 
 **Railway** (no command line needed):
 
 1. Sign in at railway.com with GitHub. Create a project with **Deploy from GitHub repo** and pick this repository.
 2. In the service's settings, set **Root Directory** to `memecoin-agent` and the branch to deploy.
    Railway finds the Dockerfile.
-3. Under **Variables**, add `TELEGRAM_BOT_TOKEN`, `LARPCHECK_API_KEY` and, optionally, `GMGN_API_KEY`.
+3. Under **Variables**, add `MEMECOIN_UI_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `LARPCHECK_API_KEY`
+   and, optionally, `GMGN_API_KEY`. If you enable a public domain and want the friend page,
+   also add a different `MEMECOIN_SHARE_PASSWORD`.
 4. Add a **Volume** to the service with mount path `/data`. Without it, every deploy starts a new paper wallet.
 5. Deploy. Message your bot, add the chat id it replies with as `TELEGRAM_CHAT_ID`, and redeploy.
 
-The service needs no public domain or port: the bot polls Telegram outward. Railway charges for a service that runs
-all the time; check its current pricing.
+The service needs no public domain if you use only Telegram; the bot polls outward.
+For a friend-accessible website use HTTPS on a domain and keep the owner password private.
 
 **Any Linux VPS with Docker:**
 

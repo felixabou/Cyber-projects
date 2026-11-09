@@ -114,7 +114,7 @@ class Portfolio:
         )
         self.positions[snap.mint] = pos
         self.cash_usd -= fill.usd_value
-        if lane in ("momentum", "launch", "copy", "narrative", "sniper"):  # fast lanes share the hourly entry limit
+        if lane in ("momentum", "launch", "copy", "narrative", "sniper", "lowcap"):  # fast lanes share the hourly entry limit
             self.entry_times.append(now.isoformat())
         self.trades.append(
             TradeRecord(now, "buy", snap.mint, snap.symbol, fill.token_amount, fill.usd_value,

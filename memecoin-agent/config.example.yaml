@@ -175,6 +175,7 @@ gmgn:
   enabled: true
   api_key_file: ~/.config/gmgn/.env
   discovery: true
+  discovery_chains: [sol, bsc, base, eth, arbitrum, polygon, optimism, avalanche, monad, robinhood, hyperevm, tron]
   trending_interval: 1h            # 1m / 5m / 1h / 6h / 24h
   trending_limit: 100
   trending_order_by: volume
@@ -254,6 +255,28 @@ launch:
   max_top10_pct: 35                # top 10 holders, pools and lockers left out
   max_signature_pages: 150         # 1,000 transactions a page when walking back to the launch block
 
+lowcap:
+  # Controlled post-launch lane below filters.min_market_cap_usd. Solana candidates need the wallet scan;
+  # every chain needs its available honeypot/tax and execution checks before a buy.
+  enabled: true
+  chains: ["*"]  # every DexScreener chain; unsupported chains fail closed without a honeypot verdict
+  quote_symbols: [SOL, USDC, USDT, WBNB, BNB, WETH, ETH, BUSD, DAI]
+  min_age_minutes: 20
+  max_age_minutes: 360
+  min_market_cap_usd: 25000
+  max_market_cap_usd: 150000
+  min_liquidity_usd: 15000
+  min_volume_h1_usd: 15000
+  min_txns_h1: 100
+  min_buy_sell_ratio_h1: 1.10
+  min_buy_sell_ratio_m5: 0.95
+  min_price_change_m5: -5
+  min_price_change_h1: 0
+  max_price_change_h1: 150
+  min_volume_to_liquidity_h1: 0.50
+  min_score: 0.35
+  max_position_usd: 25             # hard cap; global hourly/daily risk limits still apply
+
 telegram:
   # Alerts, trade downloads (/csv) and remote control from your phone. On when a bot token is set:
   # TELEGRAM_BOT_TOKEN env var, or this file. Only the chats below (plus TELEGRAM_CHAT_ID,
@@ -317,3 +340,4 @@ longterm:
   max_positions: 5              # its own slots, outside risk.max_open_positions
   hard_stop_pct: 50
   secure_at_pct: 100            # initials + half the profit out at 2x; the rest runs
+

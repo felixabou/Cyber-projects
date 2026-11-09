@@ -22,6 +22,7 @@ from typing import Any, Iterable, Iterator
 
 from .agent import Agent
 from .config import Config
+from .data.dexscreener import canonical_chain
 from .data.wallets import ERROR_TTL_S, RESULT_TTL_S, SCANNING, WalletScan, WalletScanner
 from .data.rugcheck import UNAVAILABLE
 from .execution.paper import PaperExecutor
@@ -40,9 +41,10 @@ class ReplayMarket:
         self.stale_after = timedelta(seconds=stale_after_s)
         self.now: datetime | None = None
         self.latest: dict[str, TokenSnapshot] = {}
+        self.chains: dict[str, str] = {}
         self.pregraduation: set[str] = set()
         self.discovered: list[str] = []
-        self.safety: dict[str, SafetyReport] = {}
+        self.safety: dict[tuple[str, str], SafetyReport] = {}
         self.wallets: dict[str, tuple[datetime, WalletScan]] = {}
         self.records_read = 0
         self.exhausted = False
@@ -66,6 +68,7 @@ class ReplayMarket:
             if kind == "snap":
                 snap = TokenSnapshot.from_dict(rec)
                 self.latest[snap.mint] = snap
+                self.chains[snap.mint] = canonical_chain(snap.chain)
                 if rec.get("pregraduation", False):
                     self.pregraduation.add(snap.mint)
                 else:
@@ -73,7 +76,9 @@ class ReplayMarket:
             elif kind == "discover":
                 self.discovered = list(rec.get("mints") or [])
             elif kind == "safety":
-                self.safety[rec["mint"]] = SafetyReport(bool(rec["ok"]), rec.get("score"), list(rec.get("reasons") or []))
+                chain = canonical_chain(rec.get("chain", "solana"))
+                self.safety[(chain, rec["mint"])] = SafetyReport(
+                    bool(rec["ok"]), rec.get("score"), list(rec.get("reasons") or []))
             elif kind == "wallet":
                 data = dict(rec["scan"])
                 launched_at = data.get("launched_at")
@@ -94,6 +99,13 @@ class ReplayMarket:
                 out[m] = s
         return out
 
+    def chain_of(self, mint: str) -> str | None:
+        return self.chains.get(mint)
+
+    def snapshots_on(self, chain: str, mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+        chain = canonical_chain(chain)
+        return {m: s for m, s in self.snapshots(mints).items() if canonical_chain(s.chain) == chain}
+
     def is_pregraduation(self, mint: str) -> bool:
         return mint in self.pregraduation
 
@@ -108,8 +120,12 @@ class ReplaySafety:
         self.market = market
         self.assume_safe = assume_safe
 
-    def check(self, mint: str) -> SafetyReport:
-        rep = self.market.safety.get(mint)
+    def check(self, mint: str, address: str | None = None) -> SafetyReport:
+        # Agent.scan_and_enter calls chain safety as (chain, address) for non-Solana candidates;
+        # use the recorded chain as part of the key. Old recordings omitted it and default to Solana.
+        chain = canonical_chain(mint) if address is not None else "solana"
+        address = address if address is not None else mint
+        rep = self.market.safety.get((chain, address))
         if rep is not None:
             return rep
         return SafetyReport(ok=self.assume_safe, score=None, reasons=[] if self.assume_safe else [UNAVAILABLE])
@@ -196,8 +212,10 @@ def run_backtest(
         raise ValueError("Recording contains no records")
     clock = SimClock(start)
     pf = Portfolio(cash_usd=cfg.risk.starting_balance_usd)
-    agent = Agent(cfg, market, ReplaySafety(market, assume_safe), PaperExecutor(cfg.execution), pf,
-                  clock=clock, persist=False, launch_scan=ReplayWalletScanner(market, cfg))
+    replay_safety = ReplaySafety(market, assume_safe)
+    agent = Agent(cfg, market, replay_safety, PaperExecutor(cfg.execution), pf,
+                  clock=clock, persist=False, launch_scan=ReplayWalletScanner(market, cfg),
+                  multichain=market, chain_safety=replay_safety)
     curve: list[tuple[datetime, float]] = []
     market.advance_to(start)
     while True:
@@ -236,4 +254,5 @@ def format_report(res: BacktestResult) -> str:
         lines.append("  Worst / best    " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[:3])
                      + "  |  " + ", ".join(f"{c.symbol} {c.pnl_pct:+.0f}%" for c in best[-3:][::-1]))
     return "\n".join(lines)
+
 

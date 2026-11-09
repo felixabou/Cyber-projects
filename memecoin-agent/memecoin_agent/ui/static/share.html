@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="share-token" content="__SHARE_TOKEN__">
+  <title>Agent activity</title>
+  <link rel="stylesheet" href="/static/share.css">
+  <script src="/static/share.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">◆</span> memecoin-agent</div>
+    <span class="read-only">Shared view · read only</span>
+  </header>
+  <main>
+    <div class="intro">
+      <div>
+        <p class="eyebrow">Agent activity</p>
+        <h1>Trading, at a glance.</h1>
+        <p>Portfolio returns, open positions and recent trades. This page updates while the agent runs.</p>
+      </div>
+      <div class="connection" id="connection" role="status" aria-live="polite">Connecting…</div>
+    </div>
+    <div class="stats">
+      <section class="stat featured"><h2>Overall return</h2><div id="return" class="stat-number">—</div><p>Since the portfolio baseline</p></section>
+      <section class="stat"><h2>Today</h2><div id="today" class="stat-number">—</div><p>Change in portfolio value</p></section>
+      <section class="stat"><h2>Completed trades</h2><div id="trades-count" class="stat-number">—</div><p id="win-rate">Win rate —</p></section>
+      <section class="stat"><h2>Open positions</h2><div id="positions-count" class="stat-number">—</div><p id="mode">Agent mode —</p></section>
+    </div>
+    <section class="panel">
+      <div class="panel-head"><h2>Return over time</h2><span id="chart-caption">Recent recorded points</span></div>
+      <div id="chart" class="chart"><p class="empty">Waiting for equity history…</p></div>
+    </section>
+    <div class="columns">
+      <section class="panel">
+        <div class="panel-head"><h2>Open positions</h2><span>Performance shown as percent</span></div>
+        <div id="positions" class="list"><p class="empty">Loading…</p></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>Recent activity</h2><span>Trade amounts stay private</span></div>
+        <div id="recent" class="list"><p class="empty">Loading…</p></div>
+      </section>
+    </div>
+  </main>
+  <footer>Shared with permission. No trading controls on this page.</footer>
+</body>
+</html>

@@ -29,8 +29,10 @@ from typing import Any, Callable, Iterator
 
 from .config import Config
 from .data import MarketData, SafetyChecker
+from .data.dexscreener import canonical_chain
 from .data.rugcheck import UNAVAILABLE
 from .models import utcnow
+from .strategy import lowcap_reasons
 
 log = logging.getLogger(__name__)
 
@@ -101,12 +103,19 @@ class Recorder:
         clock: Callable[[], datetime] = utcnow,
         sleep: Callable[[float], None] = time.sleep,
         wallet_scan: Any | None = None,
+        chain_safety: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.rc = cfg.recorder
         self.market = market
         self.safety = safety if self.rc.record_safety else None
+        # Solana RugCheck and the EVM/other-chain honeypot checker have different call
+        # signatures. Keep both so replay can preserve a real verdict for every chain.
+        self.chain_safety = chain_safety if self.rc.record_safety else None
         self.wallet_scan = wallet_scan
+        # Real engine wiring passes the same scanner used by Agent.launch_scan. Keep the historical
+        # auto-construction for the opt-in sniper, but do not create a live RPC scanner implicitly for
+        # synthetic/offline recordings just because the low-cap lane is enabled by default.
         if self.wallet_scan is None and cfg.sniper.enabled and self.safety is not None:
             from .data.wallets import WalletScanner
 
@@ -116,7 +125,7 @@ class Recorder:
         self.sleep = sleep
         self.tracked: dict[str, datetime] = {}  # mint -> stop tracking at
         self.seen: dict[str, datetime] = {}  # mint -> first seen; never re-track an expired mint
-        self.safety_done: set[str] = set()
+        self.safety_done: set[tuple[str, str]] = set()
         self._wallet_requested_at: dict[str, datetime] = {}
         self.ticks = 0
         self.started_at: datetime | None = None
@@ -167,17 +176,28 @@ class Recorder:
         self.writer.write(now, records)
 
     def _wallet_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
-        """Capture scans only for plausible early curve candidates; unresolved scans stay unknown."""
-        if self.wallet_scan is None or not self.cfg.sniper.enabled:
+        """Capture scans for plausible Solana early/low-cap candidates; unresolved scans stay unknown."""
+        if self.wallet_scan is None or not (self.cfg.sniper.enabled or self.cfg.lowcap.enabled):
             return []
-        c = self.cfg.sniper
-        eligible = [s for s in snaps.values() if (
-            s.age_minutes(now) is not None and 0 <= s.age_minutes(now) <= c.max_age_minutes
-            and s.chain == "solana" and s.liquidity_usd >= c.min_liquidity_usd
-            and c.min_market_cap_usd <= s.market_cap_usd <= c.max_market_cap_usd
-            and s.volume_h1 >= c.min_volume_h1_usd and s.txns_h1 >= c.min_txns_h1
-            and getattr(self.market, "is_pregraduation", lambda _: False)(s.mint)
-        )]
+        sniper = self.cfg.sniper
+        is_pregraduation = getattr(self.market, "is_pregraduation", lambda _: False)
+        eligible: list[Any] = []
+        for snap in snaps.values():
+            if snap.chain != "solana":
+                continue
+            age = snap.age_minutes(now)
+            if self.cfg.sniper.enabled and (
+                    age is not None and 0 <= age <= sniper.max_age_minutes
+                    and snap.liquidity_usd >= sniper.min_liquidity_usd
+                    and sniper.min_market_cap_usd <= snap.market_cap_usd <= sniper.max_market_cap_usd
+                    and snap.volume_h1 >= sniper.min_volume_h1_usd and snap.txns_h1 >= sniper.min_txns_h1
+                    and is_pregraduation(snap.mint)):
+                eligible.append(snap)
+                continue
+            # The low-cap lane uses the same Solana wallet scan as launches, but only after a token
+            # satisfies the cheap market-window rules. EVM low caps use ChainSafety instead.
+            if self.cfg.lowcap.enabled and not lowcap_reasons(snap, self.cfg.lowcap, self.cfg.filters, now):
+                eligible.append(snap)
         # Rotate requests so the oldest candidates do not monopolize a busy feed.
         eligible.sort(key=lambda s: (self._wallet_requested_at.get(s.mint, datetime.min.replace(tzinfo=now.tzinfo)),
                                      -(s.pair_created_at.timestamp() if s.pair_created_at else 0)))
@@ -215,18 +235,27 @@ class Recorder:
         return out
 
     def _safety_records(self, snaps: dict, now: datetime) -> list[dict[str, Any]]:
-        if self.safety is None:
+        if self.safety is None and self.chain_safety is None:
             return []
         out = []
         # Only tokens that could plausibly pass a liquidity filter; RugCheck isn't free to hammer.
         floor = self.cfg.filters.min_liquidity_usd * 0.5
-        todo = [m for m, s in snaps.items() if m not in self.safety_done and s.liquidity_usd >= floor]
-        for mint in todo[:10]:
-            rep = self.safety.check(mint)
+        todo = [(m, s) for m, s in snaps.items()
+                if (canonical_chain(s.chain), m) not in self.safety_done and s.liquidity_usd >= floor]
+        for mint, snap in todo[:10]:
+            chain = canonical_chain(snap.chain)
+            if chain == "solana":
+                if self.safety is None:
+                    continue
+                rep = self.safety.check(mint)
+            else:
+                if self.chain_safety is None:
+                    continue
+                rep = self.chain_safety.check(chain, mint)
             if rep.reasons == [UNAVAILABLE]:
                 continue  # retry next tick rather than recording an outage as a verdict
-            self.safety_done.add(mint)
-            out.append({"type": "safety", "t": now.isoformat(), "mint": mint,
+            self.safety_done.add((chain, mint))
+            out.append({"type": "safety", "t": now.isoformat(), "chain": chain, "mint": mint,
                         "ok": rep.ok, "score": rep.score, "reasons": rep.reasons})
         return out
 
@@ -246,4 +275,5 @@ class Recorder:
                 self.sleep(max(0.0, self.rc.interval_s - (time.monotonic() - started)))
         except KeyboardInterrupt:
             log.info("Recorder stopped.")
+
 

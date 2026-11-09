@@ -58,8 +58,8 @@ def build_gmgn(cfg: Config):
 
 def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
     """DexScreener market data. Discovery order: pump.fun graduations (launch feed), GMGN trending,
-    then DexScreener's own lists. Prices always come from DexScreener."""
-    base = DexScreenerClient(cfg.filters.quote_symbols)
+    then DexScreener's own lists across the configured chains. Prices always come from DexScreener."""
+    base = DexScreenerClient(cfg.filters.quote_symbols, discovery_chains=cfg.lowcap.chains)
     if gmgn is not None and cfg.gmgn.discovery:
         from dataclasses import replace
 
@@ -69,8 +69,15 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         if cfg.launch.enabled:  # trending launches younger than the momentum lane's minimum age too
             window = replace(window, min_age_minutes=1,
                              min_liquidity_usd=min(window.min_liquidity_usd, cfg.launch.min_liquidity_usd))
-        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, window, gmgn))
-        log.info("GMGN discovery on: %s trending, every %.0fs", cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
+        if cfg.lowcap.enabled:
+            window = replace(window,
+                             min_market_cap_usd=min(window.min_market_cap_usd, cfg.lowcap.min_market_cap_usd),
+                             min_liquidity_usd=min(window.min_liquidity_usd, cfg.lowcap.min_liquidity_usd),
+                             min_age_minutes=min(window.min_age_minutes, cfg.lowcap.min_age_minutes))
+        gmgn_chains = [str(c).lower() for c in cfg.gmgn.discovery_chains]
+        base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, window, gmgn, chains=gmgn_chains))
+        log.info("GMGN discovery on: %s trending (%s), every %.0fs", ", ".join(gmgn_chains),
+                 cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None
@@ -78,7 +85,9 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         url=fc.pumpportal_url, migrations=fc.pumpportal_migrations, new_tokens=fc.pumpportal_new_tokens,
         max_age_s=cfg.filters.max_age_hours * 3600, max_mints=fc.max_buffered_mints, buffer_file=fc.buffer_file,
     )
-    return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd), feed
+    return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd,
+                               fast_limit=cfg.agent.max_candidates_per_scan if cfg.sniper.enabled else 0,
+                               launch_window_s=cfg.sniper.max_age_minutes * 60), feed
 
 
 def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
@@ -149,7 +158,7 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
     launch_scan = None
     f = cfg.filters
     early_scans = f.wallet_scan_below_age_minutes > 0 or f.wallet_scan_below_market_cap_usd > 0
-    if cfg.launch.enabled or early_scans:
+    if cfg.launch.enabled or early_scans or cfg.lowcap.enabled:
         from .data.wallets import WalletScanner
 
         launch_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
@@ -162,6 +171,10 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         if early_scans:
             log.info("Early or small buys (under %.0fm old or $%.0fK market cap) need the %s too",
                      f.wallet_scan_below_age_minutes, f.wallet_scan_below_market_cap_usd / 1000, scan)
+        if cfg.lowcap.enabled:
+            log.info("Low-cap lane on: $%.0fK-$%.0fK, age %.0f-%.0fm, max position $%.0f; wallet scan required",
+                     cfg.lowcap.min_market_cap_usd / 1000, cfg.lowcap.max_market_cap_usd / 1000,
+                     cfg.lowcap.min_age_minutes, cfg.lowcap.max_age_minutes, cfg.lowcap.max_position_usd)
     from .analytics import Analytics
 
     analytics = Analytics(Path(cfg.agent.state_file).parent)
@@ -186,7 +199,7 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
                  "(no route, or a round trip losing over %g%%, means no buy)", cfg.execution.max_roundtrip_loss_pct)
     from .data.chain_safety import ChainSafety
 
-    dex = DexScreenerClient(cfg.filters.quote_symbols)  # tokens on every chain: copy, long-term, manual trades
+    dex = DexScreenerClient(cfg.filters.quote_symbols, discovery_chains=cfg.lowcap.chains)
     chain_safety = ChainSafety(gmgn, fail_closed=cfg.copy.fail_closed)
     copy_tracker = None
     if cfg.copy.enabled and gmgn is not None:
@@ -286,7 +299,7 @@ class Engine:
             record=record, max_ticks=getattr(args, "max_ticks", None),
             make_recorder=lambda: Recorder(cfg, agent.market, build_safety(cfg, with_larpcheck=False),
                                            RecordingWriter(cfg.recorder.dir), clock=agent.clock,
-                                           wallet_scan=agent.launch_scan),
+                                           wallet_scan=agent.launch_scan, chain_safety=agent.chain_safety),
         )
         self.bot = build_telegram(cfg, self.runner)
         if self.bot is not None:
@@ -406,11 +419,20 @@ def cmd_record(args: argparse.Namespace, cfg: Config) -> None:
         Recorder(cfg, market, SyntheticSafety(market), writer, clock=clock, sleep=advance).run(args.hours or 12)
         print(f"Wrote {writer.records_written:,} synthetic records to {writer.dir}")
         return
-    market, feed = build_market(cfg, gmgn=build_gmgn(cfg))
+    gmgn = build_gmgn(cfg)
+    market, feed = build_market(cfg, gmgn=gmgn)
     if feed is not None:
         feed.start()
     try:
-        Recorder(cfg, market, build_safety(cfg), writer).run(args.hours)
+        wallet_scan = None
+        if cfg.sniper.enabled or cfg.lowcap.enabled:
+            from .data.wallets import WalletScanner
+
+            wallet_scan = WalletScanner(cfg.launch, cfg.execution.rpc_url)
+        from .data.chain_safety import ChainSafety
+
+        Recorder(cfg, market, build_safety(cfg, gmgn=gmgn), writer, wallet_scan=wallet_scan,
+                 chain_safety=ChainSafety(gmgn, fail_closed=cfg.copy.fail_closed)).run(args.hours)
     finally:
         if feed is not None:
             feed.stop()
@@ -446,13 +468,17 @@ def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
     engine = Engine(cfg, args)
     try:
         server = DashboardServer(engine.runner, logs, host=args.host, port=args.port,
-                                 password=os.environ.get("MEMECOIN_UI_PASSWORD"), config_dict=redacted_config(cfg))
+                                 password=os.environ.get("MEMECOIN_UI_PASSWORD"),
+                                 share_password=os.environ.get("MEMECOIN_SHARE_PASSWORD"),
+                                 config_dict=redacted_config(cfg))
     except BaseException:
         engine.stop()
         raise
     engine.start()
     mode = "synthetic market" if args.synthetic else f"{cfg.execution.mode} mode"
     print(f"Dashboard: {server.url}  ({mode}; Ctrl-C to stop)", flush=True)
+    if server.share_password:
+        print(f"Friend view: {server.url.rstrip('/')}/share  (separate password)", flush=True)
     if not args.no_browser:
         try:
             import webbrowser
@@ -592,4 +618,5 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
 

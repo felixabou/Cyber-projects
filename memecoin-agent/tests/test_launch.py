@@ -294,4 +294,7 @@ def test_wiring(tmp_path):
     cfg.launch.enabled = False
     assert isinstance(cli.build_agent(cfg, with_feed=False)[0].launch_scan, WalletScanner)  # early buys use it
     cfg.filters.wallet_scan_below_age_minutes = cfg.filters.wallet_scan_below_market_cap_usd = 0
+    cfg.lowcap.enabled = False  # no launch, early, or low-cap lane remains
     assert cli.build_agent(cfg, with_feed=False)[0].launch_scan is None
+
+

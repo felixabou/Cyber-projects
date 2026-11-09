@@ -17,8 +17,8 @@ class FilterConfig:
     quote_symbols: list[str] = field(default_factory=lambda: ["SOL", "USDC"])
     min_liquidity_usd: float = 12_000
     max_liquidity_usd: float | None = None
-    # Low caps are the copy lane's (copy:): bought only when a tracked wallet buys them. On the agent's
-    # own trades, buys under $150k won 9 of 29 (-$261); $150k-300k won 10 of 13 (+$167).
+    # The normal momentum lane starts at $150k. The separate lowcap lane can use a tighter, smaller
+    # market-cap range with its own position cap and mandatory wallet scan.
     min_market_cap_usd: float = 150_000
     max_market_cap_usd: float = 5_000_000
     min_age_minutes: float = 15  # most Solana rugs happen inside the first hour
@@ -240,6 +240,11 @@ class GmgnConfig:
     # Server-side tags; GMGN's SOL defaults are renounced + frozen, sent explicitly here.
     trending_filters: list[str] = field(default_factory=lambda: ["renounced", "frozen", "not_wash_trading"])
     discover_every_s: float = 120.0
+    # GMGN chain names used for trending discovery. DexScreener profile/boost discovery also
+    # covers these chains without a GMGN key; unsupported safety sources fail closed later.
+    discovery_chains: list[str] = field(default_factory=lambda: [
+        "sol", "bsc", "base", "eth", "arbitrum", "polygon", "optimism", "avalanche",
+        "monad", "robinhood", "hyperevm", "tron"])
 
     safety: bool = True
     max_rug_ratio: float | None = 0.3
@@ -416,6 +421,38 @@ class SniperConfig:
 
 
 @dataclass
+class LowCapConfig:
+    """Controlled post-launch lane for small Solana tokens below the momentum floor.
+
+    Low-cap entries are intentionally narrower than the normal lane: the token must
+    have aged past the first minutes, show usable liquidity and activity, and pass
+    the wallet scan before the usual safety gates run.
+    """
+
+    enabled: bool = True
+    # ``*`` follows every chain returned by DexScreener. Unsupported chains still fail closed at
+    # ChainSafety (no honeypot/tax verdict = no buy), so broad discovery does not weaken the guard.
+    chains: list[str] = field(default_factory=lambda: ["*"])
+    quote_symbols: list[str] = field(default_factory=lambda: [
+        "SOL", "USDC", "USDT", "WBNB", "BNB", "WETH", "ETH", "BUSD", "DAI"])
+    min_age_minutes: float = 20.0
+    max_age_minutes: float = 360.0
+    min_market_cap_usd: float = 25_000.0
+    max_market_cap_usd: float = 150_000.0
+    min_liquidity_usd: float = 15_000.0
+    min_volume_h1_usd: float = 15_000.0
+    min_txns_h1: int = 100
+    min_buy_sell_ratio_h1: float = 1.10
+    min_buy_sell_ratio_m5: float = 0.95
+    min_price_change_m5: float = -5.0
+    min_price_change_h1: float = 0.0
+    max_price_change_h1: float = 150.0
+    min_volume_to_liquidity_h1: float = 0.50
+    min_score: float = 0.35
+    max_position_usd: float = 25.0
+
+
+@dataclass
 class ExportConfig:
     """No longer used: the hourly trade files are gone. Every trade is in agent.trades_csv, and the
     dashboard and Telegram download this session's, the last 1-24 hours' or all of them. Kept so
@@ -528,6 +565,7 @@ class Config:
     copy: CopyConfig = field(default_factory=CopyConfig)
     longterm: LongTermConfig = field(default_factory=LongTermConfig)
     sniper: SniperConfig = field(default_factory=SniperConfig)
+    lowcap: LowCapConfig = field(default_factory=LowCapConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -581,6 +619,15 @@ class Config:
             raise ValueError("sniper.max_age_minutes and sniper.max_position_usd must be > 0")
         if self.sniper.min_market_cap_usd > self.sniper.max_market_cap_usd:
             raise ValueError("sniper.min_market_cap_usd cannot exceed sniper.max_market_cap_usd")
+        lc = self.lowcap
+        if not lc.min_age_minutes <= lc.max_age_minutes:
+            raise ValueError("lowcap.min_age_minutes cannot exceed lowcap.max_age_minutes")
+        if lc.min_market_cap_usd > lc.max_market_cap_usd:
+            raise ValueError("lowcap.min_market_cap_usd cannot exceed lowcap.max_market_cap_usd")
+        if lc.max_position_usd <= 0 or lc.min_score < 0 or lc.min_score > 1:
+            raise ValueError("lowcap.max_position_usd must be > 0 and lowcap.min_score must be between 0 and 1")
+        if not lc.chains:
+            raise ValueError("lowcap.chains must contain at least one chain")
 
 
 _SECTIONS: dict[str, type] = {
@@ -604,6 +651,7 @@ _SECTIONS: dict[str, type] = {
     "copy": CopyConfig,
     "longterm": LongTermConfig,
     "sniper": SniperConfig,
+    "lowcap": LowCapConfig,
 }
 
 
