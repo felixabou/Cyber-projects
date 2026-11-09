@@ -171,6 +171,10 @@ This lane still requires the configured market filters and agent safety checks, 
 wallet scan. If a required check has no report, it may wait or reject the entry; the bot does not buy
 just because a token appeared on the feed. That makes it a pre-graduation entry path, not a guaranteed
 first-block fill. Five-second scanning and the small per-position cap are set only in the opt-in preset.
+With this preset enabled, fresh feed launches enter the scan ahead of older graduations. Slower
+DexScreener/GMGN and NewsCheck discovery refresh in the background, while eligible older launches
+rotate through the capped scan. Snapshot lookup, wallet checks, safety checks and order confirmation
+still take time; these changes improve discovery and queue latency, not guaranteed fill time.
 Backtests need recordings that include Pump.fun curve snapshots, the `pregraduation` marker,
 RugCheck reports and the point-in-time wallet scans the recorder collects for plausible
 curve candidates. Unknown scans block replay entries. If DexScreener has not indexed a
@@ -457,10 +461,29 @@ history is saved to `state/equity.csv`, so the chart survives restarts.
 
 - It listens on 127.0.0.1 only.
 - Every API call needs a random per-session token that only the served page holds. Other websites can't trigger actions or read your data.
-- It rejects requests addressed to any other hostname (blocking DNS-rebinding attacks).
+- Local mode without a password rejects unexpected Host headers (blocking DNS-rebinding attacks).
 - Other sites can't embed it in a frame (blocking clickjacking).
 
 To reach it from another device, set `MEMECOIN_UI_PASSWORD` and pass `--host 0.0.0.0`. It refuses to bind publicly without a password. Put it behind HTTPS (for example, an SSH tunnel or a reverse proxy) before exposing it beyond your LAN.
+
+### Share a read-only website with friends
+
+The dashboard also serves a separate view at `/share`. Friends can see percentage returns,
+open token symbols, trade counts, and recent buy/sell activity. It does not expose cash,
+position amounts, wallet details, configuration, logs, downloads, or trading controls.
+Sharing is off until `MEMECOIN_SHARE_PASSWORD` is set. Use a different, long password from
+`MEMECOIN_UI_PASSWORD`; the owner password still grants full control at `/`.
+
+For a website reachable on the internet, run the existing Docker Compose setup on a server
+with a domain pointed at it and ports 80/443 available. Set `DOMAIN`, `MEMECOIN_UI_PASSWORD`,
+and `MEMECOIN_SHARE_PASSWORD` in `.env`, then run `docker compose up -d --build`.
+Caddy serves HTTPS; give friends `https://your-domain/share` and the share password.
+Keep the owner password private. Running a separate copy on the server starts a separate
+portfolio; the site reflects the agent running there. A local `ui` run can show the friend
+view at `http://127.0.0.1:8787/share` before you deploy.
+The server's default config is a paper trader without the sniper lane; to use the faster
+sniper scan there, copy the `agent`, `feeds`, and `sniper` settings from
+`config.sniper.example.yaml` into `deploy/server.yaml` and redeploy.
 
 ## Trade files
 
@@ -526,24 +549,27 @@ of them gets each command. The log then warns that another program is reading th
 To keep paper trading while your computer is off, run the agent on a server. The
 [`Dockerfile`](Dockerfile) packages it for that:
 
-- It runs headless (`run`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
+- It runs the web dashboard (`ui`) with [`deploy/server.yaml`](deploy/server.yaml), which is paper mode with the default strategy.
 - Everything it keeps is written to `/data/state/`: portfolio, `trades.csv` (every trade), equity curve.
 - Keys come from environment variables; see [`.env.example`](.env.example).
 - It shuts down cleanly when the host stops or redeploys it, saving its state first.
 
-Telegram is your window into it: there's no web dashboard on the server.
+The Docker Compose setup serves the owner dashboard and optional friend page through Caddy over HTTPS.
+Set separate `MEMECOIN_UI_PASSWORD` and `MEMECOIN_SHARE_PASSWORD` values in `.env` before exposing it.
 
 **Railway** (no command line needed):
 
 1. Sign in at railway.com with GitHub. Create a project with **Deploy from GitHub repo** and pick this repository.
 2. In the service's settings, set **Root Directory** to `memecoin-agent` and the branch to deploy.
    Railway finds the Dockerfile.
-3. Under **Variables**, add `TELEGRAM_BOT_TOKEN`, `LARPCHECK_API_KEY` and, optionally, `GMGN_API_KEY`.
+3. Under **Variables**, add `MEMECOIN_UI_PASSWORD`, `TELEGRAM_BOT_TOKEN`, `LARPCHECK_API_KEY`
+   and, optionally, `GMGN_API_KEY`. If you enable a public domain and want the friend page,
+   also add a different `MEMECOIN_SHARE_PASSWORD`.
 4. Add a **Volume** to the service with mount path `/data`. Without it, every deploy starts a new paper wallet.
 5. Deploy. Message your bot, add the chat id it replies with as `TELEGRAM_CHAT_ID`, and redeploy.
 
-The service needs no public domain or port: the bot polls Telegram outward. Railway charges for a service that runs
-all the time; check its current pricing.
+The service needs no public domain if you use only Telegram; the bot polls outward.
+For a friend-accessible website use HTTPS on a domain and keep the owner password private.
 
 **Any Linux VPS with Docker:**
 

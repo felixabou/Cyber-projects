@@ -1,4 +1,4 @@
-"""Local web dashboard: a small stdlib HTTP server over an AgentRunner.
+"""Owner dashboard and a separate read-only shared page over an AgentRunner.
 
 Security model. The dashboard can sell your positions, so:
   * It binds to 127.0.0.1 by default. Binding anywhere else requires a password
@@ -7,7 +7,7 @@ Security model. The dashboard can sell your positions, so:
     delivered inside the served page. Other websites can't read the page
     (same-origin policy), so they can't forge requests, and the custom header
     forces a CORS preflight that this server never approves.
-  * The Host header must name this server, which defeats DNS-rebinding attacks.
+  * Local mode without a password rejects unexpected Host headers.
   * The page is served with a strict CSP and frame-ancestors 'none'
     (no clickjacking).
 """
@@ -33,7 +33,10 @@ from .runner import AgentRunner, LogBuffer, token_view
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-STATIC_FILES = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8"}
+STATIC_FILES = {
+    "app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8",
+    "share.js": "text/javascript; charset=utf-8", "share.css": "text/css; charset=utf-8",
+}
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -49,18 +52,45 @@ def is_loopback(host: str) -> bool:
         return False
 
 
+def shared_view(view: dict[str, Any]) -> dict[str, Any]:
+    """Explicit allowlist for guests: percentages and symbols, no wallet, cash or controls."""
+    equity = view.get("equity")
+    baseline = view.get("baseline_equity")
+    day_start = view.get("day_start_equity")
+    session = view.get("session") or {}
+    return {
+        "now": view.get("now"), "last_tick_at": view.get("last_tick_at"), "mode": view.get("mode"),
+        "return_pct": (equity / baseline - 1) * 100 if equity is not None and baseline else None,
+        "today_pct": (equity / day_start - 1) * 100 if equity is not None and day_start else None,
+        "session": {"round_trips": session.get("round_trips"), "win_rate_pct": session.get("win_rate_pct")},
+        "positions": [
+            {key: p.get(key) for key in ("symbol", "chain", "lane", "stage", "pnl_pct")}
+            for p in (view.get("positions") or [])
+        ],
+        "trades": [
+            {key: t.get(key) for key in ("time", "side", "symbol")}
+            for t in (view.get("trades") or [])[:20]
+        ],
+    }
+
+
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, runner: AgentRunner, logs: LogBuffer, host: str = "127.0.0.1", port: int = 8787,
-                 password: str | None = None, config_dict: dict[str, Any] | None = None) -> None:
+                 password: str | None = None, config_dict: dict[str, Any] | None = None,
+                 share_password: str | None = None) -> None:
         if not is_loopback(host) and not password:
             raise ValueError(f"Refusing to serve the dashboard on {host} without a password "
                              "(set MEMECOIN_UI_PASSWORD), since it can sell your positions")
+        if password and share_password and hmac.compare_digest(password, share_password):
+            raise ValueError("MEMECOIN_SHARE_PASSWORD must differ from MEMECOIN_UI_PASSWORD")
         self.runner = runner
         self.logs = logs
         self.password = password
+        self.share_password = share_password
         self.token = secrets.token_urlsafe(24)
+        self.share_token = secrets.token_urlsafe(24)
         self.config_dict = config_dict or {}
         self.bind_host = host
         super().__init__((host, port), DashboardHandler)
@@ -104,28 +134,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._json({"ok": False, "error": message}, status)
 
-    def _authorized(self, api: bool) -> bool:
+    def _authorized(self, api: bool, share: bool = False) -> bool:
         srv = self.server
         host = self.headers.get("Host", "")
-        if srv.password:
+        if share and not srv.share_password:
+            self._error(HTTPStatus.NOT_FOUND, "Sharing is disabled")
+            return False
+        password = srv.share_password if share else srv.password
+        if password:
             auth = self.headers.get("Authorization", "")
             ok = False
             if auth.startswith("Basic "):
                 try:
                     _, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
-                    ok = hmac.compare_digest(pw, srv.password)
+                    ok = hmac.compare_digest(pw, password)
                 except (ValueError, UnicodeDecodeError):
                     ok = False
             if not ok:
                 self._send(401, b"Authentication required", "text/plain",
-                           {"WWW-Authenticate": 'Basic realm="memecoin-agent"'})
+                           {"WWW-Authenticate": 'Basic realm="memecoin-agent-share"' if share
+                            else 'Basic realm="memecoin-agent"'})
                 return False
         elif host not in srv.allowed_hosts():
             self._error(HTTPStatus.FORBIDDEN, "Unexpected Host header")
             return False
         if api:
-            token = self.headers.get("X-UI-Token") or parse_qs(urlparse(self.path).query).get("token", [""])[0]
-            if not hmac.compare_digest(token, srv.token):
+            token = (self.headers.get("X-Share-Token", "") if share else
+                     self.headers.get("X-UI-Token") or parse_qs(urlparse(self.path).query).get("token", [""])[0])
+            if not hmac.compare_digest(token, srv.share_token if share else srv.token):
                 self._error(HTTPStatus.FORBIDDEN, "Missing or invalid UI token; reload the page")
                 return False
         return True
@@ -148,7 +184,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path = url.path
         api = path.startswith("/api/")
-        if not self._authorized(api):
+        share = path in ("/share", "/share/") or path.startswith("/api/share/") or path in (
+            "/static/share.js", "/static/share.css")
+        if not self._authorized(api, share=share):
             return
         q = parse_qs(url.query)
         srv, runner = self.server, self.server.runner
@@ -156,11 +194,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace("__UI_TOKEN__", srv.token)
             self._send(200, html.encode(), "text/html; charset=utf-8",
                        {"Content-Security-Policy": CSP, "X-Frame-Options": "DENY"})
+        elif path in ("/share", "/share/"):
+            html = (STATIC_DIR / "share.html").read_text(encoding="utf-8").replace(
+                "__SHARE_TOKEN__", srv.share_token)
+            self._send(200, html.encode(), "text/html; charset=utf-8",
+                       {"Content-Security-Policy": CSP, "X-Frame-Options": "DENY"})
         elif path.startswith("/static/") and path[len("/static/"):] in STATIC_FILES:
             name = path[len("/static/"):]
             self._send(200, (STATIC_DIR / name).read_bytes(), STATIC_FILES[name])
         elif path == "/api/view":
             self._json(runner.view)
+        elif path == "/api/share/view":
+            self._json(shared_view(runner.view))
+        elif path == "/api/share/equity":
+            baseline = runner.view.get("baseline_equity")
+            points = runner.equity.series(max_points=120) if baseline else []
+            self._json({"points": [[t, round((value / baseline - 1) * 100, 3)]
+                                   for t, value in points]})
         elif path == "/api/equity":
             rng = q.get("range", ["24h"])[0]
             since = None
@@ -231,3 +281,4 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # never leak a stack trace to the page, but log it
             log.exception("Dashboard request failed")
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+

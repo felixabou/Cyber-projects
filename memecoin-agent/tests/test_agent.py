@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import threading
+import time
 
 from memecoin_agent.agent import Agent
 from memecoin_agent.config import Config
@@ -103,6 +105,106 @@ def test_market_outage_does_not_crash(tmp_path):
     assert agent.ticks == 1 and not agent.pf.positions
 
 
+def test_sniper_discovery_does_not_wait_for_story_feed(tmp_path):
+    class Story:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.calls = 0
+
+        def discover(self, now):
+            self.calls += 1
+            self.started.set()
+            assert self.release.wait(2)
+            return ["STORY"]
+
+    cfg, story = Config(), Story()
+    cfg.sniper.enabled = True
+    cfg.feeds.pumpportal_new_tokens = True
+    agent, clock = make_agent(FakeMarket([]), cfg=cfg, tmp_path=tmp_path)
+    agent.newscheck = story
+    try:
+        before = time.monotonic()
+        assert agent.evaluate_candidates(clock()) == []
+        assert time.monotonic() - before < .5
+        assert story.started.wait(1)
+    finally:
+        story.release.set()
+    for _ in range(100):
+        if agent._cached_story_discovery(clock()) == ["STORY"]:
+            break
+        time.sleep(.01)
+    assert story.calls == 1
+
+
+def test_story_feed_failure_changes_client_only_on_agent_thread(tmp_path):
+    class Unauthorized(Exception):
+        status = 401
+
+    class Story:
+        def __init__(self):
+            self.started = threading.Event()
+
+        def discover(self, now):
+            self.started.set()
+            raise Unauthorized("expired key")
+
+    cfg, story = Config(), Story()
+    cfg.sniper.enabled = True
+    cfg.feeds.pumpportal_new_tokens = True
+    agent, clock = make_agent(FakeMarket([]), cfg=cfg, tmp_path=tmp_path)
+    agent.newscheck = story
+    agent.evaluate_candidates(clock())
+    assert story.started.wait(1)
+    for _ in range(100):
+        with agent._story_discovery_lock:
+            pending = agent._story_discovery_error
+        if pending is not None:
+            break
+        time.sleep(.01)
+    assert agent.newscheck is story  # the worker did not disable a live check mid-scan
+    assert agent._cached_story_discovery(clock()) == []
+    assert agent.newscheck is None  # the agent thread applies the failure on its next scan
+
+
+def test_sniper_lane_is_evaluated_before_older_momentum_candidates(tmp_path):
+    class Market(FakeMarket):
+        def is_pregraduation(self, mint):
+            return mint == "EARLY"
+
+    cfg = Config()
+    cfg.sniper.enabled = True
+    cfg.feeds.pumpportal_new_tokens = True
+    early = make_snap(mint="EARLY", pair_created_at=NOW - timedelta(minutes=1), liquidity_usd=8_000,
+                      market_cap_usd=50_000, volume_h1=3_000, buys_h1=20, sells_h1=10,
+                      price_change_h1=1)
+    agent, _ = make_agent(Market([make_snap(mint="LATE"), early]), cfg=cfg, tmp_path=tmp_path)
+    evals = agent.evaluate_candidates(NOW)
+    assert [ev.snapshot.mint for ev in evals[:2]] == ["EARLY", "LATE"]
+    assert evals[0].lane == "sniper" and evals[0].passed
+
+
+def test_sniper_keeps_story_discovery_in_a_full_feed_scan(tmp_path):
+    class Market(FakeMarket):
+        def discover(self):
+            return [f"FEED{i}" for i in range(30)]
+
+    cfg = Config()
+    cfg.sniper.enabled = True
+    cfg.feeds.pumpportal_new_tokens = True
+    cfg.agent.max_candidates_per_scan = 30
+    market = Market([make_snap(mint=f"FEED{i}") for i in range(30)] + [make_snap(mint="STORY")])
+    agent, _ = make_agent(market, cfg=cfg, tmp_path=tmp_path)
+    agent.newscheck = object()
+    agent._story_discovery_mints = ["STORY"]
+    agent._story_discovery_next = time.monotonic() + 60
+    scanned = {ev.snapshot.mint for ev in agent.evaluate_candidates(NOW)}
+    assert "FEED0" in scanned and "STORY" in scanned
+    assert len(scanned) == 30
+    cfg.agent.max_candidates_per_scan = 1
+    assert [ev.snapshot.mint for ev in agent.evaluate_candidates(NOW)] == ["FEED0"]
+
+
 def test_synthetic_market_run_keeps_books_consistent(tmp_path):
     cfg = Config()
     cfg.agent.kill_switch_file = str(tmp_path / "STOP")
@@ -123,3 +225,4 @@ def test_synthetic_market_run_keeps_books_consistent(tmp_path):
     assert abs(1000 - sum(t.usd_value for t in buys) + sum(t.usd_value for t in sells) - agent.pf.cash_usd) < 1e-6
     # Realized PnL from the journal matches the ledger.
     assert abs(sum(t.realized_pnl_usd for t in sells) - agent.pf.total_realized_pnl()) < 1e-6
+

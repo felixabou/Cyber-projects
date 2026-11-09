@@ -78,7 +78,9 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         url=fc.pumpportal_url, migrations=fc.pumpportal_migrations, new_tokens=fc.pumpportal_new_tokens,
         max_age_s=cfg.filters.max_age_hours * 3600, max_mints=fc.max_buffered_mints, buffer_file=fc.buffer_file,
     )
-    return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd), feed
+    return FeedAugmentedMarket(base, feed, fc.evict_below_liquidity_usd,
+                               fast_limit=cfg.agent.max_candidates_per_scan if cfg.sniper.enabled else 0,
+                               launch_window_s=cfg.sniper.max_age_minutes * 60), feed
 
 
 def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
@@ -446,13 +448,17 @@ def cmd_ui(args: argparse.Namespace, cfg: Config) -> None:
     engine = Engine(cfg, args)
     try:
         server = DashboardServer(engine.runner, logs, host=args.host, port=args.port,
-                                 password=os.environ.get("MEMECOIN_UI_PASSWORD"), config_dict=redacted_config(cfg))
+                                 password=os.environ.get("MEMECOIN_UI_PASSWORD"),
+                                 share_password=os.environ.get("MEMECOIN_SHARE_PASSWORD"),
+                                 config_dict=redacted_config(cfg))
     except BaseException:
         engine.stop()
         raise
     engine.start()
     mode = "synthetic market" if args.synthetic else f"{cfg.execution.mode} mode"
     print(f"Dashboard: {server.url}  ({mode}; Ctrl-C to stop)", flush=True)
+    if server.share_password:
+        print(f"Friend view: {server.url.rstrip('/')}/share  (separate password)", flush=True)
     if not args.no_browser:
         try:
             import webbrowser

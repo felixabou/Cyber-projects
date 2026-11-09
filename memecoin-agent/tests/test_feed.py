@@ -92,6 +92,103 @@ def test_feed_mints_lead_discovery_and_dead_pools_are_evicted():
     assert market.discover() == ["G2", "DEX1", "G1"]  # still discoverable via the base feed
 
 
+def test_sniper_discovers_launches_without_waiting_for_slow_base():
+    started, release = threading.Event(), threading.Event()
+
+    class Base:
+        def discover(self):
+            started.set()
+            assert release.wait(2), "base discovery test timed out"
+            return ["DEX1"]
+
+    feed = PumpPortalFeed(clock=Clock())
+    for i in range(35):
+        feed.handle_message(migrate(f"G{i}"))
+    feed.handle_message(create("NEW"))
+    market = FeedAugmentedMarket(Base(), feed, fast_limit=30)
+    try:
+        before = time.monotonic()
+        first = market.discover()
+        assert time.monotonic() - before < 0.5  # background base discovery did not delay the launch
+        assert first[0] == "NEW" and "NEW" in first[:30]
+        assert started.wait(1)
+    finally:
+        release.set()
+    for _ in range(100):
+        if "DEX1" in market.discover()[:30]:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("cached base discovery did not become visible")
+
+
+def test_sniper_base_discovery_is_throttled_and_failures_keep_last_result():
+    class Base:
+        def __init__(self):
+            self.calls = 0
+            self.done = threading.Event()
+
+        def discover(self):
+            self.calls += 1
+            self.done.set()
+            if self.calls > 1:
+                raise ConnectionError("temporary outage")
+            return ["DEX1"]
+
+    clock, base = Clock(), Base()
+    market = FeedAugmentedMarket(base, PumpPortalFeed(clock=clock), fast_limit=30,
+                                 base_refresh_s=30, clock=clock)
+    market.discover()
+    assert base.done.wait(1)
+    for _ in range(100):
+        if "DEX1" in market.discover():
+            break
+        time.sleep(0.01)
+    assert "DEX1" in market.discover() and base.calls == 1
+    clock.t += 29
+    market.discover()
+    assert base.calls == 1
+    clock.t += 1
+    base.done.clear()
+    market.discover()
+    assert base.done.wait(1)
+    assert base.calls == 2
+    assert "DEX1" in market.discover()  # a failure does not erase successful discovery
+
+
+def test_sniper_rotates_active_launches_and_reserves_other_candidates():
+    class Base:
+        def __init__(self):
+            self.ready = threading.Event()
+
+        def discover(self):
+            self.ready.set()
+            return [f"DEX{i}" for i in range(5)]
+
+    clock, base = Clock(), Base()
+    feed = PumpPortalFeed(clock=clock)
+    for i in range(35):
+        feed.handle_message(create(f"L{i}"))
+    for i in range(6):
+        feed.handle_message(migrate(f"G{i}"))
+    market = FeedAugmentedMarket(base, feed, fast_limit=30, launch_window_s=900, clock=clock)
+    market.discover()
+    assert base.ready.wait(1)
+    for _ in range(100):
+        if "DEX0" in market.discover()[:30]:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("base refresh did not become visible")
+    seen = set()
+    for _ in range(3):
+        first_30 = market.discover()[:30]
+        assert first_30[0] == "L34"  # newest launches are prioritized every scan
+        assert "G5" in first_30 and "DEX0" in first_30
+        seen.update(first_30)
+    assert "L0" in seen  # an older active launch can reach the scanner after checks catch up
+
+
 def test_websocket_subscribe_receive_and_reconnect():
     """Real websocket client against a local server: subscribes, buffers events, reconnects after a drop."""
     pytest.importorskip("websockets")
@@ -140,3 +237,4 @@ def test_websocket_subscribe_receive_and_reconnect():
         stop_server.set()
         t.join(5)
     assert not feed.connected.is_set()
+

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -78,6 +80,11 @@ class Agent:
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
         self._nc_notes: dict[str, str] = {}  # mint -> the story that qualified it
         self._nc_warned = False
+        self._story_discovery_mints: list[str] = []
+        self._story_discovery_next = 0.0
+        self._story_discovery_running = False
+        self._story_discovery_error: Exception | None = None
+        self._story_discovery_lock = threading.Lock()
         self._longterm_exits: Any = None
         self.lane_outcomes: deque[dict[str, Any]] = deque(maxlen=100)  # copy / long-term decisions, newest last
         self._lane_last: dict[str, str] = {}  # mint -> last outcome noted (log each change once)
@@ -268,10 +275,19 @@ class Agent:
             discovered = []
         f = self.cfg.filters
         if self.newscheck is not None:  # coins with a strong story among the newest checks
-            try:
-                discovered = [*self.newscheck.discover(now), *discovered]
-            except Exception as exc:
-                self._newscheck_failed(exc)
+            if self.cfg.sniper.enabled:
+                # The feed's new-token candidates must not wait for a slow NewsCheck latest call.
+                stories = self._cached_story_discovery(now)
+                limit = self.cfg.agent.max_candidates_per_scan
+                story_slots = min(max(1, limit // 10), max(0, limit - 1))
+                feed_slots = limit - story_slots
+                discovered = [*discovered[:feed_slots], *stories[:story_slots],
+                              *discovered[feed_slots:], *stories[story_slots:]]
+            else:
+                try:
+                    discovered = [*self.newscheck.discover(now), *discovered]
+                except Exception as exc:
+                    self._newscheck_failed(exc)
         self._nc_scan.clear()
         mints = [m for m in dict.fromkeys([*f.watchlist, *discovered])
                  if m not in f.blacklist and not self.risk.token_blocked(self.pf, m, now)]
@@ -296,7 +312,43 @@ class Agent:
             self._launch_skips.clear()
         if len(self.kinds) > 2000:
             self.kinds.clear()
+        if self.cfg.sniper.enabled:
+            priority = {"sniper": 2, "launch": 1}
+            return sorted(evals, key=lambda e: (e.passed, priority.get(e.lane, 0), e.score), reverse=True)
         return sorted(evals, key=lambda e: (e.passed, e.lane == "launch", e.score), reverse=True)
+
+    def _cached_story_discovery(self, now: datetime) -> list[str]:
+        with self._story_discovery_lock:
+            error = self._story_discovery_error
+            self._story_discovery_error = None
+            mints = list(self._story_discovery_mints)
+        if error is not None:
+            self._newscheck_failed(error)  # agent thread owns changes to the active safety/discovery client
+        if self.newscheck is None:
+            return []
+        with self._story_discovery_lock:
+            refresh = not self._story_discovery_running and time.monotonic() >= self._story_discovery_next
+            if refresh:
+                self._story_discovery_running = True
+        if refresh:
+            threading.Thread(target=self._refresh_story_discovery, args=(now,),
+                             name="story-discovery", daemon=True).start()
+        return mints
+
+    def _refresh_story_discovery(self, now: datetime) -> None:
+        client = self.newscheck
+        error: Exception | None = None
+        try:
+            mints = client.discover(now) if client is not None else []
+        except Exception as exc:
+            error = exc
+            mints = None
+        with self._story_discovery_lock:
+            if mints is not None:
+                self._story_discovery_mints = list(mints)
+            self._story_discovery_error = error
+            self._story_discovery_running = False
+            self._story_discovery_next = time.monotonic() + 60.0
 
     def _launch_lane(self, ev: EntryEvaluation, now: datetime) -> EntryEvaluation | None:
         s, lc = ev.snapshot, self.cfg.launch
@@ -500,9 +552,11 @@ class Agent:
                 self._record_scan(now, self.evaluate_candidates(now), {})
             return
 
+        scan_started = time.monotonic()
         evals = self.evaluate_candidates(now)
         passed = [e for e in evals if e.passed]
-        log.info("Scan: %d candidates, %d passed filters", len(evals), len(passed))
+        log.info("Scan: %d candidates, %d passed filters (discovery and snapshots %.2fs)",
+                 len(evals), len(passed), time.monotonic() - scan_started)
         outcomes: dict[str, str] = {}  # mint -> what happened after passing filters
         for ev in passed:
             snap = ev.snapshot

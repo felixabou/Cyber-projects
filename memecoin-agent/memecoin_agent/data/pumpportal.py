@@ -102,12 +102,19 @@ class PumpPortalFeed:
 
     def recent(self) -> list[str]:
         """Buffered mints, graduations first, newest first within each group."""
+        launches, migrations = self.recent_by_kind()
+        return [*migrations, *launches]
+
+    def recent_by_kind(self) -> tuple[list[str], list[str]]:
+        """Launches and graduations, each newest first."""
         self._prune()
         with self._lock:
             events = list(self._events.values())
         # Insertion order breaks timestamp ties, so the latest arrival still comes first.
-        order = sorted(range(len(events)), key=lambda i: (events[i].kind != "migration", -events[i].seen_at, -i))
-        return [events[i].mint for i in order]
+        order = sorted(range(len(events)), key=lambda i: (-events[i].seen_at, -i))
+        launches = [events[i].mint for i in order if events[i].kind == "launch"]
+        migrations = [events[i].mint for i in order if events[i].kind == "migration"]
+        return launches, migrations
 
     def evict(self, mint: str) -> None:
         with self._lock:
@@ -207,18 +214,68 @@ class PumpPortalFeed:
 
 
 class FeedAugmentedMarket:
-    """MarketData wrapper: launch-feed mints first in discovery, everything else delegated."""
+    """MarketData wrapper: feed mints first; optional fast mode refreshes base discovery in the background."""
 
     def __init__(self, base: Any, feed: PumpPortalFeed, evict_below_liquidity_usd: float = 5_000.0,
-                 evict_grace_s: float = 1800.0) -> None:
+                 evict_grace_s: float = 1800.0, fast_limit: int = 0,
+                 base_refresh_s: float = 30.0, launch_window_s: float = 15 * 60,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.base = base
         self.feed = feed
         self.evict_below = evict_below_liquidity_usd
         # Right after a graduation DexScreener may still show only the drained bonding-curve
         # pair; give the new pool time to be indexed before judging the token dead.
         self.evict_grace_s = evict_grace_s
+        self.fast_limit = fast_limit
+        self.base_refresh_s = base_refresh_s
+        self.launch_window_s = launch_window_s
+        self.clock = clock
+        self._base_mints: list[str] = []
+        self._base_next_refresh = 0.0
+        self._base_refreshing = False
+        self._base_lock = threading.Lock()
+        self._launch_cursor = 0
+
+    def _refresh_base(self) -> None:
+        try:
+            discovered = self.base.discover()
+        except Exception as exc:
+            log.warning("Base discovery failed: %s", exc)
+            discovered = None
+        with self._base_lock:
+            if discovered is not None:
+                self._base_mints = list(discovered)
+            self._base_refreshing = False
+            self._base_next_refresh = self.clock() + self.base_refresh_s
 
     def discover(self) -> list[str]:
+        if self.fast_limit > 0:
+            # A launch feed event must not wait for DexScreener or GMGN discovery.
+            launches, migrations = self.feed.recent_by_kind()
+            active = [m for m in launches if (age := self.feed.seen_age_s(m)) is not None
+                      and 0 <= age <= self.launch_window_s]
+            active_set = set(active)
+            older = [m for m in launches if m not in active_set]
+            launch_slots = max(1, self.fast_limit * 2 // 3)
+            newest = active[: max(1, launch_slots // 2)]
+            backlog = active[len(newest):]
+            with self._base_lock:
+                base_mints = list(self._base_mints)
+                refresh = not self._base_refreshing and self.clock() >= self._base_next_refresh
+                if refresh:
+                    self._base_refreshing = True
+                # Always see the newest launches; rotate the remaining slots so a token
+                # can be reconsidered after market data and the wallet scan arrive.
+                count = max(0, launch_slots - len(newest))
+                start = self._launch_cursor % len(backlog) if backlog else 0
+                pending = [backlog[(start + i) % len(backlog)] for i in range(min(count, len(backlog)))]
+                self._launch_cursor += len(pending)
+            if refresh:
+                threading.Thread(target=self._refresh_base, name="market-discovery", daemon=True).start()
+            # Reserve room in a capped scan for graduations and normal discovery when available.
+            migration_slots = max(1, self.fast_limit // 6)
+            return list(dict.fromkeys([*newest, *pending, *migrations[:migration_slots],
+                                      *base_mints, *active, *migrations[migration_slots:], *older]))
         try:
             discovered = self.base.discover()
         except Exception as exc:

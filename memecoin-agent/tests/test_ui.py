@@ -64,6 +64,8 @@ def test_page_and_auth(dashboard):
     assert page.status_code == 200 and server.token in page.text
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
     assert client.get("/static/app.js").status_code == 200
+    assert client.get("/share").status_code == 404
+    assert client.get("/api/share/view").status_code == 404
 
     anon = httpx.get(f"http://127.0.0.1:{server.port}/api/view")
     assert anon.status_code == 403  # no token
@@ -144,6 +146,51 @@ def test_remote_binding_requires_password(tmp_path):
         wrong = "Basic " + base64.b64encode(b"user:nope").decode()
         assert httpx.get(url, headers={"Authorization": wrong}).status_code == 401
     finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_friend_share_is_read_only_and_redacted(dashboard):
+    _, runner, _, _ = dashboard
+    with pytest.raises(ValueError, match="must differ"):
+        DashboardServer(runner, LogBuffer(), port=0, password="same", share_password="same")
+
+    server = DashboardServer(runner, LogBuffer(), port=0, password="owner-pass",
+                             share_password="friend-pass")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.port}"
+    guest_auth = "Basic " + base64.b64encode(b"friend:friend-pass").decode()
+    owner_auth = "Basic " + base64.b64encode(b"owner:owner-pass").decode()
+    guest = {"Authorization": guest_auth, "X-Share-Token": server.share_token}
+    http = httpx.Client(trust_env=False)
+    try:
+        assert http.get(root + "/share").status_code == 401
+        assert http.get(root + "/share", headers={"Authorization": owner_auth}).status_code == 401
+        page = http.get(root + "/share", headers={"Authorization": guest_auth})
+        assert page.status_code == 200 and server.share_token in page.text
+        assert server.token not in page.text
+        assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert http.get(root + "/static/share.js", headers=guest).status_code == 200
+        assert http.get(root + "/static/app.js", headers=guest).status_code == 401
+        assert http.get(root + "/api/share/view", headers={"Authorization": guest_auth}).status_code == 403
+        shared = http.get(root + "/api/share/view", headers=guest).json()
+        assert shared["positions"] and "symbol" in shared["positions"][0]
+        assert {"mint", "cash", "equity", "config", "scan", "signature", "token"}.isdisjoint(shared)
+        assert {"mint", "cost_basis_usd", "initial_cost_usd", "url", "larp"}.isdisjoint(shared["positions"][0])
+        assert {"signature", "mint", "token_amount", "usd_value"}.isdisjoint(shared["trades"][0])
+        chart = http.get(root + "/api/share/equity", headers=guest).json()
+        assert all(len(point) == 2 for point in chart["points"])
+        assert http.get(root + "/api/view", headers={**guest, "X-UI-Token": server.token}).status_code == 401
+        assert http.get(root + "/api/log", headers=guest).status_code == 401
+        assert http.get(root + "/api/config", headers=guest).status_code == 401
+        assert http.get(root + "/api/trades.csv", headers=guest).status_code == 401
+        assert http.post(root + "/api/control", headers={**guest, "X-UI-Token": server.token},
+                          json={"action": "close_all"}).status_code == 401
+        assert http.post(root + "/api/share/control", headers=guest,
+                          json={"action": "close_all"}).status_code == 401
+    finally:
+        http.close()
         server.shutdown()
         server.server_close()
 
