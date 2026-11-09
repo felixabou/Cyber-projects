@@ -81,6 +81,8 @@ execution:
   max_roundtrip_loss_pct: 12
 
 agent:
+  scan_log: true                   # log every scanned coin and what it did 15m / 1h / 4h later (state/scans.csv)
+  scan_log_file: state/scans.csv   # read it with `memecoin-agent scans`
   tick_seconds: 10           # open positions are re-priced and exits checked every tick
   scan_every_ticks: 2        # discovery scan every 20s (tick_seconds x scan_every_ticks)
   max_candidates_per_scan: 150  # 30 mints per DexScreener request

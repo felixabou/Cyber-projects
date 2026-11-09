@@ -46,6 +46,7 @@ class Agent:
         longterm: object | None = None,
         chain_safety: object | None = None,
         newscheck: object | None = None,
+        scanlog: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -78,6 +79,8 @@ class Agent:
         self.chain_safety = chain_safety
         # data.newscheck.NewsCheckClient: the story behind each candidate (narrative lane and buy gate).
         self.newscheck = newscheck
+        # scanlog.ScanLog: every scanned coin and what it did afterwards (the data to tune the filters on).
+        self.scanlog = scanlog
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
         self._nc_notes: dict[str, str] = {}  # mint -> the story that qualified it
         self._nc_warned = False
@@ -929,6 +932,11 @@ class Agent:
 
     def _record_scan(self, now: datetime, evals: list[EntryEvaluation], outcomes: dict[str, str]) -> None:
         self.last_scan_at = now
+        if self.scanlog is not None:
+            try:
+                self.scanlog.observe(now.timestamp(), evals, outcomes, self.kinds)
+            except Exception as exc:
+                log.warning("Scan log failed: %s", exc)
         self.last_scan = [
             {
                 "mint": e.snapshot.mint, "symbol": e.snapshot.symbol, "chain": e.snapshot.chain, "url": e.snapshot.url,

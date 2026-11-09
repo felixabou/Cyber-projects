@@ -142,6 +142,10 @@ class AgentConfig:
     state_file: str = "state/state.json"
     trades_csv: str = "state/trades.csv"
     log_file: str | None = "state/agent.log"
+    # Scan-everything data log: every coin scanned, its features, why it was rejected or skipped, and what its
+    # price and liquidity did 15 min, 1 h and 4 h later (state/scans.csv). `memecoin-agent scans` reads it.
+    scan_log: bool = True
+    scan_log_file: str | None = "state/scans.csv"
     # If this file exists the agent opens no new positions (exits still run).
     kill_switch_file: str = "STOP"
 
