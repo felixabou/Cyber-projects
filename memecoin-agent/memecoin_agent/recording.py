@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterator
 
 from .config import Config
 from .data import MarketData, SafetyChecker
+from .data.dexscreener import canonical_chain
 from .data.rugcheck import UNAVAILABLE
 from .models import utcnow
 from .strategy import lowcap_reasons
@@ -240,20 +241,21 @@ class Recorder:
         # Only tokens that could plausibly pass a liquidity filter; RugCheck isn't free to hammer.
         floor = self.cfg.filters.min_liquidity_usd * 0.5
         todo = [(m, s) for m, s in snaps.items()
-                if (s.chain, m) not in self.safety_done and s.liquidity_usd >= floor]
+                if (canonical_chain(s.chain), m) not in self.safety_done and s.liquidity_usd >= floor]
         for mint, snap in todo[:10]:
-            if snap.chain == "solana":
+            chain = canonical_chain(snap.chain)
+            if chain == "solana":
                 if self.safety is None:
                     continue
                 rep = self.safety.check(mint)
             else:
                 if self.chain_safety is None:
                     continue
-                rep = self.chain_safety.check(snap.chain, mint)
+                rep = self.chain_safety.check(chain, mint)
             if rep.reasons == [UNAVAILABLE]:
                 continue  # retry next tick rather than recording an outage as a verdict
-            self.safety_done.add((snap.chain, mint))
-            out.append({"type": "safety", "t": now.isoformat(), "chain": snap.chain, "mint": mint,
+            self.safety_done.add((chain, mint))
+            out.append({"type": "safety", "t": now.isoformat(), "chain": chain, "mint": mint,
                         "ok": rep.ok, "score": rep.score, "reasons": rep.reasons})
         return out
 
