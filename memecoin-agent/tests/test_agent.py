@@ -58,7 +58,9 @@ def make_agent(market, safety=None, cfg=None, tmp_path=None):
 def test_agent_enters_safe_tokens_and_exits_on_rug(tmp_path):
     good, unsafe, weak = make_snap(mint="GOOD"), make_snap(mint="BAD"), make_snap(mint="WEAK", liquidity_usd=1000)
     market = FakeMarket([good, unsafe, weak])
-    agent, clock = make_agent(market, FakeSafety(unsafe={"BAD"}), tmp_path=tmp_path)
+    cfg = Config()
+    cfg.risk.conviction_sizing = False
+    agent, clock = make_agent(market, FakeSafety(unsafe={"BAD"}), cfg=cfg, tmp_path=tmp_path)
 
     agent.tick()
     assert set(agent.pf.positions) == {"GOOD"}

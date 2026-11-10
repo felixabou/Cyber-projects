@@ -77,6 +77,7 @@ def bsc_snap(mint="0x" + "ab" * 20, **overrides):
 
 def make_agent(snaps, gate, mode="paper"):
     cfg = Config()
+    cfg.lowcap.confirm_seconds = 0
     cfg.execution.mode = mode
     cfg.agent.kill_switch_file = ""
     clock = Clock()

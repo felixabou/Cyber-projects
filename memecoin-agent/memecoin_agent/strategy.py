@@ -164,8 +164,12 @@ def lowcap_reasons(s: TokenSnapshot, lc: LowCapConfig, f: FilterConfig, now: dat
         reasons.append(f"chg1h {s.price_change_h1:+.1f}% < {lc.min_price_change_h1:+.1f}%")
     if s.price_change_h1 > lc.max_price_change_h1:
         reasons.append(f"chg1h {s.price_change_h1:+.1f}% too extended")
+    if lc.max_price_change_m5 is not None and s.price_change_m5 > lc.max_price_change_m5:
+        reasons.append(f"chg5m {s.price_change_m5:+.1f}% spiking (top of a 5-minute candle)")
     if s.volume_to_liquidity_h1 < lc.min_volume_to_liquidity_h1:
         reasons.append(f"vol/liq {s.volume_to_liquidity_h1:.2f} < {lc.min_volume_to_liquidity_h1:.2f}")
+    if lc.min_volume_m5_share is not None and s.volume_h1 > 0 and s.volume_m5 < lc.min_volume_m5_share * s.volume_h1:
+        reasons.append(f"vol5m ${s.volume_m5:,.0f} is under {lc.min_volume_m5_share * 100:g}% of the hour's (fading)")
     score = momentum_score(s)
     if score < lc.min_score:
         reasons.append(f"score {score:.2f} < {lc.min_score:.2f}")
@@ -184,6 +188,32 @@ def secure_fraction(pos: Position, price: float, e: ExitConfig, fee_pct: float =
     return min(1.0, (pos.initial_cost_usd + e.secure_profit_share * profit) / value)
 
 
+RUNNER_TAKE = 99  # marker in Position.tp_levels_hit: the runner's one extra take profit is done
+
+
+def runner_drawdown_limit(e: ExitConfig, peak_gain_pct: float) -> float:
+    """How far below its peak a runner may fall before it is sold. With exits.runner_trail the limit depends
+    on how far the runner's peak is above the entry price; otherwise it is exits.runner_drawdown_pct."""
+    limit = e.runner_drawdown_pct
+    for tier in sorted(e.runner_trail, key=lambda t: t.above_pct):
+        if peak_gain_pct >= tier.above_pct:
+            limit = tier.drawdown_pct
+    return limit
+
+
+def lp_removed_pct(pos: Position, s: TokenSnapshot) -> float:
+    """% of the pool's liquidity that is missing beyond what the price move explains. In a constant-product
+    pool liquidity moves with the square root of the price, so a fall in price alone is not a pull. 0 unless
+    the pool is also at least 15% smaller than at entry (pools that don't track price, such as one-sided
+    ones, must not look like a pull while the coin rises)."""
+    if pos.entry_liquidity_usd <= 0 or pos.entry_price_usd <= 0 or s.price_usd <= 0:
+        return 0.0
+    if s.liquidity_usd > pos.entry_liquidity_usd * 0.85:
+        return 0.0
+    expected = pos.entry_liquidity_usd * (s.price_usd / pos.entry_price_usd) ** 0.5
+    return (1 - s.liquidity_usd / expected) * 100 if expected > 0 else 0.0
+
+
 def _review_due(pos: Position, now: datetime, minutes: float) -> bool:
     if pos.next_review_at is None:
         pos.next_review_at = now + timedelta(minutes=minutes)
@@ -198,27 +228,46 @@ def _let_it_run(pos: Position, s: TokenSnapshot, e: ExitConfig, now: datetime, f
     price = s.price_usd
     pnl = pos.pnl_pct(price)
     if pos.secured:
-        # The runner: house money. Its peak is tracked every tick; the sell decision waits for a review.
+        # The runner: house money. Its peak is tracked every tick.
         pos.runner_peak_usd = max(pos.runner_peak_usd, price)
-        if not _review_due(pos, now, e.runner_review_minutes):
-            return None
         peak = pos.runner_peak_usd
         drawdown = (1 - price / peak) * 100 if peak > 0 else 0.0
+        peak_gain = (peak / pos.entry_price_usd - 1) * 100 if pos.entry_price_usd > 0 else 0.0
+        limit = runner_drawdown_limit(e, peak_gain)
+        if (e.runner_take_at_pct is not None and RUNNER_TAKE not in pos.tp_levels_hit and pnl >= e.runner_take_at_pct
+                and 0 < e.runner_take_fraction < 1):
+            return ExitDecision(e.runner_take_fraction, f"runner take profit ({pnl:+.0f}%): sold "
+                                f"{e.runner_take_fraction * 100:.0f}% of the runner, the rest keeps running",
+                                tp_level=RUNNER_TAKE)
+        if e.runner_floor_pct is not None and pnl <= e.runner_floor_pct:
+            return ExitDecision(1.0, f"runner back at its entry ({pnl:+.1f}%, floor {e.runner_floor_pct:+g}%)")
+        if e.runner_review_minutes > 0 and not _review_due(pos, now, e.runner_review_minutes):
+            return None
         since = (now - pos.secured_at).total_seconds() / 3600 if pos.secured_at else 0.0
         pos.review_note = (f"runner {pnl:+.0f}% from entry, {drawdown:.0f}% below its peak "
-                           f"(sells at {e.runner_drawdown_pct:g}%), {since:.1f}h since the initials came out")
-        if drawdown >= e.runner_drawdown_pct:
-            return ExitDecision(1.0, f"runner {drawdown:.0f}% below its peak (limit {e.runner_drawdown_pct:g}%, "
+                           f"(sells at {limit:g}%), {since:.1f}h since the initials came out")
+        if drawdown >= limit:
+            return ExitDecision(1.0, f"runner {drawdown:.0f}% below its peak (limit {limit:g}%, "
                                      f"pnl {pnl:+.1f}%)")
         return None
 
     if pnl <= -e.hard_stop_pct:
         return ExitDecision(1.0, f"stop loss ({pnl:+.1f}%)")
     if pnl >= e.secure_at_pct:
+        if e.secure_sell_fraction is not None:
+            frac = e.secure_sell_fraction
+            return ExitDecision(frac, f"first take profit ({pnl:+.1f}%): sold {frac * 100:.0f}%, the rest runs",
+                                secure=frac < 0.999)
         frac = secure_fraction(pos, price, e, fee_pct)
         return ExitDecision(frac, f"initials out ({pnl:+.1f}%): sold {frac * 100:.0f}% = the initial "
                                   f"${pos.initial_cost_usd:,.2f} + {e.secure_profit_share * 100:g}% of the profit, "
                                   f"the rest runs", secure=frac < 0.999)
+    peak_pnl = pos.pnl_pct(max(pos.peak_price_usd, price))
+    if e.protect_after_pct is not None and peak_pnl >= e.protect_after_pct and pnl <= e.protect_floor_pct:
+        return ExitDecision(1.0, f"gave its gain back (was {peak_pnl:+.0f}%, now {pnl:+.1f}%): out near break-even")
+    held_min = (now - pos.opened_at).total_seconds() / 60
+    if e.stall_minutes is not None and held_min >= e.stall_minutes and peak_pnl < e.stall_min_peak_pct:
+        return ExitDecision(1.0, f"no follow-through ({held_min:.0f}m held, best {peak_pnl:+.0f}%, now {pnl:+.1f}%)")
     if e.dip_watch_pct is None:
         return None
     if pos.dip_since is None:
@@ -264,6 +313,10 @@ def evaluate_exit(pos: Position, s: TokenSnapshot | None, e: ExitConfig, now: da
             liq_drop = (1 - s.liquidity_usd / pos.entry_liquidity_usd) * 100
             if liq_drop >= e.liquidity_drop_exit_pct:
                 return ExitDecision(1.0, f"liquidity pulled ({liq_drop:.0f}% below entry)")
+            removed = lp_removed_pct(pos, s)
+            if e.lp_removed_exit_pct is not None and removed >= e.lp_removed_exit_pct:
+                return ExitDecision(1.0, f"liquidity being removed ({removed:.0f}% of the pool gone beyond "
+                                         f"what the price move explains)")
         decision = _let_it_run(pos, s, e, now, fee_pct)
         if decision is None and not pos.secured and e.max_hold_minutes is not None and held_min >= e.max_hold_minutes:
             return ExitDecision(1.0, f"time stop ({held_min:.0f}m, pnl {pos.pnl_pct(s.price_usd):+.1f}%)")

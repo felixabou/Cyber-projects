@@ -126,6 +126,7 @@ def test_sniper_replay_requires_a_recorded_wallet_scan(tmp_path):
 
 def test_recorder_captures_lowcap_wallet_scans_for_replay(tmp_path):
     cfg = Config()
+    cfg.lowcap.confirm_seconds = 0
     cfg.sniper.enabled = False
     low = make_snap(mint="LOW", market_cap_usd=80_000, liquidity_usd=20_000, volume_h1=30_000,
                     pair_created_at=NOW - timedelta(minutes=45))
@@ -160,6 +161,7 @@ def test_recorder_captures_lowcap_wallet_scans_for_replay(tmp_path):
 
 def test_lowcap_bsc_replay_uses_chain_snapshot_and_safety(tmp_path):
     cfg = Config()
+    cfg.lowcap.confirm_seconds = 0
     address = "0x" + "ab" * 20
     records = [disc(NOW, [address]), snap_rec(NOW, mint=address, chain="bsc", quote_symbol="WBNB",
                                                 market_cap_usd=80_000, liquidity_usd=20_000,
@@ -172,6 +174,7 @@ def test_lowcap_bsc_replay_uses_chain_snapshot_and_safety(tmp_path):
 
 def test_recorder_records_non_solana_safety_for_replay(tmp_path):
     cfg = Config()
+    cfg.lowcap.confirm_seconds = 0
     address = "0x" + "ef" * 20
     snap = make_snap(mint=address, chain="bsc", quote_symbol="WBNB", market_cap_usd=80_000,
                      liquidity_usd=20_000, volume_h1=30_000, pair_created_at=NOW - timedelta(minutes=45))

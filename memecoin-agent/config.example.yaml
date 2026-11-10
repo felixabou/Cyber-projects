@@ -32,16 +32,31 @@ filters:
 
 exits:
   style: let_it_run           # or classic (stop_loss_pct, take_profit_levels, trailing stop below)
+  hard_stop_pct: 30           # sell everything at -30%, every tick
   secure_at_pct: 25           # up 25%: sell the initial cost + secure_profit_share of the profit...
   secure_profit_share: 0.5
-  runner_review_minutes: 30   # ...the rest runs: checked every 30m, sold only this far below its peak
-  runner_drawdown_pct: 70
-  hard_stop_pct: 50           # sell everything at -50%, every tick
-  dip_watch_pct: 30           # -30%: reviews every 30m; held between -30% and -40% while consolidating
+  secure_sell_fraction: null  # ...or a fixed share of the position instead of that formula
+  # ...the rest (the runner) is sold this far below its peak, by how far that peak is above entry:
+  runner_trail:
+    - {above_pct: 0, drawdown_pct: 30}
+    - {above_pct: 100, drawdown_pct: 40}
+    - {above_pct: 300, drawdown_pct: 50}
+  runner_drawdown_pct: 70     # used only when runner_trail is empty
+  runner_review_minutes: 0    # 0: checked every tick
+  runner_take_at_pct: 100     # up 100%: sell runner_take_fraction of the runner once (null = off)
+  runner_take_fraction: 0.5
+  runner_floor_pct: null      # e.g. 0: sell the runner if it comes back to its entry price
+  stall_minutes: 30           # held this long without ever being up stall_min_peak_pct: sold (null = off)
+  stall_min_peak_pct: 5
+  protect_after_pct: null     # e.g. 15: was up 15% and is back at protect_floor_pct: sold near break-even
+  protect_floor_pct: 1
+  dip_watch_pct: null         # e.g. 30 with hard_stop_pct: 50: 30-minute dip reviews instead of a tight stop
   dip_hold_max_pct: 40
   dip_review_minutes: 30
   consolidation_max_range_pct: 25
   consolidation_max_slide_pct: 10
+  lp_removed_exit_pct: 25     # liquidity leaving the pool beyond what the price move explains: sell
+  lanes: {}                   # per-lane overrides, e.g. {lowcap: {hard_stop_pct: 30}}
   max_hold_minutes: 720       # time stop for positions whose initials never came out (runners: none)
   liquidity_drop_exit_pct: 40
   # classic only:
@@ -62,6 +77,25 @@ risk:
   max_daily_loss_usd: null          # e.g. 500: a fixed dollar limit instead of the percentage
   token_cooldown_minutes: 180
   max_entries_per_hour: 6
+  conviction_sizing: true     # size by score: conviction_floor of the usual size at the lane's minimum score
+  conviction_floor: 0.6
+  conviction_full_score: 0.75
+
+regime:                       # no new automatic entries while the market itself is falling
+  enabled: true
+  min_breadth: 0.25           # share of scanned coins that are up over the last hour (null = off)
+  min_coins: 30               # fewer coins in a scan: breadth isn't judged
+  max_sol_drop_h1_pct: 4      # SOL down this much in an hour (null = off)
+  window_minutes: 15
+
+learning:                     # track record from the scan log (agent.scan_log_file)
+  enabled: true
+  min_lane_samples: 30        # finished rows that passed the same lane before it has an opinion
+  min_band_samples: 100       # else: rows of the same size, age and buy pressure
+  max_rug_rate: 0.5           # skip a group in which more than half rugged (null = off)
+  min_avg_ret_1h: -20         # skip a group that averaged below -20% after an hour (null = off)
+  min_size_factor: 0.6        # position size scales between these with the group's average 1h return
+  max_size_factor: 1.25
 
 execution:
   mode: paper                # paper | live  (live also needs MEMECOIN_AGENT_CONFIRM_LIVE=yes)
@@ -278,6 +312,10 @@ lowcap:
   min_volume_to_liquidity_h1: 0.50
   min_score: 0.35
   max_position_usd: 25             # hard cap; global hourly/daily risk limits still apply
+  max_price_change_m5: 40          # not the top of a 5-minute spike (null = off)
+  min_volume_m5_share: 0.03        # the last 5 minutes carry 3%+ of the hour's volume (null = off)
+  confirm_seconds: 30              # bought only if it still qualifies this much later (0 = at once)
+  confirm_max_slip_pct: 8
 
 telegram:
   # Alerts, trade downloads (/csv) and remote control from your phone. On when a bot token is set:
