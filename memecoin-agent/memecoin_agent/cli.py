@@ -84,6 +84,13 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, window, gmgn, chains=gmgn_chains))
         log.info("GMGN discovery on: %s trending (%s), every %.0fs", ", ".join(gmgn_chains),
                  cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
+    if cfg.discovery.enabled:
+        from .data.gmgn import ExtraDiscoveryMarket
+        from .data.trending import TrendingDiscovery
+
+        base = ExtraDiscoveryMarket(base, TrendingDiscovery(cfg.discovery, cfg.filters))
+        log.info("Trending discovery on: Jupiter (%s) and GeckoTerminal trending pools, one list at a time, a round every %.0fs",
+                 ", ".join(cfg.discovery.jupiter_lists), cfg.discovery.refresh_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None

@@ -687,11 +687,6 @@ class Agent:
             if size <= 0:
                 log.info("Insufficient balance for a minimum-size position")
                 break
-            factor = self._size_factor(ev) * learned
-            if abs(factor - 1) > 0.005:
-                size = round(min(max(size * factor, self.cfg.risk.min_position_usd), self.cfg.risk.max_position_usd,
-                                 self.executor.available_usd(self.pf)), 2)
-                sizing = f"size x{factor:.2f}" + (f" ({record.text()})" if record is not None else " (score)")
             if ev.lane == "sniper":
                 size = min(size, self.cfg.sniper.max_position_usd)
             elif ev.lane == "lowcap":
@@ -699,6 +694,14 @@ class Agent:
                 if size < self.cfg.risk.min_position_usd:
                     outcomes[snap.mint] = "skipped: low-cap position cap is below the risk minimum"
                     continue
+            # Conviction and the track record scale the lane's size (never above the lane's own cap).
+            factor = self._size_factor(ev) * learned
+            if abs(factor - 1) > 0.005:
+                cap = {"sniper": self.cfg.sniper.max_position_usd, "lowcap": self.cfg.lowcap.max_position_usd}.get(
+                    ev.lane, self.cfg.risk.max_position_usd)
+                size = round(min(max(size * factor, self.cfg.risk.min_position_usd), cap,
+                                 self.executor.available_usd(self.pf)), 2)
+                sizing = f"size x{factor:.2f}" + (f" ({record.text()})" if record is not None else " (score)")
             if self.route_check is not None and snap.chain == "solana" and ev.lane != "sniper" \
                     and (why := self.route_check.check(snap.mint, size)):
                 outcomes[snap.mint] = "unsafe: " + why

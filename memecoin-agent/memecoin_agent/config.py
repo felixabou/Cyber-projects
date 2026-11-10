@@ -182,7 +182,7 @@ class ExecutionConfig:
 class AgentConfig:
     tick_seconds: float = 10.0  # exits are checked every tick
     scan_every_ticks: int = 2  # discovery scan every 20s
-    max_candidates_per_scan: int = 150
+    max_candidates_per_scan: int = 250
     state_file: str = "state/state.json"
     trades_csv: str = "state/trades.csv"
     log_file: str | None = "state/agent.log"
@@ -338,6 +338,8 @@ class JupiterConfig:
     min_organic_score: float | None = 20
     organic_min_age_hours: float = 1.0  # live: 4 of 4 unscored coins past an hour fell 33-100% in 20 min
     organic_min_volume_1h_usd: float = 20_000
+    # Holders leaving: the holder count fell this much (%) over the last hour (null = off).
+    max_holder_drop_1h_pct: float | None = 5.0
     shell_min_market_cap_usd: float = 1_000_000
     shell_max_holders: int = 100
     wash_max_holders: int = 150  # 24h turnover beyond GMGN's band among fewer holders = wash
@@ -510,6 +512,21 @@ class LowCapConfig:
 
 
 @dataclass
+class DiscoveryConfig:
+    """Extra discovery (data/trending.py): Jupiter's and GeckoTerminal's live lists of what is trading now.
+    Free, no key. Coins outside market cap min_market_cap_usd..filters.max_market_cap_usd are dropped."""
+
+    enabled: bool = True
+    jupiter_lists: list[str] = field(default_factory=lambda: [
+        "toporganicscore/5m", "toptrending/5m", "toptraded/5m", "toporganicscore/1h", "toptrending/1h"])
+    gecko_durations: list[str] = field(default_factory=lambda: ["5m", "1h"])
+    per_list: int = 100
+    refresh_s: float = 120.0  # one full round; the lists are refreshed one at a time across it
+    min_market_cap_usd: float = 10_000.0
+    min_liquidity_usd: float = 5_000.0
+
+
+@dataclass
 class RegimeConfig:
     """Market regime (edge.MarketRegime): while the market itself is falling, the automatic lanes listed in
     `lanes` open nothing new. Exits, copy trades, long-term holds and manual trades are not affected."""
@@ -657,6 +674,7 @@ class Config:
     sniper: SniperConfig = field(default_factory=SniperConfig)
     lowcap: LowCapConfig = field(default_factory=LowCapConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
 
     def validate(self) -> None:
@@ -756,6 +774,7 @@ _SECTIONS: dict[str, type] = {
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
     "regime": RegimeConfig,
+    "discovery": DiscoveryConfig,
     "learning": LearningConfig,
 }
 
