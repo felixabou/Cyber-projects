@@ -480,6 +480,7 @@ class AgentRunner:
             "realized_pnl": pf.total_realized_pnl(),
             "unrealized_pnl": sum(p["unrealized_usd"] for p in positions),
             "entries_paused": a.entries_paused, "kill_switch": kill, "entry_block": a.entry_block,
+            "market_regime": getattr(a, "_regime_state", None),
             "risk": {
                 "open_positions": len(pf.active_positions()), "max_open_positions": cfg.risk.max_open_positions,
                 "entries_last_hour": entries_last_hour, "max_entries_per_hour": cfg.risk.max_entries_per_hour,

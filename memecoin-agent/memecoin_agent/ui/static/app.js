@@ -554,6 +554,7 @@ function renderOverview(v) {
   if (v.kill_switch) entry = "✕ Kill switch file present — no new entries (exits still run)";
   else if (v.entries_paused) entry = "‖ Paused from the dashboard — exits still run";
   else if (v.entry_block) entry = `‖ New entries blocked: ${v.entry_block}`;
+  else if (v.market_regime) entry = `‖ Automatic entries waiting — ${v.market_regime}`;
   replace($("#risk"),
     meter("Daily loss limit", `${usd(r.daily_loss_usd)} of ${usd(r.daily_loss_limit_usd)} (${r.daily_loss_limit_pct}%)`, lossPct / 100, true),
     meter("Open positions", `${r.open_positions} of ${r.max_open_positions}`, r.open_positions / r.max_open_positions),

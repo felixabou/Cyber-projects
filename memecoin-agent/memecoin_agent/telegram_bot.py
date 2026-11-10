@@ -163,6 +163,8 @@ def format_status(v: dict[str, Any]) -> str:
         entries = "paused"
     elif v.get("entry_block"):
         entries = f"blocked: {v['entry_block']}"
+    elif v.get("market_regime"):
+        entries = f"waiting ({v['market_regime']})"
     else:
         entries = "open"
     lines = [
