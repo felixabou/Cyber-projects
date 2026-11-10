@@ -78,6 +78,9 @@ def reasons_for(cfg: JupiterConfig, t: dict[str, Any], now: float) -> list[str]:
     if (cfg.shell_max_holders and holders is not None and mcap and mcap >= cfg.shell_min_market_cap_usd
             and holders < cfg.shell_max_holders):
         why.append(f"${mcap:,.0f} market cap held by {holders:.0f} wallets (shell)")
+    holder_change = _f(s1h.get("holderChange"))
+    if cfg.max_holder_drop_1h_pct is not None and holder_change is not None and holder_change <= -cfg.max_holder_drop_1h_pct:
+        why.append(f"holders down {-holder_change:.0f}% in the last hour: they are leaving")
     vol_24 = (_f(s24.get("buyVolume")) or 0) + (_f(s24.get("sellVolume")) or 0)
     if (cfg.wash_max_holders and holders is not None and holders < cfg.wash_max_holders and liq > 0
             and (turnover := vol_24 / liq) > wash_turnover_limit(liq)):

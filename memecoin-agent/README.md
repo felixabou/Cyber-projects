@@ -149,7 +149,8 @@ Every coin the agent scans (not just the ones it buys) is written to `state/scan
 4 hours: its features when first seen (age, market cap, liquidity, volume, buy/sell ratio, score), whether it passed the
 filters, why it was rejected or skipped, and what the price and liquidity did 15 minutes, 1 hour and 4 hours later, the
 best and worst it got, and whether it rugged (liquidity down 80% or the coin gone). Pending coins are saved in
-`state/scans_pending.json`, so a restart loses nothing.
+`state/scans_pending.json`, so a restart loses nothing. (Until this version the follow-up step never ran, so the file
+stayed empty; it fills from now on.)
 
 `memecoin-agent scans` prints what the data says: how coins did by what the agent did with them, **which filter blocks the
 most coins that later ran** (high "runners" on a rejection reason means that filter costs winners), which let rugs
@@ -287,27 +288,76 @@ flag, bundler and insider checks run later in the chain as before.
 on top of the fake-chart check. A backtest needs a recorded wallet scan for each early buy;
 the recorder currently captures them only for plausible pre-graduation candidates.
 
-## Exits: take the initials out, let the rest run
+## Exits: take the initials out, let the rest run on a leash
 
-Researched on the agent's own trades (Oct 22–28, 50 round trips): 23 of them went 50% or more above
-the final sell price later, 14 of those within the hour. The trailing stop sold PMUP at +8%, +15%
-and +14%; it later ran 7–10x. But most coins also ended far lower: the median is now 82% below where
-it was sold, and of the coins that touched −30%, 27 of 39 fell to −50% before they came back to entry.
-So the exits now bank the stake early and let a small piece ride, instead of trailing tightly:
+Most coins the agent buys end far below their entry within hours, and a good share of them run 2-8x first.
+So the exits bank the stake early, cut losers at a fixed loss, and let a small piece ride on a trailing
+leash that widens as the gain grows:
 
 | Stage | Rule (defaults) |
 |---|---|
+| Down 30% | Sell everything, at once. |
+| 30 minutes held, never up 5% | Sell: no follow-through. The slot goes to a coin that is moving. |
 | Up 25% | Sell the initial cost plus half the profit (about 90% of the position). The rest is house money: a runner. |
-| Runner | Its peak is tracked every tick; every 30 minutes the agent checks how far above or below that peak it is, and sells it only when it is 70% or more below. No stop loss or time stop. |
-| Down 30% | A dip watch starts. Every 30 minutes: still between −30% and −40% and consolidating (range under 25% and down no more than 10% since the last check) or accumulating (more buys than sells in the last hour): hold. Deeper than −40%, or still sliding: sell. Back above −30%: the watch ends. |
-| Down 50% | Sell everything, at once. |
+| Runner up 100% | Sell half of the runner, once. |
+| Runner | Its peak is tracked every tick. Sold when it is 30% below that peak; 40% once the peak is 100% above entry; 50% once it is 300% above. No time stop. |
+| Liquidity | Sold at once if the pool is 40% below its size at entry, or if 25% of it is missing beyond what the price move explains (a pool's liquidity moves with the square root of its price, so a price fall alone is not a pull). |
 
-Replaying those trades on 1-minute candles: these exits came to −$75 against −$95 for the old ones on
-the same data (42 trades with price history; rugs keep their real result). The −50% stop with dip
-reviews did better than a −30% stop (−$127) because it let five dippers recover and get their initials
-out, but it loses more on coins that keep falling. Taking the initials at +25% did best; +50% came to
-−$200. Every number is under `exits:` in [`config.example.yaml`](config.example.yaml);
-`style: classic` brings back the old stop loss, take-profit levels and trailing stop.
+These settings come from replaying the agent's own entries (69 buys, Oct 22 to Nov 5) on 1-minute candles
+with the production exit code. Per entry, after fees and 1% slippage:
+
+| Exit settings | Average | Without the best 3 | Wins |
+|---|---|---|---|
+| These defaults | −0.8% | −2.8% | 49% |
+| Before (50% stop with dip reviews, 70% runner leash checked every 30 minutes) | −5.0% | −7.3% | 61% |
+
+The difference is +4.2 points per entry; resampling the 69 entries puts it between 0 and +8.4, so it is
+likely but not proven. What the replay showed clearly: a 70% leash gives most winners back; stops between
+25% and 35% do the same and both 20% and 40-50% do worse; selling a position "near break-even" after a
++15% peak (`protect_after_pct`) made things worse and stays off. No exit setting made those entries
+profitable: one in nine went to −90% or worse inside a candle or two, which only entry selection and
+position size can address.
+
+Run it on your own trades before changing a setting:
+
+```bash
+memecoin-agent -c config.yaml exitlab                                   # state/trades.csv, your settings vs the old ones
+memecoin-agent -c config.yaml exitlab --set exits.hard_stop_pct=35 --set "exits.stall_minutes=45,exits.stall_min_peak_pct=8"
+```
+
+It downloads minute candles from GeckoTerminal (free, about 5 seconds per entry, cached in
+`state/candles`). It cannot see liquidity or buy pressure, so read it as a comparison between settings,
+not a forecast. Every number is under `exits:` in [`config.example.yaml`](config.example.yaml);
+`exits.lanes` overrides any of them for one lane (`{lowcap: {hard_stop_pct: 35}}`), and `style: classic`
+brings back the old stop loss, take-profit levels and trailing stop. If your `config.yaml` sets
+`hard_stop_pct`, `dip_watch_pct` or `runner_drawdown_pct`, those lines still win over the new defaults.
+
+## More coins to look at: trending discovery
+
+DexScreener's discovery lists are coins that paid for a profile or a boost, and the launch feed is
+pump.fun graduations: without a GMGN key that is about 70 coins. The agent now also reads Jupiter's
+top-trending, top-traded and top-organic-score lists (5 minutes and 1 hour) and GeckoTerminal's trending
+Solana pools: free, no key, one list per scan in turn. Coins outside the agent's market-cap and age window,
+or with a live mint or freeze authority, are dropped before they use scan budget. Everything found this
+way goes through the same filters and safety checks as any other coin. Settings under `discovery:`.
+
+## Market regime: no new buys into a falling market
+
+On every scan the agent measures what share of the scanned Solana coins are up over the last hour, and
+SOL's own move. While under 25% of at least 30 coins are up, or SOL is down 4% or more in an hour, the
+momentum, launch, low-cap, narrative and sniper lanes open nothing new (the scanner shows
+`waiting: market falling: ...`). Exits, copy trades, long-term holds and manual trades are not affected.
+Settings under `regime:`.
+
+## Track record: the agent learns from its own scan log
+
+Before a buy, the agent looks up what earlier coins like the candidate did in `state/scans.csv`: first
+the coins that passed the same lane (30 or more finished rows), else coins of the same size, age and buy
+pressure (100 or more). A group in which more than half rugged, or that averaged below −20% after an
+hour, is skipped. Otherwise the group's average 1-hour return scales the position between 0.6x and 1.25x
+(never above the lane's cap). It says nothing until the log has enough rows, which takes a day or two.
+Positions are also sized by score: a candidate at its lane's minimum score gets 60% of the usual size
+(`risk.conviction_*`). Settings under `learning:`.
 
 ## Low-cap lane
 
@@ -325,6 +375,10 @@ candidates use the chain-specific GMGN or GoPlus honeypot/tax check; a missing v
 paper executor can model every discovered chain. Live execution remains explicitly Solana-only until a
 chain executor is configured, so a BSC candidate is skipped rather than risking a wrong-chain swap.
 Change the thresholds or set `lowcap.enabled: false` in your config to turn this lane off.
+
+Three more rules keep it out of the worst entries: no buy at the top of a 5-minute spike (over +40%),
+none when the last 5 minutes carry under 3% of the hour's volume (it is fading), and a confirmation step:
+the coin must still qualify 30 seconds after it first did, without having slipped more than 8%.
 
 The low-cap lane is deliberately separate from momentum: a token below the normal market-cap floor does
 not bypass safety checks just because it has activity. The pre-graduation sniper and tracked-wallet copy
@@ -740,6 +794,10 @@ memecoin_agent/
   data/copytrade.py  copy lane: finds and vets wallets on GMGN, turns their buys into signals
   data/longterm.py   long-term lane: year-old, worn-down coins that still trade daily
   data/chain_safety.py   honeypot/tax checks for other chains (GMGN, GoPlus)
+  data/trending.py   extra discovery: Jupiter and GeckoTerminal live lists
+  edge.py            market regime gate, scan-log track record, conviction sizing
+  exitlab.py         replay past entries on minute candles under different exit settings
+  scanlog.py         scan-everything log and its report
   execution/paper.py     simulated fills (fees + x*y=k price impact)
   execution/jupiter.py   live swaps; execution/solana_rpc.py
   recording.py       market-data recorder (gzipped JSONL)

@@ -58,16 +58,25 @@ class TakeProfitLevel:
 
 
 @dataclass
+class TrailTier:
+    above_pct: float  # the runner's peak is at least this far above the entry price
+    drawdown_pct: float  # ...then it is sold this far below that peak
+
+
+@dataclass
 class ExitConfig:
     # let_it_run: take the initials and half the profit out once, then let the rest run (the keys
     # from hard_stop_pct down). classic: the older stop loss / take profit levels / trailing stop.
     style: str = "let_it_run"
     # -- let_it_run ---------------------------------------------------------------------------------
-    hard_stop_pct: float = 50.0  # sell everything at this loss, checked every tick
+    # Sell everything at this loss, checked every tick. Replaying 69 of the agent's real entries on minute
+    # candles (`memecoin-agent exitlab`), stops of 25-35% did the same and both 20% and 40-50% did worse.
+    hard_stop_pct: float = 30.0
     # A dip this deep starts reviews every dip_review_minutes. At a review, a dip still between
     # dip_watch_pct and dip_hold_max_pct is held if it is consolidating or accumulating; deeper, or
     # still sliding, it sells. Recovered above dip_watch_pct: the watch ends.
-    dip_watch_pct: float | None = 30.0  # null: no dip reviews, only the hard stop
+    # Only matters with a hard stop deeper than dip_watch_pct (the default stop is tighter, so it is off).
+    dip_watch_pct: float | None = None  # null: no dip reviews, only the hard stop
     dip_hold_max_pct: float = 40.0
     dip_review_minutes: float = 30.0
     # Consolidating: since the last review it slipped no more than max_slide and either traded in a
@@ -78,10 +87,36 @@ class ExitConfig:
     # the agent's last 42 trades, +25% did best: 24 got their initials out (vs 16 wins before).
     secure_at_pct: float = 25.0
     secure_profit_share: float = 0.5
-    # The rest (the runner) is checked every runner_review_minutes and sold in full only once it is
-    # runner_drawdown_pct below its highest price since then. No time stop on runners.
-    runner_review_minutes: float = 30.0
+    # The rest (the runner) is sold in full once it is this far below its highest price since then:
+    # runner_trail if set, else runner_drawdown_pct. Checked every runner_review_minutes (0: every tick).
+    # No time stop on runners.
+    runner_review_minutes: float = 0.0
     runner_drawdown_pct: float = 70.0
+    # Instead of the formula above, sell this share of the position at secure_at_pct (null: the formula).
+    secure_sell_fraction: float | None = None
+    # A runner's allowed fall from its peak, by how far that peak is above entry (empty: runner_drawdown_pct
+    # always). A small winner is held on a short leash, a big one gets room to breathe.
+    # On the replay a fixed 70% leash was the worst setting tried: it gave most winners back.
+    runner_trail: list[TrailTier] = field(default_factory=lambda: [
+        TrailTier(above_pct=0.0, drawdown_pct=30.0),
+        TrailTier(above_pct=100.0, drawdown_pct=40.0),
+        TrailTier(above_pct=300.0, drawdown_pct=50.0),
+    ])
+    # The runner is sold if it comes back to this gain from entry (null: off). Checked every tick.
+    runner_floor_pct: float | None = None
+    # One more sale on the way up: at this gain sell runner_take_fraction of the runner (null: off).
+    runner_take_at_pct: float | None = 100.0
+    runner_take_fraction: float = 0.5
+    # Before the initials are out: a position that was up protect_after_pct and falls back to
+    # protect_floor_pct is sold near break-even instead of riding down to the stop (null: off).
+    protect_after_pct: float | None = None
+    protect_floor_pct: float = 1.0
+    # Before the initials are out: held stall_minutes without ever being up stall_min_peak_pct = sold; the
+    # slot goes to a coin that is moving (null: off).
+    stall_minutes: float | None = 30.0
+    stall_min_peak_pct: float = 5.0
+    # Per-lane overrides of any key in this section, e.g. {lowcap: {hard_stop_pct: 30}}.
+    lanes: dict[str, dict[str, Any]] = field(default_factory=dict)
     # -- classic ------------------------------------------------------------------------------------
     stop_loss_pct: float = 25.0
     take_profit_levels: list[TakeProfitLevel] = field(
@@ -99,6 +134,9 @@ class ExitConfig:
     max_hold_minutes: float | None = 720.0
     # A sharp liquidity drop versus entry is the classic rug signature: get out at once.
     liquidity_drop_exit_pct: float = 40.0
+    # Liquidity leaving the pool beyond what the price move explains (a pool's liquidity moves with the
+    # square root of its price): someone is withdrawing it. let_it_run only; null = off.
+    lp_removed_exit_pct: float | None = 25.0
 
 
 @dataclass
@@ -112,6 +150,12 @@ class RiskConfig:
     max_daily_loss_usd: float | None = None  # a fixed dollar limit instead of the percentage
     token_cooldown_minutes: float = 180.0
     max_entries_per_hour: int = 6
+    # Size by conviction: a candidate at its lane's minimum score gets conviction_floor of the usual size,
+    # one at conviction_full_score or above gets all of it (momentum and low-cap lanes; the others have no
+    # score threshold).
+    conviction_sizing: bool = True
+    conviction_floor: float = 0.6
+    conviction_full_score: float = 0.75
 
 
 @dataclass
@@ -138,7 +182,7 @@ class ExecutionConfig:
 class AgentConfig:
     tick_seconds: float = 10.0  # exits are checked every tick
     scan_every_ticks: int = 2  # discovery scan every 20s
-    max_candidates_per_scan: int = 150
+    max_candidates_per_scan: int = 250
     state_file: str = "state/state.json"
     trades_csv: str = "state/trades.csv"
     log_file: str | None = "state/agent.log"
@@ -294,6 +338,8 @@ class JupiterConfig:
     min_organic_score: float | None = 20
     organic_min_age_hours: float = 1.0  # live: 4 of 4 unscored coins past an hour fell 33-100% in 20 min
     organic_min_volume_1h_usd: float = 20_000
+    # Holders leaving: the holder count fell this much (%) over the last hour (null = off).
+    max_holder_drop_1h_pct: float | None = 5.0
     shell_min_market_cap_usd: float = 1_000_000
     shell_max_holders: int = 100
     wash_max_holders: int = 150  # 24h turnover beyond GMGN's band among fewer holders = wash
@@ -454,6 +500,63 @@ class LowCapConfig:
     min_volume_to_liquidity_h1: float = 0.50
     min_score: float = 0.35
     max_position_usd: float = 25.0
+    # Don't buy the top of a 5-minute spike (null = off).
+    max_price_change_m5: float | None = 40.0
+    # Still trading now: the last 5 minutes carry at least this share of the hour's volume (an even hour is
+    # 8%). null = off.
+    min_volume_m5_share: float | None = 0.03
+    # Confirmation: bought only when it still qualifies this many seconds after it first did, without having
+    # slipped more than confirm_max_slip_pct since. 0 = buy on first sight.
+    confirm_seconds: float = 30.0
+    confirm_max_slip_pct: float = 8.0
+
+
+@dataclass
+class DiscoveryConfig:
+    """Extra discovery (data/trending.py): Jupiter's and GeckoTerminal's live lists of what is trading now.
+    Free, no key. Coins outside market cap min_market_cap_usd..filters.max_market_cap_usd are dropped."""
+
+    enabled: bool = True
+    jupiter_lists: list[str] = field(default_factory=lambda: [
+        "toporganicscore/5m", "toptrending/5m", "toptraded/5m", "toporganicscore/1h", "toptrending/1h"])
+    gecko_durations: list[str] = field(default_factory=lambda: ["5m", "1h"])
+    per_list: int = 100
+    refresh_s: float = 120.0  # one full round; the lists are refreshed one at a time across it
+    min_market_cap_usd: float = 10_000.0
+    min_liquidity_usd: float = 5_000.0
+
+
+@dataclass
+class RegimeConfig:
+    """Market regime (edge.MarketRegime): while the market itself is falling, the automatic lanes listed in
+    `lanes` open nothing new. Exits, copy trades, long-term holds and manual trades are not affected."""
+
+    enabled: bool = True
+    window_minutes: float = 15.0
+    min_volume_h1_usd: float = 5_000.0  # coins counted for breadth
+    min_coins: int = 30  # fewer coins in a scan: breadth isn't judged
+    min_breadth: float | None = 0.25  # share of scanned coins up over the last hour (null = off)
+    max_sol_drop_h1_pct: float | None = 4.0  # SOL's own fall over the last hour (null = off)
+    lanes: list[str] = field(default_factory=lambda: ["momentum", "launch", "lowcap", "narrative", "sniper"])
+
+
+@dataclass
+class LearningConfig:
+    """Track record (edge.ScanHistory): the agent's own scan log (agent.scan_log_file) says what earlier coins
+    like a candidate did. Silent until a group has enough finished rows (a row takes 4 hours to finish)."""
+
+    enabled: bool = True
+    reload_minutes: float = 30.0
+    max_rows: int = 20_000  # newest rows used
+    min_lane_samples: int = 30  # coins that passed the same lane
+    min_band_samples: int = 100  # else: coins of the same size, age and buy pressure
+    max_rug_rate: float | None = 0.5  # skip a group in which more than this share rugged (null = off)
+    min_avg_ret_1h: float | None = -20.0  # skip a group whose average 1h return was below this (null = off)
+    # Position size: a group averaging +scale_ret_1h% an hour gets max_size_factor, one at -scale_ret_1h%
+    # gets min_size_factor, straight line in between.
+    scale_ret_1h: float = 20.0
+    min_size_factor: float = 0.6
+    max_size_factor: float = 1.25
 
 
 @dataclass
@@ -570,6 +673,9 @@ class Config:
     longterm: LongTermConfig = field(default_factory=LongTermConfig)
     sniper: SniperConfig = field(default_factory=SniperConfig)
     lowcap: LowCapConfig = field(default_factory=LowCapConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
 
     def validate(self) -> None:
         if self.execution.mode not in ("paper", "live"):
@@ -583,8 +689,14 @@ class Config:
             raise ValueError("exits.secure_at_pct must be > 0 and exits.secure_profit_share between 0 and 1")
         if e.dip_watch_pct is not None and not 0 < e.dip_watch_pct <= e.dip_hold_max_pct:
             raise ValueError("exits.dip_watch_pct must be > 0 and no deeper than exits.dip_hold_max_pct")
-        if min(e.dip_review_minutes, e.runner_review_minutes) <= 0:
-            raise ValueError("exits.dip_review_minutes and exits.runner_review_minutes must be > 0")
+        if e.dip_review_minutes <= 0 or e.runner_review_minutes < 0:
+            raise ValueError("exits.dip_review_minutes must be > 0 and exits.runner_review_minutes >= 0")
+        if e.secure_sell_fraction is not None and not 0 < e.secure_sell_fraction <= 1:
+            raise ValueError("exits.secure_sell_fraction must be in (0, 1]")
+        if any(not 0 < t.drawdown_pct <= 100 for t in e.runner_trail):
+            raise ValueError("exits.runner_trail[].drawdown_pct must be between 0 and 100")
+        for lane in e.lanes or {}:
+            lane_exits(e, lane)  # raises on an unknown key
         if not 0 <= self.copy.min_win_rate <= self.copy.max_win_rate <= 1:
             raise ValueError("copy.min_win_rate and copy.max_win_rate are ratios: 0 <= min <= max <= 1")
         if not 0 < self.exits.stop_loss_pct < 100:
@@ -630,6 +742,11 @@ class Config:
             raise ValueError("lowcap.min_market_cap_usd cannot exceed lowcap.max_market_cap_usd")
         if lc.max_position_usd <= 0 or lc.min_score < 0 or lc.min_score > 1:
             raise ValueError("lowcap.max_position_usd must be > 0 and lowcap.min_score must be between 0 and 1")
+        if not 0 < self.risk.conviction_floor <= 1:
+            raise ValueError("risk.conviction_floor must be in (0, 1]")
+        lg = self.learning
+        if not 0 < lg.min_size_factor <= 1 <= lg.max_size_factor:
+            raise ValueError("learning.min_size_factor must be in (0, 1] and learning.max_size_factor >= 1")
         if not lc.chains:
             raise ValueError("lowcap.chains must contain at least one chain")
 
@@ -656,6 +773,9 @@ _SECTIONS: dict[str, type] = {
     "longterm": LongTermConfig,
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
+    "regime": RegimeConfig,
+    "discovery": DiscoveryConfig,
+    "learning": LearningConfig,
 }
 
 
@@ -664,9 +784,31 @@ def _build_section(cls: type, data: dict[str, Any], name: str) -> Any:
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"Unknown config key(s) under '{name}': {', '.join(sorted(unknown))}")
-    if cls is ExitConfig and "take_profit_levels" in data:
-        data = {**data, "take_profit_levels": [TakeProfitLevel(**lvl) for lvl in data["take_profit_levels"] or []]}
+    if cls is ExitConfig:
+        data = build_exit_data(data)
     return cls(**data)
+
+
+def build_exit_data(data: dict[str, Any]) -> dict[str, Any]:
+    data = dict(data)
+    if "take_profit_levels" in data:
+        data["take_profit_levels"] = [l if isinstance(l, TakeProfitLevel) else TakeProfitLevel(**l)
+                                      for l in data["take_profit_levels"] or []]
+    if "runner_trail" in data:
+        data["runner_trail"] = [t if isinstance(t, TrailTier) else TrailTier(**t) for t in data["runner_trail"] or []]
+    return data
+
+
+def lane_exits(e: ExitConfig, lane: str) -> ExitConfig:
+    """exits with exits.lanes[lane] applied on top."""
+    over = (e.lanes or {}).get(lane)
+    if not over:
+        return e
+    known = {f.name for f in dataclasses.fields(ExitConfig)} - {"lanes"}
+    unknown = set(over) - known
+    if unknown:
+        raise ValueError(f"Unknown key(s) under exits.lanes.{lane}: {', '.join(sorted(unknown))}")
+    return dataclasses.replace(e, **build_exit_data(over))
 
 
 def apply_override(cfg: Config, assignment: str) -> None:

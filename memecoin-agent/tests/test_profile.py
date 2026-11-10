@@ -163,6 +163,7 @@ class KindGate(FakeSafety):
 def agent_with(tmp_path, s, profile, scanner=None):
     cfg = Config()
     cfg.agent.kill_switch_file = str(tmp_path / "STOP")
+    cfg.lowcap.confirm_seconds = 0
     gate = KindGate()
     agent = Agent(cfg, FakeMarket([s]), gate, PaperExecutor(cfg.execution), Portfolio(cash_usd=1000), clock=Clock(),
                   persist=False, guard=gate, launch_scan=scanner, profiler=FakeProfiler(profile))

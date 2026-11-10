@@ -47,6 +47,8 @@ class Agent:
         chain_safety: object | None = None,
         newscheck: object | None = None,
         scanlog: object | None = None,
+        regime: object | None = None,
+        history: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -81,6 +83,12 @@ class Agent:
         self.newscheck = newscheck
         # scanlog.ScanLog: every scanned coin and what it did afterwards (the data to tune the filters on).
         self.scanlog = scanlog
+        # edge.MarketRegime (no new automatic entries while the market falls) and edge.ScanHistory (what
+        # earlier coins like a candidate did, from the scan log).
+        self.regime = regime
+        self.history = history
+        self._regime_state: str | None = None
+        self._lowcap_first: dict[str, tuple[datetime, float]] = {}  # mint -> when it first qualified, and its price
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
         self._nc_notes: dict[str, str] = {}  # mint -> the story that qualified it
         self._nc_warned = False
@@ -89,7 +97,7 @@ class Agent:
         self._story_discovery_running = False
         self._story_discovery_error: Exception | None = None
         self._story_discovery_lock = threading.Lock()
-        self._longterm_exits: Any = None
+        self._lane_exits: dict[str, Any] = {}
         self.lane_outcomes: deque[dict[str, Any]] = deque(maxlen=100)  # copy / long-term decisions, newest last
         self._lane_last: dict[str, str] = {}  # mint -> last outcome noted (log each change once)
         self._next_longterm: datetime | None = None
@@ -126,6 +134,7 @@ class Agent:
             scan_every = 1 if self.cfg.sniper.enabled else self.cfg.agent.scan_every_ticks
             if self.ticks % scan_every == 0:
                 self.scan_and_enter(now)
+            self._follow_scans(now)
             for lane in (self.enter_copy_signals, self.enter_longterm):  # every tick: copy signals go stale fast
                 try:
                     lane(now)
@@ -182,16 +191,22 @@ class Agent:
         return out
 
     def exits_for(self, pos: Any) -> Any:
-        """Exit settings for a position: long-term holds get their own stop and profit line, no time stop."""
-        if pos.lane != "longterm":
-            return self.cfg.exits
-        if self._longterm_exits is None:
-            from dataclasses import replace
+        """Exit settings for a position: exits.lanes overrides for its lane; long-term holds get their own
+        stop and profit line and no time stop."""
+        cached = self._lane_exits.get(pos.lane)
+        if cached is not None:
+            return cached
+        from dataclasses import replace
 
+        from .config import lane_exits
+
+        e = lane_exits(self.cfg.exits, pos.lane)
+        if pos.lane == "longterm":
             lt = self.cfg.longterm
-            self._longterm_exits = replace(self.cfg.exits, style="let_it_run", hard_stop_pct=lt.hard_stop_pct,
-                                           secure_at_pct=lt.secure_at_pct, dip_watch_pct=None, max_hold_minutes=None)
-        return self._longterm_exits
+            e = replace(e, style="let_it_run", hard_stop_pct=lt.hard_stop_pct, secure_at_pct=lt.secure_at_pct,
+                        dip_watch_pct=None, max_hold_minutes=None, protect_after_pct=None, stall_minutes=None)
+        self._lane_exits[pos.lane] = e
+        return e
 
     def manage_positions(self, now: datetime) -> None:
         snaps = self._fetch(list(self.pf.positions))
@@ -303,7 +318,14 @@ class Agent:
                  if m not in f.blacklist and not self.risk.token_blocked(self.pf, m, now)]
         mints = mints[: self.cfg.agent.max_candidates_per_scan]
         evals = []
-        for s in self._fetch(mints).values():
+        snaps = self._fetch(mints)
+        if self.regime is not None:
+            self.regime.observe(now, list(snaps.values()))
+            state = self.regime.risk_off()
+            if state != self._regime_state and (state is None) != (self._regime_state is None):
+                log.info("Market regime: %s", state or "recovered; automatic entries allowed again")
+            self._regime_state = state
+        for s in snaps.values():
             self._remember_price(s, now)
             ev = evaluate_entry(s, f, now)
             if self.cfg.sniper.enabled and self._is_pregraduation(s.mint):
@@ -399,8 +421,35 @@ class Agent:
         """Controlled post-launch entry below the normal momentum market-cap floor."""
         c, f, s = self.cfg.lowcap, self.cfg.filters, ev.snapshot
         if not c.enabled or lowcap_reasons(s, c, f, now):
+            self._lowcap_first.pop(s.mint, None)
             return None
+        if c.confirm_seconds > 0:
+            if len(self._lowcap_first) > 2000:
+                self._lowcap_first.clear()
+            first = self._lowcap_first.get(s.mint)
+            if first is None:
+                self._lowcap_first[s.mint] = (now, s.price_usd)
+                wait = f"low-cap lane: qualified, confirming for {c.confirm_seconds:g}s"
+            elif s.price_usd < first[1] * (1 - c.confirm_max_slip_pct / 100):
+                self._lowcap_first[s.mint] = (now, s.price_usd)
+                wait = f"low-cap lane: slipped {(1 - s.price_usd / first[1]) * 100:.0f}% while confirming; starting over"
+            elif (now - first[0]).total_seconds() < c.confirm_seconds:
+                wait = f"low-cap lane: qualified, confirming for {c.confirm_seconds:g}s"
+            else:
+                wait = ""
+            if wait:
+                return EntryEvaluation(snapshot=s, passed=False, score=ev.score, reasons=[wait], lane="lowcap")
         return EntryEvaluation(snapshot=s, passed=True, score=ev.score, reasons=[], lane="lowcap")
+
+    def _size_factor(self, ev: EntryEvaluation) -> float:
+        """Conviction: the usual size at a high score, less near the lane's minimum (risk.conviction_*)."""
+        from .edge import conviction
+
+        r = self.cfg.risk
+        floor = {"momentum": self.cfg.filters.min_score, "lowcap": self.cfg.lowcap.min_score}.get(ev.lane)
+        if not r.conviction_sizing or floor is None:
+            return 1.0
+        return conviction(ev.score, floor, r.conviction_full_score, r.conviction_floor)
 
     # -- narrative lane (NewsCheck) -----------------------------------------------------------------
     def _newscheck_failed(self, exc: Exception) -> None:
@@ -586,6 +635,9 @@ class Agent:
             if block := self._entry_block_reason(now):
                 self._set_entry_block(block)
                 break
+            if self._regime_state and ev.lane in self.cfg.regime.lanes:
+                outcomes[snap.mint] = f"waiting: {self._regime_state}"
+                continue
             # Free checks first (fake chart, then the wallet scan for launches and early or small buys):
             # they spare a LarpCheck credit on manipulated and bundled coins.
             dumped = self._dumped(snap, now)
@@ -620,6 +672,17 @@ class Agent:
                 outcomes[snap.mint] = "unsafe: " + "; ".join(report.reasons)
                 log.info("Skip %s: %s", snap.symbol, "; ".join(report.reasons))
                 continue
+            record, learned, sizing = None, 1.0, ""
+            if self.history is not None:
+                try:
+                    why, learned, record = self.history.judge(snap, ev.lane, now)
+                except Exception as exc:  # the track record is extra evidence; never let it break a scan
+                    log.warning("Track record failed for %s: %s", snap.symbol, exc)
+                    why = None
+                if why:
+                    outcomes[snap.mint] = why
+                    log.info("Skip %s: %s", snap.symbol, why)
+                    continue
             size = self.risk.position_size_usd(self.pf, self.executor.available_usd(self.pf))
             if size <= 0:
                 log.info("Insufficient balance for a minimum-size position")
@@ -631,6 +694,14 @@ class Agent:
                 if size < self.cfg.risk.min_position_usd:
                     outcomes[snap.mint] = "skipped: low-cap position cap is below the risk minimum"
                     continue
+            # Conviction and the track record scale the lane's size (never above the lane's own cap).
+            factor = self._size_factor(ev) * learned
+            if abs(factor - 1) > 0.005:
+                cap = {"sniper": self.cfg.sniper.max_position_usd, "lowcap": self.cfg.lowcap.max_position_usd}.get(
+                    ev.lane, self.cfg.risk.max_position_usd)
+                size = round(min(max(size * factor, self.cfg.risk.min_position_usd), cap,
+                                 self.executor.available_usd(self.pf)), 2)
+                sizing = f"size x{factor:.2f}" + (f" ({record.text()})" if record is not None else " (score)")
             if self.route_check is not None and snap.chain == "solana" and ev.lane != "sniper" \
                     and (why := self.route_check.check(snap.mint, size)):
                 outcomes[snap.mint] = "unsafe: " + why
@@ -655,6 +726,8 @@ class Agent:
                 note = "Pump.fun bonding-curve entry via PumpPortal" + (f" | {note}" if note else "")
             elif ev.lane == "lowcap":
                 note = "low-cap lane" + (f" | {note}" if note else "")
+            if sizing:
+                note = f"{note} | {sizing}" if note else sizing
             pos = self.pf.open(snap, fill, now, ev.score, reason=note, lane=ev.lane)
             pos.kind = prof.kind if prof else ""
             if self.analytics is not None:
@@ -929,6 +1002,23 @@ class Agent:
         log.info("%s: %s", pos.symbol, "the agent trades it" if managed else "you trade it (no automatic sells)")
         self.save()
         return f"{pos.symbol}: {'the agent trades it' if managed else 'you trade it'}"
+
+    def _follow_scans(self, now: datetime) -> None:
+        """Scan log: read the price of logged coins at 15 min, 1 h and 4 h (at most once a minute) and save it."""
+        if self.scanlog is None:
+            return
+
+        def fetch(mints: list[str]) -> dict[str, TokenSnapshot]:
+            for m in mints:  # a coin logged before a restart: its chain is on its row
+                chain = (self.scanlog.pending.get(m) or {}).get("chain")
+                if chain and m not in self.chains:
+                    self.chains[m] = canonical_chain(chain)
+            return self._fetch(mints)
+
+        try:
+            self.scanlog.follow_up(now.timestamp(), fetch)
+        except Exception as exc:
+            log.warning("Scan log follow-up failed: %s", exc)
 
     def _record_scan(self, now: datetime, evals: list[EntryEvaluation], outcomes: dict[str, str]) -> None:
         self.last_scan_at = now

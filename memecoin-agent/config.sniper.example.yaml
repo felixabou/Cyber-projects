@@ -37,14 +37,15 @@ exits:
   style: let_it_run           # or classic (stop_loss_pct, take_profit_levels, trailing stop below)
   secure_at_pct: 25           # up 25%: sell the initial cost + secure_profit_share of the profit...
   secure_profit_share: 0.5
-  runner_review_minutes: 30   # ...the rest runs: checked every 30m, sold only this far below its peak
-  runner_drawdown_pct: 70
-  hard_stop_pct: 50           # sell everything at -50%, every tick
-  dip_watch_pct: 30           # -30%: reviews every 30m; held between -30% and -40% while consolidating
-  dip_hold_max_pct: 40
-  dip_review_minutes: 30
-  consolidation_max_range_pct: 25
-  consolidation_max_slide_pct: 10
+  runner_trail:               # ...the rest runs, sold this far below its peak, by how far the peak is above entry
+    - {above_pct: 0, drawdown_pct: 30}
+    - {above_pct: 100, drawdown_pct: 40}
+    - {above_pct: 300, drawdown_pct: 50}
+  runner_review_minutes: 0    # checked every tick
+  runner_take_at_pct: 100     # up 100%: sell half of the runner once
+  hard_stop_pct: 30           # sell everything at -30%, every tick
+  stall_minutes: 30           # held 30m without ever being up 5%: sold
+  dip_watch_pct: null         # dip reviews are for a deeper hard stop (see config.example.yaml)
   max_hold_minutes: 720       # time stop for positions whose initials never came out (runners: none)
   liquidity_drop_exit_pct: 40
   # classic only:

@@ -31,7 +31,13 @@ def setup_logging(log_file: str | None, verbose: bool = False) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    # A coin name the console can't print (Windows code pages) must not raise inside a log call.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -78,6 +84,13 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         base = ExtraDiscoveryMarket(base, GmgnDiscovery(cfg.gmgn, window, gmgn, chains=gmgn_chains))
         log.info("GMGN discovery on: %s trending (%s), every %.0fs", ", ".join(gmgn_chains),
                  cfg.gmgn.trending_interval, cfg.gmgn.discover_every_s)
+    if cfg.discovery.enabled:
+        from .data.gmgn import ExtraDiscoveryMarket
+        from .data.trending import TrendingDiscovery
+
+        base = ExtraDiscoveryMarket(base, TrendingDiscovery(cfg.discovery, cfg.filters))
+        log.info("Trending discovery on: Jupiter (%s) and GeckoTerminal trending pools, one list at a time, a round every %.0fs",
+                 ", ".join(cfg.discovery.jupiter_lists), cfg.discovery.refresh_s)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None
@@ -239,7 +252,20 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         scanlog = ScanLog(cfg.agent.scan_log_file)
         log.info("Scan log on: every scanned coin is followed for 4 hours (%s); read it with `memecoin-agent scans`",
                  cfg.agent.scan_log_file)
-    return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, guard=guard, launch_scan=launch_scan, analytics=analytics,
+    from .edge import MarketRegime, ScanHistory
+
+    regime = MarketRegime(cfg.regime, market.sol_price_usd) if cfg.regime.enabled else None
+    if regime is not None:
+        log.info("Market regime gate on: no new automatic entries while under %.0f%% of scanned coins are up over "
+                 "the hour or SOL is down %g%%+ in an hour", (cfg.regime.min_breadth or 0) * 100,
+                 cfg.regime.max_sol_drop_h1_pct or 0)
+    history = None
+    if cfg.learning.enabled and cfg.agent.scan_log_file:
+        history = ScanHistory(cfg.learning, cfg.agent.scan_log_file)
+        log.info("Track record on: buys are checked against what earlier coins in the scan log did (needs %d+ "
+                 "finished rows per group)", cfg.learning.min_lane_samples)
+    return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
+                 history=history, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
@@ -392,6 +418,30 @@ def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
     from .scanlog import build_scan_report
 
     print(build_scan_report(args.file or cfg.agent.scan_log_file or "state/scans.csv"))
+
+
+def cmd_exitlab(args: argparse.Namespace, cfg: Config) -> None:
+    import copy
+
+    from .exitlab import Candles, compare, load_entries, wide_exits
+
+    trades = args.trades or [cfg.agent.trades_csv]
+    entries = load_entries([t for t in trades if Path(t).exists()])
+    if args.last:
+        entries = entries[-args.last:]
+    if not entries:
+        print(f"Exit lab: no buys found in {', '.join(trades)}")
+        return
+    variants = {"your settings": cfg.exits, "wide (50% stop, 70% leash)": wide_exits(cfg.exits)}
+    for assignment in args.set or []:
+        trial = copy.deepcopy(cfg)
+        for one in assignment.split(","):
+            apply_override(trial, one.strip())
+        variants[assignment.replace("exits.", "")] = trial.exits
+    source = Candles(args.cache or str(Path(cfg.agent.state_file).parent / "candles"))
+    print(f"Exit lab: {len(entries)} entries; downloading minute candles for the ones not cached yet "
+          f"(about 5 seconds each)...", flush=True)
+    print(compare(entries, source.after, variants, cfg.execution.paper_fee_pct))
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
@@ -590,6 +640,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--file", default=None, help="a scans.csv (default: agent.scan_log_file)")
     p.set_defaults(func=cmd_scans)
 
+    p = sub.add_parser("exitlab", help="replay your past entries on real minute candles under different exit settings")
+    p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs (default: agent.trades_csv)")
+    p.add_argument("--set", action="append", metavar="EXITS.KEY=VALUE[,...]",
+                   help="another set of exit settings to compare, e.g. --set exits.hard_stop_pct=35 (repeatable)")
+    p.add_argument("--last", type=int, default=None, help="only the newest N entries")
+    p.add_argument("--cache", default=None, help="candle cache directory (default: next to the state file)")
+    p.set_defaults(func=cmd_exitlab)
+
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)
     sub.add_parser("close-all", help="sell every open position now").set_defaults(func=cmd_close_all)
 
@@ -618,7 +676,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
-    offline = args.command in ("status", "demo", "backtest", "report", "scans") or getattr(args, "synthetic", False)
+    offline = args.command in ("status", "demo", "backtest", "report", "scans", "exitlab") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
@@ -626,7 +684,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in ("run", "ui"):
         # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
         signal.signal(signal.SIGTERM, _raise_interrupt)
-    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans") or (args.command == "record" and args.synthetic)
+    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans", "exitlab") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)

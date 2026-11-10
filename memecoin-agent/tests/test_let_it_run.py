@@ -15,7 +15,10 @@ from memecoin_agent.strategy import evaluate_exit, secure_fraction
 from .conftest import NOW, make_snap
 from .test_agent import Clock, FakeMarket, FakeSafety
 
-E = ExitConfig()
+# The wide settings these rules were written for (the defaults are tighter now; see test_exit_upgrades.py).
+WIDE = dict(hard_stop_pct=50.0, dip_watch_pct=30.0, secure_profit_share=0.5, runner_review_minutes=30.0,
+            runner_trail=[], runner_take_at_pct=None, stall_minutes=None, lp_removed_exit_pct=None)
+E = ExitConfig(**WIDE)
 
 
 def position(price=0.001, cost=50.0):
@@ -82,6 +85,7 @@ def test_accumulation_also_holds_a_dip():
 
 def agent_with(tmp_path, snaps):
     cfg = Config()
+    cfg.exits, cfg.risk.conviction_sizing = E, False
     cfg.agent.kill_switch_file = str(tmp_path / "STOP")
     market, clock = FakeMarket(snaps), Clock()
     return Agent(cfg, market, FakeSafety(), PaperExecutor(cfg.execution), Portfolio(cash_usd=1000), clock=clock,

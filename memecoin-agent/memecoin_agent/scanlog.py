@@ -26,6 +26,7 @@ GONE_GRACE_S = 1800  # no data this long after a horizon: the coin is gone (coun
 RUG_LIQ_RATIO = 0.2  # liquidity fell to 20% of its starting level
 COLS = ["time", "mint", "symbol", "chain", "dex", "lane", "passed", "bought", "outcome", "reasons", "score", "kind",
         "age_min", "price0", "liq0", "mcap0", "vol_h1", "txns_h1", "bs_h1", "chg_m5", "chg_h1",
+        "vol_m5", "bs_m5", "chg_h6", "vol_h24",
         "ret_15m", "ret_1h", "ret_4h", "max_ret", "min_ret", "min_liq_ratio", "rugged", "gone", "obs"]
 
 
@@ -84,6 +85,9 @@ class ScanLog:
                 "price0": s.price_usd, "liq0": _num(s.liquidity_usd, 0), "mcap0": _num(s.market_cap_usd, 0),
                 "vol_h1": _num(s.volume_h1, 0), "txns_h1": txns, "bs_h1": _num(bs, 2),
                 "chg_m5": _num(s.price_change_m5, 1), "chg_h1": _num(s.price_change_h1, 1),
+                "vol_m5": _num(getattr(s, "volume_m5", 0), 0),
+                "bs_m5": _num((getattr(s, "buys_m5", 0) or 0) / max(getattr(s, "sells_m5", 0) or 0, 1), 2),
+                "chg_h6": _num(getattr(s, "price_change_h6", 0), 1), "vol_h24": _num(getattr(s, "volume_h24", 0), 0),
                 "max_price": s.price_usd, "min_price": s.price_usd, "min_liq_ratio": 1.0, "obs": {}}
             self.recent[s.mint] = now
         if len(self.recent) > 20000:
