@@ -125,3 +125,106 @@ def test_rpc_errors_do_not_leak_the_url(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         call(FACTORY, "0x")
     assert "SECRETKEY123" not in str(exc.value)
+
+
+from memecoin_agent.config import Config, WatchConfig  # noqa: E402
+from memecoin_agent.watch.approvals import (  # noqa: E402
+    APPROVAL_EVENT,
+    ApprovalEventTarget,
+    ApprovalEventWatcher,
+    keccak256_hex,
+)
+
+TOPIC = keccak256_hex(APPROVAL_EVENT)
+TX = "0x" + "ab" * 32
+
+
+def chain_log(block, idx, token, approved, tx=TX):
+    return {"blockNumber": hex(block), "logIndex": hex(idx), "transactionHash": tx,
+            "topics": [TOPIC, "0x" + "0" * 24 + token[2:].lower()],
+            "data": "0x" + ("0" * 63 + ("1" if approved else "0"))}
+
+
+class FakeRpc:
+    def __init__(self, head=100):
+        self.head, self.logs, self.ranges = head, [], []
+
+    def request(self, method, params):
+        if method == "eth_blockNumber":
+            return hex(self.head)
+        if method == "eth_getLogs":
+            lo, hi = int(params[0]["fromBlock"], 16), int(params[0]["toBlock"], 16)
+            self.ranges.append((lo, hi))
+            return [lg for lg in self.logs if lo <= int(lg["blockNumber"], 16) <= hi]
+        raise AssertionError(method)
+
+
+def make_events(tmp_path, rpc, lookback=0, state="events.json"):
+    return ApprovalEventWatcher(rpc, ApprovalEventTarget("pons-factory", FACTORY, lookback),
+                                AlertSink(tmp_path / "alerts.csv"), tmp_path / state, clock=lambda: NOW)
+
+
+def test_event_topic_is_the_keccak_of_the_signature():
+    assert TOPIC == "0x060d1992d069dc524985f328329aae36102a017c59733c5c91fc0691ee0703b6"
+
+
+def test_event_first_poll_starts_at_head_without_alerts(tmp_path):
+    rpc = FakeRpc(head=100)
+    w = make_events(tmp_path, rpc)
+    assert w.poll_once() == []
+    assert rpc.ranges == []
+    assert w.last_block == 100
+
+
+def test_event_catches_new_approval_and_revocation(tmp_path):
+    rpc = FakeRpc(head=100)
+    w = make_events(tmp_path, rpc)
+    w.poll_once()
+    rpc.head = 105
+    rpc.logs = [chain_log(103, 0, TOKEN_B, True), chain_log(104, 2, TOKEN_B, False, tx="0x" + "cd" * 32)]
+    alerts = w.poll_once()
+    assert [a.detail.split(" by")[0] for a in alerts] == ["approved", "revoked"]
+    assert alerts[0].subject.lower() == TOKEN_B.lower()
+    assert rpc.ranges == [(101, 105)] and w.last_block == 105
+
+
+def test_event_does_not_repeat_on_next_poll_or_restart(tmp_path):
+    rpc = FakeRpc(head=100)
+    w = make_events(tmp_path, rpc)
+    w.poll_once()
+    rpc.head = 105
+    rpc.logs = [chain_log(103, 0, TOKEN_B, True)]
+    assert len(w.poll_once()) == 1
+    assert w.poll_once() == []
+    (tmp_path / "events.json").write_text('{"last_block": 100, "seen": [' + '"' + TX + ':0"]}', encoding="utf-8")
+    restarted = make_events(tmp_path, rpc)
+    assert restarted.poll_once() == []
+
+
+def test_event_lookback_scans_earlier_blocks(tmp_path):
+    rpc = FakeRpc(head=100)
+    rpc.logs = [chain_log(95, 1, TOKEN_A, True)]
+    w = make_events(tmp_path, rpc, lookback=10)
+    alerts = w.poll_once()
+    assert len(alerts) == 1 and rpc.ranges == [(91, 100)]
+
+
+def test_event_failed_request_keeps_position(tmp_path):
+    class Broken(FakeRpc):
+        def request(self, method, params):
+            if method == "eth_getLogs":
+                raise RuntimeError("RPC HTTP 429")
+            return super().request(method, params)
+
+    rpc = Broken(head=100)
+    w = make_events(tmp_path, rpc)
+    w.poll_once()
+    rpc.head = 105
+    assert w.poll_once() == []
+    assert w.last_block == 100
+
+
+def test_config_rejects_unknown_event_key():
+    cfg = Config(watch=WatchConfig(approval_events=[{"name": "x", "contract": FACTORY, "bogus": 1}]))
+    with pytest.raises(ValueError):
+        cfg.validate()

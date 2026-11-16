@@ -660,6 +660,7 @@ class WatchConfig:
     alerts_file: str = "state/watch_alerts.csv"
     state_file: str = "state/watch_state.json"
     approvals: list[dict[str, Any]] = field(default_factory=list)  # {name, contract, getter, tokens}
+    approval_events: list[dict[str, Any]] = field(default_factory=list)  # {name, contract, lookback_blocks}
 
 
 @dataclass
@@ -696,6 +697,9 @@ class Config:
         for t in self.watch.approvals:
             if set(t) != {"name", "contract", "getter", "tokens"}:
                 raise ValueError("each watch.approvals entry needs exactly: name, contract, getter, tokens")
+        for e in self.watch.approval_events:
+            if not set(e) <= {"name", "contract", "lookback_blocks"} or "contract" not in e or "name" not in e:
+                raise ValueError("each watch.approval_events entry needs name and contract, and may set lookback_blocks")
         if self.execution.mode not in ("paper", "live"):
             raise ValueError(f"execution.mode must be 'paper' or 'live', got {self.execution.mode!r}")
         e = self.exits

@@ -424,7 +424,7 @@ def cmd_watch(args: argparse.Namespace, cfg: Config) -> None:
     import time
 
     from .watch.alerts import AlertSink
-    from .watch.approvals import ApprovalTarget, ApprovalWatcher, rpc_call
+    from .watch.approvals import ApprovalEventTarget, ApprovalEventWatcher, ApprovalTarget, ApprovalWatcher, Rpc
 
     w = cfg.watch
     if not w.enabled:
@@ -432,12 +432,22 @@ def cmd_watch(args: argparse.Namespace, cfg: Config) -> None:
     url = os.environ.get(w.rpc_env)
     if not url:
         raise SystemExit(f"Set the {w.rpc_env} environment variable to your RPC URL")
-    targets = [ApprovalTarget(**t) for t in w.approvals]
-    watcher = ApprovalWatcher(rpc_call(url), targets, AlertSink(w.alerts_file), w.state_file)
-    print(f"Watching {sum(len(t.tokens) for t in targets)} approval entries every {w.interval_s:g}s. Ctrl-C to stop.")
+    rpc = Rpc(url)
+    sink = AlertSink(w.alerts_file)
+    state = Path(w.state_file)
+    watchers: list = []
+    if w.approvals:
+        watchers.append(ApprovalWatcher(rpc.eth_call, [ApprovalTarget(**t) for t in w.approvals], sink, state))
+    for e in w.approval_events:
+        watchers.append(ApprovalEventWatcher(rpc, ApprovalEventTarget(**e), sink,
+                                             state.with_name(f"{state.stem}_events_{e['name']}.json")))
+    if not watchers:
+        raise SystemExit("watch: nothing to watch (set watch.approvals or watch.approval_events)")
+    print(f"Watching {len(watchers)} source(s) every {w.interval_s:g}s. Ctrl-C to stop.")
     try:
         while True:
-            watcher.poll_once()
+            for watcher in watchers:
+                watcher.poll_once()
             time.sleep(w.interval_s)
     except KeyboardInterrupt:
         print("Stopped.")
