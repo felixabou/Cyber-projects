@@ -425,30 +425,44 @@ def cmd_watch(args: argparse.Namespace, cfg: Config) -> None:
 
     from .watch.alerts import AlertSink
     from .watch.approvals import ApprovalEventTarget, ApprovalEventWatcher, ApprovalTarget, ApprovalWatcher, Rpc
+    from .watch.statics import GitHub, StaticsPrWatcher
 
     w = cfg.watch
     if not w.enabled:
         raise SystemExit("watch.enabled is false in the config file")
     url = os.environ.get(w.rpc_env)
-    if not url:
-        raise SystemExit(f"Set the {w.rpc_env} environment variable to your RPC URL")
-    rpc = Rpc(url)
+    if w.approvals or w.approval_events:
+        if not url:
+            raise SystemExit(f"Set the {w.rpc_env} environment variable to your RPC URL")
+    rpc = Rpc(url) if url else None
     sink = AlertSink(w.alerts_file)
     state = Path(w.state_file)
-    watchers: list = []
+    fast: list = []  # on-chain sources: checked every interval_s
     if w.approvals:
-        watchers.append(ApprovalWatcher(rpc.eth_call, [ApprovalTarget(**t) for t in w.approvals], sink, state))
+        fast.append(ApprovalWatcher(rpc.eth_call, [ApprovalTarget(**t) for t in w.approvals], sink, state))
     for e in w.approval_events:
-        watchers.append(ApprovalEventWatcher(rpc, ApprovalEventTarget(**e), sink,
-                                             state.with_name(f"{state.stem}_events_{e['name']}.json")))
-    if not watchers:
-        raise SystemExit("watch: nothing to watch (set watch.approvals or watch.approval_events)")
-    print(f"Watching {len(watchers)} source(s) every {w.interval_s:g}s. Ctrl-C to stop.")
+        fast.append(ApprovalEventWatcher(rpc, ApprovalEventTarget(**e), sink,
+                                         state.with_name(f"{state.stem}_events_{e['name']}.json")))
+    slow: list = []  # GitHub sources: checked every statics_interval_s
+    if w.statics_repos:
+        gh = GitHub(os.environ.get(w.github_token_env) or None)
+        for r in w.statics_repos:
+            slow.append(StaticsPrWatcher(gh, r["repo"], sink,
+                                         state.with_name(f"{state.stem}_statics_{r['repo'].replace('/', '_')}.json"),
+                                         path_prefix=r.get("path_prefix", "modules/statics/src/coins/"),
+                                         recent_hours=float(r.get("recent_hours", 48))))
+    if not fast and not slow:
+        raise SystemExit("watch: nothing to watch (set watch.approvals, watch.approval_events or watch.statics_repos)")
+    print(f"Watching {len(fast) + len(slow)} source(s). Ctrl-C to stop.")
+    due = {id(x): 0.0 for x in fast + slow}
     try:
         while True:
-            for watcher in watchers:
-                watcher.poll_once()
-            time.sleep(w.interval_s)
+            now = time.monotonic()
+            for watcher in fast + slow:
+                if now >= due[id(watcher)]:
+                    watcher.poll_once()
+                    due[id(watcher)] = now + (w.interval_s if watcher in fast else w.statics_interval_s)
+            time.sleep(1)
     except KeyboardInterrupt:
         print("Stopped.")
 
