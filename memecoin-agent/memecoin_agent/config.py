@@ -651,6 +651,22 @@ class LongTermConfig:
 
 
 @dataclass
+class WatchConfig:
+    """Read-only watchers (`memecoin-agent --watch`): alerts only, never trades. Off until enabled."""
+
+    enabled: bool = False
+    rpc_env: str = "ROBINHOOD_RPC_URL"  # the RPC URL is read from this environment variable, never from this file
+    interval_s: float = 10.0
+    alerts_file: str = "state/watch_alerts.csv"
+    state_file: str = "state/watch_state.json"
+    approvals: list[dict[str, Any]] = field(default_factory=list)  # {name, contract, getter, tokens}
+    approval_events: list[dict[str, Any]] = field(default_factory=list)  # {name, contract, lookback_blocks}
+    statics_repos: list[dict[str, Any]] = field(default_factory=list)  # {repo, path_prefix?, recent_hours?}
+    statics_interval_s: float = 300.0
+    github_token_env: str = "GITHUB_TOKEN"  # optional: raises GitHub's rate limit; read from the environment only
+
+
+@dataclass
 class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
@@ -676,8 +692,22 @@ class Config:
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
 
     def validate(self) -> None:
+        if self.watch.interval_s <= 0:
+            raise ValueError("watch.interval_s must be > 0")
+        for t in self.watch.approvals:
+            if set(t) != {"name", "contract", "getter", "tokens"}:
+                raise ValueError("each watch.approvals entry needs exactly: name, contract, getter, tokens")
+        if self.watch.statics_interval_s < 60:
+            raise ValueError("watch.statics_interval_s must be at least 60 (GitHub's unauthenticated limit)")
+        for r in self.watch.statics_repos:
+            if "repo" not in r or not set(r) <= {"repo", "path_prefix", "recent_hours"}:
+                raise ValueError("each watch.statics_repos entry needs repo, and may set path_prefix or recent_hours")
+        for e in self.watch.approval_events:
+            if not set(e) <= {"name", "contract", "lookback_blocks"} or "contract" not in e or "name" not in e:
+                raise ValueError("each watch.approval_events entry needs name and contract, and may set lookback_blocks")
         if self.execution.mode not in ("paper", "live"):
             raise ValueError(f"execution.mode must be 'paper' or 'live', got {self.execution.mode!r}")
         e = self.exits
@@ -773,6 +803,7 @@ _SECTIONS: dict[str, type] = {
     "longterm": LongTermConfig,
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
+    "watch": WatchConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",
     "PyYAML>=6.0",
     "websockets>=13",
+    "pycryptodome>=3.20",
 ]
 
 [project.optional-dependencies]

@@ -420,6 +420,80 @@ def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
     print(build_scan_report(args.file or cfg.agent.scan_log_file or "state/scans.csv"))
 
 
+def cmd_launchcheck(args: argparse.Namespace, cfg: Config) -> None:
+    from .watch.approvals import Rpc
+    from .watch.launch_check import check_token, save, shared_recipients
+
+    if len(args.token) != len(args.creation_tx):
+        raise SystemExit("give one --creation-tx for each --token")
+    url = os.environ.get(cfg.watch.rpc_env)
+    if not url:
+        raise SystemExit(f"Set the {cfg.watch.rpc_env} environment variable to your RPC URL")
+    rpc = Rpc(url)
+    reports = []
+    for token, tx in zip(args.token, args.creation_tx):
+        r = check_token(rpc, token, tx, args.first)
+        reports.append(r)
+        print(f"{r.token}: {r.transfers_scanned} transfers from block {r.creation_block}, "
+              f"{len(r.early_recipients)} early recipients, "
+              f"smart-account share {r.smart_account_share}")
+        for g in r.identical[:5]:
+            print(f"  identical buy: {g['wallets']} wallets got the same amount within {g['span_s']}s")
+    shared = shared_recipients(reports)
+    print(f"Shared early recipients across these tokens: {len(shared)}")
+    for addr, tokens in shared.items():
+        print(f"  {addr} -> {', '.join(tokens)}")
+    save(reports, args.out)
+    print(f"Saved to {args.out}")
+
+
+def cmd_watch(args: argparse.Namespace, cfg: Config) -> None:
+    import time
+
+    from .watch.alerts import AlertSink
+    from .watch.approvals import ApprovalEventTarget, ApprovalEventWatcher, ApprovalTarget, ApprovalWatcher, Rpc
+    from .watch.statics import GitHub, StaticsPrWatcher
+
+    w = cfg.watch
+    if not w.enabled:
+        raise SystemExit("watch.enabled is false in the config file")
+    url = os.environ.get(w.rpc_env)
+    if w.approvals or w.approval_events:
+        if not url:
+            raise SystemExit(f"Set the {w.rpc_env} environment variable to your RPC URL")
+    rpc = Rpc(url) if url else None
+    sink = AlertSink(w.alerts_file)
+    state = Path(w.state_file)
+    fast: list = []  # on-chain sources: checked every interval_s
+    if w.approvals:
+        fast.append(ApprovalWatcher(rpc.eth_call, [ApprovalTarget(**t) for t in w.approvals], sink, state))
+    for e in w.approval_events:
+        fast.append(ApprovalEventWatcher(rpc, ApprovalEventTarget(**e), sink,
+                                         state.with_name(f"{state.stem}_events_{e['name']}.json")))
+    slow: list = []  # GitHub sources: checked every statics_interval_s
+    if w.statics_repos:
+        gh = GitHub(os.environ.get(w.github_token_env) or None)
+        for r in w.statics_repos:
+            slow.append(StaticsPrWatcher(gh, r["repo"], sink,
+                                         state.with_name(f"{state.stem}_statics_{r['repo'].replace('/', '_')}.json"),
+                                         path_prefix=r.get("path_prefix", "modules/statics/src/coins/"),
+                                         recent_hours=float(r.get("recent_hours", 48))))
+    if not fast and not slow:
+        raise SystemExit("watch: nothing to watch (set watch.approvals, watch.approval_events or watch.statics_repos)")
+    print(f"Watching {len(fast) + len(slow)} source(s). Ctrl-C to stop.")
+    due = {id(x): 0.0 for x in fast + slow}
+    try:
+        while True:
+            now = time.monotonic()
+            for watcher in fast + slow:
+                if now >= due[id(watcher)]:
+                    watcher.poll_once()
+                    due[id(watcher)] = now + (w.interval_s if watcher in fast else w.statics_interval_s)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
 def cmd_exitlab(args: argparse.Namespace, cfg: Config) -> None:
     import copy
 
@@ -626,6 +700,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-ticks", type=int, default=None)
     session_args(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("watch", help="read-only watchers that alert on contract changes (no trading)")
+    p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("launchcheck", help="early-buyer signals for tokens on Robinhood Chain (read-only)")
+    p.add_argument("--token", action="append", required=True, help="token address (repeat for several)")
+    p.add_argument("--creation-tx", action="append", required=True,
+                   help="the token's creation transaction, in the same order as --token")
+    p.add_argument("--first", type=int, default=200, help="how many early transfers to read per token")
+    p.add_argument("--out", default="state/launch_checks.json")
+    p.set_defaults(func=cmd_launchcheck)
 
     p = sub.add_parser("scan", help="one-shot: discover and score tokens, no trading")
     p.add_argument("--limit", type=int, default=30)
