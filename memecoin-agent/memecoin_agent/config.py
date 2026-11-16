@@ -651,6 +651,18 @@ class LongTermConfig:
 
 
 @dataclass
+class WatchConfig:
+    """Read-only watchers (`memecoin-agent --watch`): alerts only, never trades. Off until enabled."""
+
+    enabled: bool = False
+    rpc_env: str = "ROBINHOOD_RPC_URL"  # the RPC URL is read from this environment variable, never from this file
+    interval_s: float = 10.0
+    alerts_file: str = "state/watch_alerts.csv"
+    state_file: str = "state/watch_state.json"
+    approvals: list[dict[str, Any]] = field(default_factory=list)  # {name, contract, getter, tokens}
+
+
+@dataclass
 class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
@@ -676,8 +688,14 @@ class Config:
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
 
     def validate(self) -> None:
+        if self.watch.interval_s <= 0:
+            raise ValueError("watch.interval_s must be > 0")
+        for t in self.watch.approvals:
+            if set(t) != {"name", "contract", "getter", "tokens"}:
+                raise ValueError("each watch.approvals entry needs exactly: name, contract, getter, tokens")
         if self.execution.mode not in ("paper", "live"):
             raise ValueError(f"execution.mode must be 'paper' or 'live', got {self.execution.mode!r}")
         e = self.exits
@@ -773,6 +791,7 @@ _SECTIONS: dict[str, type] = {
     "longterm": LongTermConfig,
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
+    "watch": WatchConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

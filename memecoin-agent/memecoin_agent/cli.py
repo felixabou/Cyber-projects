@@ -420,6 +420,29 @@ def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
     print(build_scan_report(args.file or cfg.agent.scan_log_file or "state/scans.csv"))
 
 
+def cmd_watch(args: argparse.Namespace, cfg: Config) -> None:
+    import time
+
+    from .watch.alerts import AlertSink
+    from .watch.approvals import ApprovalTarget, ApprovalWatcher, rpc_call
+
+    w = cfg.watch
+    if not w.enabled:
+        raise SystemExit("watch.enabled is false in the config file")
+    url = os.environ.get(w.rpc_env)
+    if not url:
+        raise SystemExit(f"Set the {w.rpc_env} environment variable to your RPC URL")
+    targets = [ApprovalTarget(**t) for t in w.approvals]
+    watcher = ApprovalWatcher(rpc_call(url), targets, AlertSink(w.alerts_file), w.state_file)
+    print(f"Watching {sum(len(t.tokens) for t in targets)} approval entries every {w.interval_s:g}s. Ctrl-C to stop.")
+    try:
+        while True:
+            watcher.poll_once()
+            time.sleep(w.interval_s)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
 def cmd_exitlab(args: argparse.Namespace, cfg: Config) -> None:
     import copy
 
@@ -626,6 +649,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-ticks", type=int, default=None)
     session_args(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("watch", help="read-only watchers that alert on contract changes (no trading)")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("scan", help="one-shot: discover and score tokens, no trading")
     p.add_argument("--limit", type=int, default=30)
