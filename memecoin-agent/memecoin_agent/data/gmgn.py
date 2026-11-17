@@ -59,7 +59,7 @@ def load_api_key(cfg: GmgnConfig) -> str | None:
     if cfg.api_key_file:
         path = Path(cfg.api_key_file).expanduser()
         if path.exists():
-            for line in path.read_text().splitlines():  # dotenv-style file from `gmgn-cli config --apply`
+            for line in path.read_text(encoding="utf-8-sig").splitlines():  # dotenv-style file from `gmgn-cli config --apply`
                 name, sep, value = line.strip().partition("=")
                 if sep and name.strip() == ENV_KEY:
                     return value.strip().strip('"').strip("'") or None

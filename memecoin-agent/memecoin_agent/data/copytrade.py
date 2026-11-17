@@ -170,7 +170,7 @@ class CopyTracker:
         if not self.state_file or not self.state_file.exists():
             return
         try:
-            data = json.loads(self.state_file.read_text())
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
             for w in data.get("wallets", []):
                 tw = TrackedWallet(**{k: v for k, v in w.items() if k in TrackedWallet.__dataclass_fields__})
                 tw.pinned = False  # re-pinned from the config on start
@@ -188,7 +188,7 @@ class CopyTracker:
                     "last_refresh": self.last_refresh}
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1))
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
         os.replace(tmp, self.state_file)
 
     # -- thread ------------------------------------------------------------------------------------

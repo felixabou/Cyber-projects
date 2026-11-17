@@ -39,17 +39,17 @@ def _append(path: Path, cols: list[str], row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
     if not new:
-        with path.open(newline="") as fh:
+        with path.open(newline="", encoding="utf-8", errors="replace") as fh:
             header = next(csv.reader(fh), [])
         if header != cols:  # columns were added in an update: rewrite the file with the new header
             old = _read(path)
             tmp = path.with_suffix(".tmp")
-            with tmp.open("w", newline="") as fh:
+            with tmp.open("w", newline="", encoding="utf-8") as fh:
                 w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
                 w.writeheader()
                 w.writerows(old)
             os.replace(tmp, path)
-    with path.open("a", newline="") as fh:
+    with path.open("a", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         if new:
             w.writeheader()
@@ -58,7 +58,7 @@ def _append(path: Path, cols: list[str], row: dict[str, Any]) -> None:
 
 def _read(path: Path) -> list[dict[str, str]]:
     try:
-        with path.open(newline="") as fh:
+        with path.open(newline="", encoding="utf-8", errors="replace") as fh:
             return list(csv.DictReader(fh))
     except OSError:
         return []
@@ -106,7 +106,7 @@ class Analytics:
         self.watches: dict[str, Watch] = {}
         self._next_check: datetime | None = None
         try:
-            self.watches = {w["mint"]: Watch.from_dict(w) for w in json.loads(self.watch_file.read_text())}
+            self.watches = {w["mint"]: Watch.from_dict(w) for w in json.loads(self.watch_file.read_text(encoding="utf-8"))}
         except (OSError, ValueError, KeyError):
             pass
 
@@ -166,7 +166,7 @@ class Analytics:
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self.watch_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps([w.to_dict() for w in self.watches.values()]))
+            tmp.write_text(json.dumps([w.to_dict() for w in self.watches.values()]), encoding="utf-8")
             os.replace(tmp, self.watch_file)
         except OSError as exc:
             log.warning("Could not save %s: %s", self.watch_file, exc)

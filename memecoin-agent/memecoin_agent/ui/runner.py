@@ -78,7 +78,7 @@ class EquityHistory:
         self._lock = threading.Lock()
         if self.path and self.path.exists():
             try:
-                with self.path.open() as fh:
+                with self.path.open(newline="", encoding="utf-8", errors="replace") as fh:
                     for row in csv.reader(fh):
                         if len(row) == 2 and row[0] != "time":
                             self.points.append((datetime.fromisoformat(row[0]), float(row[1])))
@@ -98,7 +98,7 @@ class EquityHistory:
         if persist and self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             new = not self.path.exists()
-            with self.path.open("a", newline="") as fh:
+            with self.path.open("a", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
                 if new:
                     w.writerow(["time", "equity"])

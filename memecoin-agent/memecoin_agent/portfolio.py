@@ -22,7 +22,7 @@ def read_trades_csv(csv_path: str | Path, limit: int | None = None) -> list[Trad
         return []
     rows: deque[dict[str, str]] = deque(maxlen=limit)
     try:
-        with path.open(newline="") as fh:
+        with path.open(newline="", encoding="utf-8", errors="replace") as fh:
             rows.extend(csv.DictReader(fh))
     except OSError:
         return []
@@ -46,7 +46,7 @@ def write_trades_csv(csv_path: str | Path, trades: list[TradeRecord]) -> None:
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="") as fh:
+    with tmp.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=TRADE_COLUMNS)
         writer.writeheader()
         for t in trades:
@@ -161,7 +161,7 @@ class Portfolio:
             "entry_times": self.entry_times[-500:],
         }
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, path)
 
     def flush_trades(self, csv_path: str | Path) -> None:
@@ -170,7 +170,7 @@ class Portfolio:
         csv_path = Path(csv_path)
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         new_file = not csv_path.exists()
-        with csv_path.open("a", newline="") as fh:
+        with csv_path.open("a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=TRADE_COLUMNS)
             if new_file:
                 writer.writeheader()
@@ -183,7 +183,7 @@ class Portfolio:
         path = Path(path)
         if not path.exists():
             return cls(cash_usd=starting_cash)
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return cls(
             cash_usd=float(data["cash_usd"]),
             positions={m: Position.from_dict(p) for m, p in data.get("positions", {}).items()},
