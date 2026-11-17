@@ -130,6 +130,26 @@ class Verdict:
         return f"larpcheck {self.verdict}{score}{coin}: {self.summary}"
 
 
+CREDIT_WORDS = ("credit", "premium", "upgrade", "plan", "quota", "subscription", "payment required", "pro ")
+
+
+def out_of_credits(exc: Exception) -> bool:
+    """A refusal for lack of credits or plan (HTTP 402, or an error that says so), not an outage."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 402:
+            return True
+        text = exc.response.text
+    else:
+        text = str(exc)
+    return any(w in text.lower() for w in CREDIT_WORDS)
+
+
+def _short(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return str(exc)[:120]
+
+
 class LarpCheckGate:
     """SafetyChecker that blocks coins LarpCheck has called a LARP/scam or rigged."""
 
@@ -154,6 +174,17 @@ class LarpCheckGate:
         # mint -> "tech" / "meme", set by the agent before it calls check() (data/profile.py).
         # Unknown counts as tech: the full gate.
         self.kinds: dict[str, str] = {}
+        self._credits_warned_on: str | None = None
+
+    def _without_credits(self, mint: str, why: str) -> SafetyReport:
+        """No credits: the other safety checks decide (larpcheck.on_no_credits: allow), or no buy (reject)."""
+        if self._credits_warned_on != self.today():
+            self._credits_warned_on = self.today()
+            log.warning("LarpCheck %s: %s", why, "the other safety checks decide each coin today"
+                        if self.cfg.on_no_credits == "allow" else "no buys until credits are back")
+        if self.cfg.on_no_credits == "allow":
+            return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 300)
+        return self._cached(mint, SafetyReport(ok=False, score=None, reasons=[f"larpcheck: {why}"]), 300)
 
     def lookup_only(self, kind: str | None) -> bool:
         """Memes get LarpCheck's free lookup only (larpcheck.memes: lookup), or nothing (off)."""
@@ -342,6 +373,8 @@ class LarpCheckGate:
                 return self._no_verdict(mint, f"check still running after {self.cfg.pending_max_minutes:g} min")
             return self._unchecked(mint)
         except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
+            if out_of_credits(exc):
+                return self._without_credits(mint, f"refused for lack of credits ({_short(exc)})")
             log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
             if self.cfg.require_verdict or self.cfg.fail_closed:
                 return SafetyReport(ok=False, score=None, reasons=[UNAVAILABLE])
@@ -368,14 +401,20 @@ class LarpCheckGate:
         mode = self.cfg.on_unchecked
         if mode == "check":
             if self.checks_left_today() > 0:
-                started = self.client.start_check(mint)
+                try:
+                    started = self.client.start_check(mint)
+                except (httpx.HTTPError, LarpCheckError) as exc:
+                    if not out_of_credits(exc):
+                        raise
+                    self.checks_started[self.today()] = self.cfg.max_checks_per_day  # don't ask again today
+                    return self._without_credits(mint, f"has no credits left ({_short(exc)})")
                 day = self.today()
                 self.checks_started[day] = self.checks_started.get(day, 0) + 1
                 self._pending_since[mint] = self.clock()
                 log.info("Started LarpCheck check on %s (%d left today): %s",
                          mint, self.checks_left_today(), started.get("url") if isinstance(started, dict) else "")
                 return SafetyReport(ok=False, score=None, reasons=[PENDING])
-            return self._no_verdict(mint, "not checked yet and no checks left today", ttl_s=300)
+            return self._without_credits(mint, "checks for today are used up")
         if mode == "reject":
             return self._cached(mint, SafetyReport(ok=False, score=None, reasons=["larpcheck: no verdict yet"]), 120)
         return self._no_verdict(mint, "not checked yet")

@@ -135,6 +135,9 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
         return CompositeSafety(*checks) if len(checks) > 1 else rug
     key = load_api_key(cfg.larpcheck)
     if not key:
+        if cfg.larpcheck.require_verdict and cfg.larpcheck.on_no_credits == "allow":
+            log.warning("LarpCheck off: no API key found; the other safety checks decide each coin")
+            return CompositeSafety(*checks) if len(checks) > 1 else rug
         if cfg.larpcheck.require_verdict:
             log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
                       "larpcheck.api_key_file): the agent will open no positions; exits still run")
@@ -271,20 +274,33 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         history = ScanHistory(cfg.learning, cfg.agent.scan_log_file)
         log.info("Track record on: buys are checked against what earlier coins in the scan log did (needs %d+ "
                  "finished rows per group)", cfg.learning.min_lane_samples)
+    kols = None
+    if cfg.kols.enabled and gmgn is not None:
+        from .data.kols import KolTracker
+
+        kols = KolTracker(cfg.kols, gmgn)
+        log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
+                 cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
+                 f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
         if url:
             from .caller import Caller, DiscordWebhook, Describer
+            from .data.larpcheck import LarpCheckGate
+            from .facts import FactGatherer
 
-            caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn))
+            find = getattr(safety, "find", None)
+            larp = find(LarpCheckGate) if find else (safety if isinstance(safety, LarpCheckGate) else None)
+            caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn),
+                            facts=FactGatherer(gmgn, kols, larp))
             log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
                      ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
         else:
             log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
                         cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, caller=caller, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, kols=kols, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 

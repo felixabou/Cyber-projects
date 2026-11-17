@@ -648,6 +648,25 @@ Every automatic buy is posted to a Discord channel as a call, at the moment the 
 - a description when one is found: GMGN's token info first, then the project's own DexScreener profile;
 - links to DexScreener, GMGN and the project's website and socials.
 
+Each call also carries, where the data exists:
+
+- a score out of 10 and a label (LOW-CAP, LAUNCH, VOLATILE...);
+- the last 15 minutes' move and volume against the 15 minutes before (GeckoTerminal);
+- holders, top-10 share, dev, bundlers, snipers, insiders, fresh wallets and creator history (GMGN), holders and
+  organic score (Jupiter), and how much of the pool is locked or burned (RugCheck);
+- known traders (KOLs): how many bought, who and when, and how many already sold (GMGN's KOL feed);
+- LarpCheck's verdict with a link, only when someone already checked the coin (lookups spend no credits);
+- a Bubblemaps link (Solana, Ethereum, BSC, Base, Arbitrum, Polygon, Avalanche, Tron and a few more);
+- a short Best / Worst list.
+
+The KOL counts are also written to the scan log (`kol_bought`, `kol_sold`), and `memecoin-agent scans` compares coins
+most of whose KOL buyers already sold with the rest. Set `kols.skip_sold_share` (e.g. 0.75) only once that
+comparison shows those coins doing worse.
+
+When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
+safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks
+a coin.
+
 Follow-ups at 15 minutes, 1 hour and 4 hours show the move since the call, and a daily recap (00:00 UTC) shows
 the last 24 hours: how many calls, how many went up 50% or doubled, the median after an hour, and the best.
 

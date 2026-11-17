@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import statistics
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+log = logging.getLogger(__name__)
 
 HORIZONS = (900, 3600, 14400)  # seconds after first sight
 HNAME = {900: "15m", 3600: "1h", 14400: "4h"}
@@ -26,7 +29,7 @@ GONE_GRACE_S = 1800  # no data this long after a horizon: the coin is gone (coun
 RUG_LIQ_RATIO = 0.2  # liquidity fell to 20% of its starting level
 COLS = ["time", "mint", "symbol", "chain", "dex", "lane", "passed", "bought", "outcome", "reasons", "score", "kind",
         "age_min", "price0", "liq0", "mcap0", "vol_h1", "txns_h1", "bs_h1", "chg_m5", "chg_h1",
-        "vol_m5", "bs_m5", "chg_h6", "vol_h24",
+        "vol_m5", "bs_m5", "chg_h6", "vol_h24", "kol_bought", "kol_sold",
         "ret_15m", "ret_1h", "ret_4h", "max_ret", "min_ret", "min_liq_ratio", "rugged", "gone", "obs"]
 
 
@@ -48,6 +51,7 @@ class ScanLog:
         self._last_follow = 0.0
         self._last_save = 0.0
         self.done_rows = 0
+        self._header_checked = False
         if self.pending_path.exists():
             try:
                 d = json.loads(self.pending_path.read_text(encoding="utf-8"))
@@ -57,9 +61,9 @@ class ScanLog:
 
     # -- logging -------------------------------------------------------------------------------
     def observe(self, now: float, evals: list[Any], outcomes: dict[str, str] | None = None,
-                kinds: dict[str, str] | None = None) -> None:
+                kinds: dict[str, str] | None = None, extras: dict[str, dict] | None = None) -> None:
         """Call after every scan with the evaluations and what happened to each (outcomes: mint -> text)."""
-        outcomes, kinds = outcomes or {}, kinds or {}
+        outcomes, kinds, extras = outcomes or {}, kinds or {}, extras or {}
         for e in evals:
             s = e.snapshot
             if not getattr(s, "price_usd", 0):
@@ -88,6 +92,8 @@ class ScanLog:
                 "vol_m5": _num(getattr(s, "volume_m5", 0), 0),
                 "bs_m5": _num((getattr(s, "buys_m5", 0) or 0) / max(getattr(s, "sells_m5", 0) or 0, 1), 2),
                 "chg_h6": _num(getattr(s, "price_change_h6", 0), 1), "vol_h24": _num(getattr(s, "volume_h24", 0), 0),
+                "kol_bought": extras.get(s.mint, {}).get("kol_bought", ""),
+                "kol_sold": extras.get(s.mint, {}).get("kol_sold", ""),
                 "max_price": s.price_usd, "min_price": s.price_usd, "min_liq_ratio": 1.0, "obs": {}}
             self.recent[s.mint] = now
         if len(self.recent) > 20000:
@@ -157,6 +163,7 @@ class ScanLog:
                "min_liq_ratio": round(row["min_liq_ratio"], 3), "rugged": rugged, "gone": int(bool(row.get("gone"))),
                "obs": len(row["obs"])}
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        self._upgrade_header()
         new = not self.csv_path.exists()
         with self.csv_path.open("a", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=COLS, extrasaction="ignore")
@@ -164,6 +171,26 @@ class ScanLog:
                 w.writeheader()
             w.writerow(out)
         self.done_rows += 1
+
+    def _upgrade_header(self) -> None:
+        """A file written before columns were added: rewrite it under today's header (new columns blank), so new
+        rows don't land under the wrong column names."""
+        if self._header_checked or not self.csv_path.exists():
+            self._header_checked = True
+            return
+        self._header_checked = True
+        with self.csv_path.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), [])
+        if header == COLS:
+            return
+        rows = load_rows(self.csv_path)
+        tmp = self.csv_path.with_suffix(".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=COLS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, self.csv_path)
+        log.info("Scan log %s rewritten with the new columns (%d rows kept)", self.csv_path, len(rows))
 
     def save(self, now: float | None = None) -> None:
         self._last_save = now if now is not None else self.clock()
@@ -245,6 +272,15 @@ def build_scan_report(path: str | Path, min_rows: int = 30) -> str:
     for k, g in sorted(skipped.items(), key=lambda kv: -len(kv[1])):
         if len(g) >= 5:
             out.append(_line(k, g))
+    with_kols = [r for r in rows if (_f(r.get("kol_bought")) or 0) >= 3]
+    if len(with_kols) >= 10:
+        out += ["", "Known traders (KOLs) at first sight: tests kols.skip_sold_share before it is turned on"]
+        for label, g in (("most KOLs already sold (75%+)",
+                          [r for r in with_kols if (_f(r.get("kol_sold")) or 0) >= 0.75 * (_f(r.get("kol_bought")) or 1)]),
+                         ("most KOLs still holding",
+                          [r for r in with_kols if (_f(r.get("kol_sold")) or 0) < 0.75 * (_f(r.get("kol_bought")) or 1)])):
+            if g:
+                out.append(_line(label, g))
     out += ["", "By coin features at first sight:"]
     for col, edges, unit in (("age_min", [0, 15, 30, 60, 180, 720], "m"), ("mcap0", [0, 25_000, 50_000, 100_000, 250_000, 1_000_000], ""),
                              ("liq0", [0, 10_000, 25_000, 50_000, 150_000], ""), ("score", [0, 0.4, 0.55, 0.7, 0.85], ""),

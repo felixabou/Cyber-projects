@@ -121,7 +121,7 @@ larpcheck:
   reject_verdicts: [LARP, SCAM] # LIKELY LARP is a caution signal, not an automatic veto
   reject_coin_stamps: [RIGGED]    # stamps: OK / NEUTRAL / SKETCHY / RIGGED
   min_coin_score: null
-  require_verdict: true           # never buy a coin LarpCheck hasn't checked (no credits / down / no key = no buy)
+  require_verdict: true           # never buy a coin LarpCheck hasn't checked (LarpCheck down = no buy; no credits / no key: see on_no_credits)
   on_unchecked: check             # check (spends a daily credit, buys only if it passes) | reject | allow (needs require_verdict: false)
   max_checks_per_day: 4           # free plan: 5 credits a day
   pending_max_minutes: 5
@@ -141,6 +141,7 @@ larpcheck:
   # Memes (see classify): lookup = LarpCheck's free lookup only (a bad verdict still blocks; nothing is
   # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
   memes: lookup
+  on_no_credits: allow          # credits used up (premium plan, or today's checks spent) or no key: allow = the other safety checks decide; reject = no buy
 
 classify:
   # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description

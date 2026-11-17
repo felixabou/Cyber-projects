@@ -268,6 +268,9 @@ class LarpCheckConfig:
     # blocks the buy, but no verdict is required, no check is started and no credit is spent.
     # "full" = same rules as tech tokens. "off" = LarpCheck isn't consulted for memes at all.
     memes: str = "lookup"
+    # LarpCheck credits used up (its premium plan, or the day's checks spent), or no API key: "allow" lets the other
+    # safety checks decide the coin (a bad verdict LarpCheck already has still blocks it); "reject" skips the buy.
+    on_no_credits: str = "allow"
 
 
 @dataclass
@@ -675,6 +678,21 @@ class CallerConfig:
 
 
 @dataclass
+class KolConfig:
+    """Known traders (GMGN's KOL feed, needs a GMGN key): who bought each coin and how many already sold. Shown
+    in Discord calls and logged in the scan log (kol_bought, kol_sold) so the skip rule can be tested before use."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["sol", "bsc", "base"])  # GMGN chain names
+    poll_every_s: float = 60.0
+    max_age_hours: float = 24.0
+    # Skip a coin when at least skip_min_kols KOLs bought it and this share of them already sold (null = off:
+    # turn it on once `memecoin-agent scans` shows those coins doing worse).
+    skip_sold_share: float | None = None
+    skip_min_kols: int = 3
+
+
+@dataclass
 class UncheckedConfig:
     """Chains no honeypot or tax checker covers (Elysium). Coins there are found, called with an UNCHECKED
     warning and paper-bought at a small fixed size; never bought in live mode. Size limits are its own,
@@ -740,12 +758,15 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     caller: CallerConfig = field(default_factory=CallerConfig)
     unchecked: UncheckedConfig = field(default_factory=UncheckedConfig)
+    kols: KolConfig = field(default_factory=KolConfig)
 
     def validate(self) -> None:
         if any(m <= 0 for m in self.caller.follow_up_minutes):
             raise ValueError("caller.follow_up_minutes must all be > 0")
         if self.caller.recap_hour_utc is not None and not 0 <= self.caller.recap_hour_utc <= 23:
             raise ValueError("caller.recap_hour_utc must be 0-23 or null")
+        if self.kols.skip_sold_share is not None and not 0 < self.kols.skip_sold_share <= 1:
+            raise ValueError("kols.skip_sold_share must be in (0, 1] or null")
         if self.unchecked.position_usd <= 0:
             raise ValueError("unchecked.position_usd must be > 0")
         if self.watch.interval_s <= 0:
@@ -801,6 +822,8 @@ class Config:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
+        if self.larpcheck.on_no_credits not in ("allow", "reject"):
+            raise ValueError("larpcheck.on_no_credits must be 'allow' or 'reject'")
         if self.larpcheck.require_verdict and self.larpcheck.on_unchecked == "allow":
             raise ValueError("larpcheck.on_unchecked: allow contradicts require_verdict: true "
                              "(use 'check' or 'reject', or set require_verdict: false)")
@@ -859,6 +882,7 @@ _SECTIONS: dict[str, type] = {
     "watch": WatchConfig,
     "caller": CallerConfig,
     "unchecked": UncheckedConfig,
+    "kols": KolConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

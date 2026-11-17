@@ -162,7 +162,7 @@ larpcheck:
   reject_verdicts: [LARP, LIKELY LARP, SCAM]
   reject_coin_stamps: [RIGGED]    # stamps: OK / NEUTRAL / SKETCHY / RIGGED
   min_coin_score: null
-  require_verdict: true           # never buy a coin LarpCheck hasn't checked (no credits / down / no key = no buy)
+  require_verdict: true           # never buy a coin LarpCheck hasn't checked (LarpCheck down = no buy; no credits / no key: see on_no_credits)
   on_unchecked: check             # check (spends a daily credit, buys only if it passes) | reject | allow (needs require_verdict: false)
   max_checks_per_day: 4           # free plan: 5 credits a day
   pending_max_minutes: 5
@@ -182,6 +182,7 @@ larpcheck:
   # Memes (see classify): lookup = LarpCheck's free lookup only (a bad verdict still blocks; nothing is
   # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
   memes: lookup
+  on_no_credits: allow          # credits used up (premium plan, or today's checks spent) or no key: allow = the other safety checks decide; reject = no buy
 
 classify:
   # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description
@@ -422,3 +423,14 @@ unchecked:
   min_buy_sell_ratio_h1: 1.0
   min_price_change_h1: -10
   max_age_hours: 72
+
+# Known traders (GMGN's KOL feed; needs a GMGN key): who bought each coin and how many already sold. Shown in Discord
+# calls and logged in the scan log (kol_bought, kol_sold). The skip rule stays off until `memecoin-agent scans` shows
+# coins most of whose KOL buyers already sold doing worse than the rest.
+kols:
+  enabled: true
+  chains: [sol, bsc, base]      # GMGN chain names
+  poll_every_s: 60
+  max_age_hours: 24
+  skip_sold_share: null         # e.g. 0.75: skip when 75%+ of the KOLs who bought already sold
+  skip_min_kols: 3
