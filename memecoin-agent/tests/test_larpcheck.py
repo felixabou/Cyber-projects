@@ -114,7 +114,8 @@ def test_allow_mode_only_without_require_verdict():
 def test_never_buys_without_a_verdict():
     clock = Clock()
     fake = FakeLarpCheck({})
-    gate = make_gate(fake, clock=clock, max_checks_per_day=1, pending_max_minutes=5, on_no_credits="reject")
+    gate = make_gate(fake, clock=clock, max_checks_per_day=1, pending_max_minutes=5, on_no_credits="reject",
+                     on_unavailable="reject")
     assert gate.check("A1").reasons == [PENDING] and fake.started == ["A1"]
     b = gate.check("B2")  # no credits left, with on_no_credits: reject: refused, not waved through
     assert not b.ok and "checks for today are used up" in b.reasons[0] and fake.started == ["A1"]
@@ -133,7 +134,8 @@ def test_never_buys_without_a_verdict():
 def test_outages_refuse_buys_unless_verdicts_are_optional():
     fake = FakeLarpCheck({})
     fake.down = True
-    assert make_gate(fake).check("X1").reasons == [UNAVAILABLE]
+    assert make_gate(fake).check("X1").ok  # default on_unavailable: allow: the other checks decide
+    assert make_gate(fake, on_unavailable="reject").check("X1").reasons == [UNAVAILABLE]
     open_gate = make_gate(fake, require_verdict=False, on_unchecked="check")
     assert open_gate.check("X1") == SafetyReport(ok=True, score=None, reasons=[])
     assert make_gate(fake, require_verdict=False, on_unchecked="check", fail_closed=True).check("X1").reasons == [UNAVAILABLE]
@@ -425,3 +427,12 @@ def test_out_of_credits_falls_back_to_the_other_checks():
     assert make_gate(PremiumOnly({})).check("E5").ok  # lookups refused by plan: the other checks decide
     assert not make_gate(PremiumOnly({}), on_no_credits="reject").check("E5").ok
     assert out_of_credits(LarpCheckError("start_check: no credits left")) and not out_of_credits(LarpCheckError("timeout"))
+
+
+def test_a_check_that_never_finishes_falls_back_to_the_other_checks():
+    clock = Clock()
+    fake = FakeLarpCheck({})
+    gate = make_gate(fake, clock=clock, pending_max_minutes=5)
+    assert gate.check("A1").reasons == [PENDING]
+    clock.t += 5 * 60 + 1
+    assert gate.check("A1").ok and fake.started == ["A1"]  # no second credit; the other checks decide

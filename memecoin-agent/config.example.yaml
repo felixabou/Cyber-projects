@@ -183,6 +183,7 @@ larpcheck:
   # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
   memes: lookup
   on_no_credits: allow          # credits used up (premium plan, or today's checks spent) or no key: allow = the other safety checks decide; reject = no buy
+  on_unavailable: allow         # LarpCheck down, or a check that never finishes: allow = the other safety checks decide; reject = no buy
 
 classify:
   # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description
@@ -436,8 +437,8 @@ kols:
   skip_min_kols: 3
 
 # MEME OS (memeos.world). Key: the MEMEOS_API_KEY environment variable (or api_key_file), never this file.
-# X-Ray (5 credits) runs on a coin only after every free check passed, just before the buy; bundle clusters
-# (35 credits) are read for Discord calls. Out of credits (or over the caps below), the other checks decide.
+# Order of the safety checks: LarpCheck, MEME OS X-Ray (5 credits), then RugCheck, Jupiter and GMGN. Out of credits,
+# down, or over the caps below, X-Ray passes the coin on and the original checks decide.
 memeos:
   enabled: true
   xray: true
@@ -448,3 +449,4 @@ memeos:
   cache_minutes: 30
   bundle_on_calls: true
   max_bundle_per_day: 10        # 350 credits a day at most
+  bundle_min_credits: 500       # bundle reads only while this many credits are left (the free checks go to X-Ray)

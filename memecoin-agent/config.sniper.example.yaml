@@ -142,6 +142,7 @@ larpcheck:
   # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
   memes: lookup
   on_no_credits: allow          # credits used up (premium plan, or today's checks spent) or no key: allow = the other safety checks decide; reject = no buy
+  on_unavailable: allow         # LarpCheck down, or a check that never finishes: allow = the other safety checks decide; reject = no buy
 
 classify:
   # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description

@@ -24,8 +24,11 @@ from typing import Any, Callable
 import httpx
 
 from ..config import MemeosConfig
+from ..models import SafetyReport
 
 log = logging.getLogger(__name__)
+
+XRAY_CREDITS, BUNDLE_CREDITS = 5, 35
 
 
 def load_api_key(cfg: MemeosConfig) -> str | None:
@@ -188,12 +191,38 @@ class MemeosGate:
         except MemeosError as exc:
             self._failed(exc, "xray")
             return None
+        self._check_balance()
         if report is not None:
             self.reports[address] = report
             self._expires[address] = self.clock() + self.cfg.cache_minutes * 60
             if len(self.reports) > 2000:
                 self.reports = dict(list(self.reports.items())[-1000:])
         return report
+
+    def _check_balance(self) -> None:
+        """Switch X-Ray off for the day once the balance can't pay for another (the free checks are used up)."""
+        left = self.client.credits_left
+        if left is not None and left < XRAY_CREDITS:
+            self._off["all"] = self.today()
+            self._warn_once(f"{self.today()}empty", "MEME OS credits used up (%g left): the other safety checks "
+                            "decide each coin", left)
+
+    def start(self) -> float | None:
+        """Read the balance (free) once at startup; None if MEME OS can't be reached."""
+        try:
+            balance = float(self.client.account().get("balance"))
+        except (MemeosError, TypeError, ValueError) as exc:
+            log.warning("MEME OS balance check failed (%s); the other safety checks decide when X-Ray can't answer", exc)
+            return None
+        self.client.credits_left = balance
+        self._check_balance()
+        return balance
+
+    def check(self, address: str) -> SafetyReport:
+        """SafetyChecker: a bad X-Ray verdict rejects; no verdict (out of credits, down, unsupported) passes it on
+        to the other checks."""
+        why = self.block_reason(address)
+        return SafetyReport(ok=why is None, score=None, reasons=[why[len("unsafe: "):]] if why else [])
 
     def block_reason(self, address: str) -> str | None:
         """Why X-Ray says not to buy (None: buy, or X-Ray had nothing to say)."""
@@ -211,7 +240,10 @@ class MemeosGate:
         return None
 
     def bundle(self, address: str) -> Bundle | None:
-        if not self.cfg.bundle_on_calls or not self._budget("bundle", self.cfg.max_bundle_per_day):
+        left = self.client.credits_left
+        if not self.cfg.bundle_on_calls or (left is not None and left < max(self.cfg.bundle_min_credits, BUNDLE_CREDITS)):
+            return None  # credits are kept for the buy checks
+        if not self._budget("bundle", self.cfg.max_bundle_per_day):
             return None
         try:
             return parse_bundle(self.client.bundle(address))

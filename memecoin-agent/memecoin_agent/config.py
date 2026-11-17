@@ -271,6 +271,8 @@ class LarpCheckConfig:
     # LarpCheck credits used up (its premium plan, or the day's checks spent), or no API key: "allow" lets the other
     # safety checks decide the coin (a bad verdict LarpCheck already has still blocks it); "reject" skips the buy.
     on_no_credits: str = "allow"
+    # LarpCheck down, or a check it started never finishing: "allow" = the other safety checks decide; "reject" = no buy.
+    on_unavailable: str = "allow"
 
 
 @dataclass
@@ -680,8 +682,8 @@ class CallerConfig:
 @dataclass
 class MemeosConfig:
     """MEME OS (memeos.world) developer API. Key: the MEMEOS_API_KEY environment variable or api_key_file.
-    X-Ray (5 credits) runs on a coin only after it passed every free check, just before the buy; bundle clusters
-    (35 credits) are read for Discord calls. Both are capped per day; out of credits, the other checks decide."""
+    X-Ray (5 credits) is one of the first safety checks, after LarpCheck; bundle clusters (35 credits) are read for
+    Discord calls. When X-Ray is out of credits or unreachable, the other safety checks decide."""
 
     enabled: bool = True
     api_key_env: str = "MEMEOS_API_KEY"
@@ -696,6 +698,9 @@ class MemeosConfig:
     cache_minutes: float = 30.0
     bundle_on_calls: bool = True
     max_bundle_per_day: int = 10  # 350 credits
+    # Bundle reads only while at least this many credits are left, so a small balance (the free checks) goes to
+    # the buy checks rather than to the reports.
+    bundle_min_credits: float = 500
 
 
 @dataclass
@@ -846,8 +851,8 @@ class Config:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
-        if self.larpcheck.on_no_credits not in ("allow", "reject"):
-            raise ValueError("larpcheck.on_no_credits must be 'allow' or 'reject'")
+        if self.larpcheck.on_no_credits not in ("allow", "reject") or self.larpcheck.on_unavailable not in ("allow", "reject"):
+            raise ValueError("larpcheck.on_no_credits and larpcheck.on_unavailable must be 'allow' or 'reject'")
         if self.larpcheck.require_verdict and self.larpcheck.on_unchecked == "allow":
             raise ValueError("larpcheck.on_unchecked: allow contradicts require_verdict: true "
                              "(use 'check' or 'reject', or set require_verdict: false)")

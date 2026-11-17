@@ -722,6 +722,10 @@ class Agent:
                 outcomes[snap.mint] = blocked
                 log.info("Skip %s: %s", snap.symbol, blocked)
                 continue
+            if snap.chain != "solana" and self.memeos is not None and (why := self.memeos.block_reason(snap.mint)):
+                outcomes[snap.mint] = why  # MEME OS first; Solana runs it inside self.safety, after LarpCheck
+                log.info("Skip %s: %s", snap.symbol, why)
+                continue
             if ev.lane == "unchecked":
                 if self.cfg.execution.mode == "live":
                     outcomes[snap.mint] = f"skipped: {snap.chain} has no safety check; paper only"
@@ -776,10 +780,6 @@ class Agent:
             if self.route_check is not None and snap.chain == "solana" and ev.lane != "sniper" \
                     and (why := self.route_check.check(snap.mint, size)):
                 outcomes[snap.mint] = "unsafe: " + why
-                log.info("Skip %s: %s", snap.symbol, why)
-                continue
-            if self.memeos is not None and (why := self.memeos.block_reason(snap.mint)):
-                outcomes[snap.mint] = why
                 log.info("Skip %s: %s", snap.symbol, why)
                 continue
             preflight = getattr(self.executor, "preflight_pregraduation", self.executor.preflight) \
@@ -842,14 +842,12 @@ class Agent:
         if snap.chain != "solana":
             if self.cfg.execution.mode == "live":
                 return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
+            if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
+                return why
             if self.chain_safety is None:
                 return f"unsafe: no honeypot check available for {snap.chain}"
             rep = self.chain_safety.check(snap.chain, snap.mint)
-            if not rep.ok:
-                return "unsafe: " + "; ".join(rep.reasons)
-            if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
-                return why
-            return None
+            return None if rep.ok else "unsafe: " + "; ".join(rep.reasons)
         if self.profiler is not None:
             try:
                 prof = self.profiler.profile(snap)
@@ -879,8 +877,6 @@ class Agent:
             return "unsafe: " + why
         if reason := self.executor.preflight(snap, size):
             return f"skipped: {reason}"
-        if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
-            return why
         return None
 
     def _open(self, snap: TokenSnapshot, size: float, now: datetime, lane: str, reason: str,

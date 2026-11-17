@@ -665,12 +665,16 @@ comparison shows those coins doing worse.
 
 ### MEME OS
 
-With a MEME OS key (`MEMEOS_API_KEY`), every automatic buy gets an X-Ray report first (5 credits), after all the
-free checks have passed so credits are only spent on coins about to be bought. A verdict in
+Safety checks run in this order on every coin the agent would buy: LarpCheck, MEME OS X-Ray, then RugCheck,
+Jupiter and GMGN (and the honeypot round trip). When LarpCheck or MEME OS is out of credits, down, or never finishes
+a check, it passes the coin on and the original checks decide; those always run.
+
+With a MEME OS key (`MEMEOS_API_KEY`), each candidate gets an X-Ray report (5 credits). A verdict in
 `memeos.reject_verdicts` (HIGH RISK and worse) skips the coin; CAUTION does not, since X-Ray gives every new, thin
 coin CAUTION at most. Discord calls show the verdict, score, flags and authorities with a link to the report, and
-the share of supply held by wallets funded from the same source (bundle check, 35 credits, `max_bundle_per_day`).
-Daily caps keep the spend bounded, and when the credits run out (HTTP 402) the other safety checks decide.
+the share of supply held by wallets funded from the same source (bundle check, 35 credits), read only while
+`bundle_min_credits` (500) or more are left so a small balance such as the free checks goes to the buy checks.
+When the balance can't pay for another X-Ray, or MEME OS answers 402, X-Ray switches off for the day.
 
 When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
 safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks

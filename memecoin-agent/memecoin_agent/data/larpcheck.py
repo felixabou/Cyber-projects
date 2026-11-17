@@ -370,12 +370,16 @@ class LarpCheckGate:
                 if now - since < self.cfg.pending_max_minutes * 60:
                     return SafetyReport(ok=False, score=None, reasons=[PENDING])
                 # Don't spend another credit on it; if the check finishes later, its verdict is used.
+                if self.cfg.on_unavailable == "allow":
+                    return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 120)
                 return self._no_verdict(mint, f"check still running after {self.cfg.pending_max_minutes:g} min")
             return self._unchecked(mint)
         except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
             if out_of_credits(exc):
                 return self._without_credits(mint, f"refused for lack of credits ({_short(exc)})")
             log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
+            if self.cfg.on_unavailable == "allow" and not self.cfg.fail_closed:
+                return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 60)  # the other checks decide
             if self.cfg.require_verdict or self.cfg.fail_closed:
                 return SafetyReport(ok=False, score=None, reasons=[UNAVAILABLE])
             return SafetyReport(ok=True, score=None, reasons=[])

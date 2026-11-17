@@ -118,7 +118,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
-def test_agent_runs_xray_last_and_skips_high_risk(isolated):
+def test_agent_runs_xray_first_on_other_chains_and_skips_high_risk(isolated):
     agent, hook, _, _ = make_agent([make_snap(chain="bsc", mint="0x" + "ab" * 20, quote_symbol="WBNB",
                                               market_cap_usd=80_000, liquidity_usd=20_000, volume_h1=30_000,
                                               pair_created_at=NOW.replace(hour=11, minute=15))])
@@ -137,3 +137,44 @@ def test_agent_buys_on_caution_and_when_memeos_is_out_of_credits(isolated):
     agent2.memeos = gate(Api(status=402))
     agent2.scan_and_enter(NOW)
     assert ely_snap().mint in agent2.pf.positions
+
+
+def test_low_balance_switches_xray_off_and_keeps_credits_from_bundles():
+    class Low(Api):
+        def __call__(self, req):
+            resp = super().__call__(req)
+            if req.url.path == "/api/public/v1/account":
+                return httpx.Response(200, json={"data": {"balance": 125}})  # the 25 free checks
+            return resp
+
+    api = Low({"A": CAUTION})
+    g = gate(api)
+    assert g.start() == 125
+    assert g.bundle("A") is None  # 125 < bundle_min_credits: credits stay with the buy checks
+    assert g.xray("A") is not None
+    assert not any("bundle" in p for p in api.paths)
+
+    class Empty(Api):
+        def __call__(self, req):
+            return httpx.Response(200, json={"data": {"balance": 3}})
+
+    empty = gate(Empty())
+    assert empty.start() == 3
+    assert empty.check("B") == empty.check("B") and empty.check("B").ok  # under one X-Ray's cost: off, others decide
+    assert empty.client.http._transport.handler is not None
+
+
+def test_larpcheck_then_memeos_then_the_original_checks(monkeypatch):
+    from memecoin_agent import cli
+    from memecoin_agent.config import Config
+    from memecoin_agent.data.larpcheck import LarpCheckGate
+
+    cfg = Config()
+    cfg.jupiter.enabled = False
+    monkeypatch.setenv("LARPCHECK_API_KEY", "lc_test")
+    g = gate(Api({"BAD": HIGH_RISK}))
+    safety = cli.build_safety(cfg, memeos=g)
+    kinds = [type(c).__name__ for c in safety.checkers]
+    assert isinstance(safety.checkers[0], LarpCheckGate) and kinds[1] == "MemeosGate" and kinds[2] == "RugCheckClient"
+    rep = g.check("BAD")
+    assert not rep.ok and rep.reasons[0].startswith("MEME OS X-Ray HIGH RISK")

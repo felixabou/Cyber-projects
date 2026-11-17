@@ -110,11 +110,10 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
                                launch_window_s=cfg.sniper.max_age_minutes * 60), feed
 
 
-def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
-    """The agent's pre-buy checks, cheapest first: RugCheck, Jupiter, GMGN, then LarpCheck (which can
-    spend credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False
-    and no GMGN client: it vets hundreds of tokens, and the later checks are for the few the agent would
-    buy."""
+def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=None):
+    """The agent's pre-buy checks: LarpCheck and MEME OS X-Ray first, then RugCheck, Jupiter and GMGN. Every one
+    runs on each coin; when LarpCheck or MEME OS is out of credits or unreachable it passes the coin on and the
+    others decide. The recorder passes with_larpcheck=False and no GMGN client: it vets hundreds of tokens."""
     from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
 
     f = cfg.filters
@@ -131,6 +130,8 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
 
         checks.append(GmgnSafety(cfg.gmgn, gmgn))
         log.info("GMGN safety check on (rug ratio, wash trading, holder concentration, bundlers/insiders)")
+    if memeos is not None:
+        checks.insert(0, memeos)
     if not (with_larpcheck and cfg.larpcheck.enabled):
         return CompositeSafety(*checks) if len(checks) > 1 else rug
     key = load_api_key(cfg.larpcheck)
@@ -148,13 +149,32 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
     log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
              "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
              cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
-    return CompositeSafety(*checks, gate)
+    return CompositeSafety(gate, *checks)
+
+
+def build_memeos(cfg: Config):
+    if not cfg.memeos.enabled:
+        return None
+    from .data.memeos import MemeosClient, MemeosGate, load_api_key as memeos_key
+
+    key = memeos_key(cfg.memeos)
+    if not key:
+        log.info("MEME OS off: no key (set the %s environment variable)", cfg.memeos.api_key_env)
+        return None
+    gate = MemeosGate(cfg.memeos, MemeosClient(key, cfg.memeos.base_url))
+    balance = gate.start()
+    log.info("MEME OS X-Ray on, right after LarpCheck (up to %d a day)%s; %s credits left. When they run out the "
+             "other safety checks decide", cfg.memeos.max_xray_per_day,
+             f"; bundle clusters on calls while {cfg.memeos.bundle_min_credits:g}+ credits are left"
+             if cfg.memeos.bundle_on_calls else "", "?" if balance is None else f"{balance:g}")
+    return gate
 
 
 def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalFeed | None]:
     gmgn = build_gmgn(cfg)
     market, feed = build_market(cfg, with_feed, gmgn=gmgn)
-    safety = build_safety(cfg, gmgn=gmgn)
+    memeos = build_memeos(cfg)
+    safety = build_safety(cfg, gmgn=gmgn, memeos=memeos)
     if cfg.execution.mode == "live":
         if os.environ.get(LIVE_CONFIRM_ENV) != "yes":
             raise SystemExit(
@@ -282,25 +302,6 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
                  cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
                  f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
-    memeos = None
-    if cfg.memeos.enabled:
-        from .data.memeos import MemeosClient, MemeosError, MemeosGate, load_api_key as memeos_key
-
-        mkey = memeos_key(cfg.memeos)
-        if mkey:
-            mclient = MemeosClient(mkey, cfg.memeos.base_url)
-            memeos = MemeosGate(cfg.memeos, mclient)
-            try:
-                acct = mclient.account()  # free: confirms the key and shows the balance
-                log.info("MEME OS on: X-Ray before each buy (up to %d a day)%s; %s credits left",
-                         cfg.memeos.max_xray_per_day,
-                         f", bundle clusters on calls (up to {cfg.memeos.max_bundle_per_day} a day)"
-                         if cfg.memeos.bundle_on_calls else "", acct.get("balance", "?"))
-            except MemeosError as exc:
-                log.warning("MEME OS key check failed (%s); X-Ray stays on and the other checks decide if it keeps "
-                            "failing", exc)
-        else:
-            log.info("MEME OS off: no key (set the %s environment variable)", cfg.memeos.api_key_env)
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
