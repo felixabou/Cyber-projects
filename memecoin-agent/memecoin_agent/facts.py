@@ -208,7 +208,8 @@ def judge(s: TokenSnapshot, f: TokenFacts, age_min: float | None, unchecked: boo
                                   or (x.score is not None and x.score < 40)),
         f"MEME OS X-Ray {x.verdict if x else ''}" + (f" {x.score:g}" if x and x.score is not None else ""))
     b = f.bundle
-    add(worst, b is not None and (b.linked_supply_pct or 0) >= 30, f"linked wallets hold {b.linked_supply_pct if b else 0:.0f}%")
+    linked = b.linked_supply_pct if b is not None and b.linked_supply_pct is not None else None
+    add(worst, linked is not None and linked >= 30, f"linked wallets hold {linked or 0:.0f}%")
     add(best, b is not None and b.linked_supply_pct is not None and b.linked_supply_pct <= 10, "little linked supply")
     k = f.kols
     add(best, k is not None and k.bought >= 3 and k.sold_share < 0.5, f"{k.bought - k.sold if k else 0} KOLs still holding")

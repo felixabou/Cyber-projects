@@ -255,3 +255,75 @@ def test_chain_search_keeps_pairs_on_the_chain_quoted_in_hype():
     t[0] = 1_000
     d.discover()
     assert calls == ["elysium", "elysium"]
+
+
+
+# -- calls are never lost --------------------------------------------------------------------------------------
+
+def test_a_failing_report_still_posts_a_basic_call(tmp_path):
+    class Broken:
+        def gather(self, snap):
+            raise RuntimeError("facts source exploded")
+
+    caller, hook = make_caller(tmp_path)
+    caller.facts = Broken()
+    assert caller.call(make_snap(), NOW, "lowcap", "low-cap lane", 25, 0.001)
+    fields = {f["name"]: f["value"] for f in hook.posts[0][0]["fields"]}
+    assert make_snap().mint in fields["Contract"] and fields["Paper buy"].startswith("$25.00")
+
+
+def test_bundle_without_a_linked_share_does_not_break_the_report():
+    from memecoin_agent.data.memeos import Bundle
+    from memecoin_agent.facts import TokenFacts, judge
+
+    best, worst = judge(make_snap(), TokenFacts(bundle=Bundle(None, 0, None, None)), age_min=30)
+    assert not any("linked" in w for w in worst)
+
+
+def test_webhook_drops_empty_values_and_keeps_discords_reason(caplog):
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(400, json={"embeds": ["0"], "message": "Invalid Form Body"})
+
+    hook = DiscordWebhook("https://discord.com/api/webhooks/1/SECRET", http=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert not hook.post(embeds=[{"title": "x", "url": None, "description": "", "fields": []}])
+    assert seen[0]["embeds"] == [{"title": "x"}] and "content" not in seen[0]
+    assert "Invalid Form Body" in hook.last_error and "Invalid Form Body" in caplog.text and "SECRET" not in caplog.text
+
+
+class Flaky:
+    def __init__(self, fail_times):
+        self.fail_times, self.posts, self.last_error = fail_times, [], ""
+
+    def post(self, content="", embeds=None):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            self.last_error = "HTTP 500: oops"
+            return False
+        self.posts.append(embeds)
+        return True
+
+
+def test_a_refused_call_is_retried_and_survives_a_restart(tmp_path):
+    hook = Flaky(fail_times=2)
+    caller = Caller(CallerConfig(enabled=True, recap_hour_utc=None), hook, FakeDescriber(), tmp_path / "c.json")
+    assert not caller.call(make_snap(), NOW, "lowcap", "", 25, 0.001)
+    assert len(caller.unsent) == 1
+    again = Caller(CallerConfig(enabled=True, recap_hour_utc=None), hook, FakeDescriber(), tmp_path / "c.json")
+    assert len(again.unsent) == 1  # kept across a restart
+    again.tick(NOW, lambda m: {})  # second failure
+    again.tick(NOW, lambda m: {})  # goes through
+    assert not again.unsent and hook.posts and hook.posts[0][0]["title"].startswith("CALL")
+
+
+def test_a_call_discord_keeps_refusing_is_dropped_with_a_reason(tmp_path, caplog):
+    from memecoin_agent.caller import MAX_TRIES
+
+    hook = Flaky(fail_times=100)
+    caller = Caller(CallerConfig(enabled=True, recap_hour_utc=None), hook, FakeDescriber(), tmp_path / "c.json")
+    caller.call(make_snap(), NOW, "lowcap", "", 25, 0.001)
+    for _ in range(MAX_TRIES):
+        caller.tick(NOW, lambda m: {})
+    assert not caller.unsent and "dropped after" in caplog.text and "HTTP 500: oops" in caplog.text
