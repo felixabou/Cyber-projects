@@ -1,3 +1,4 @@
+import pytest
 from memecoin_agent.watch.launch_check import (
     DEAD,
     EIP7702_PREFIX,
@@ -88,10 +89,10 @@ def test_scan_stops_at_first_n_transfers():
     assert len(got) == 3
 
 
-def test_scan_respects_the_chunk_range():
-    chain = FakeChain([log(100 + 5000, 0, POOL, "0x" + "d" * 40, 1)], head=6000)
+def test_scan_reads_in_ten_block_steps():
+    chain = FakeChain([log(100 + 450, 0, POOL, "0x" + "d" * 40, 1)], head=600)
     got = scan_transfers(chain, TOKEN, 100, 10)
-    assert len(got) == 1 and chain.get_logs_calls >= 2
+    assert len(got) == 1 and chain.get_logs_calls >= 46
 
 
 def test_range_refused_by_provider_is_split_until_accepted():
@@ -106,3 +107,23 @@ def test_range_refused_by_provider_is_split_until_accepted():
     chain = Strict([log(105, 0, POOL, "0x" + "e" * 40, 3)], head=400, creation=100)
     got = scan_transfers(chain, TOKEN, 100, 10)
     assert [t.amount for t in got] == [3]
+
+
+def test_provider_refusing_every_range_raises_instead_of_returning_empty():
+    class Refuses(FakeChain):
+        def request(self, method, params):
+            if method == "eth_getLogs":
+                raise RuntimeError("RPC HTTP 400: unsupported")
+            return super().request(method, params)
+
+    with pytest.raises(RuntimeError, match="unsupported"):
+        scan_transfers(Refuses([]), TOKEN, 100, 10)
+
+
+def test_scan_stops_at_the_call_cap(monkeypatch):
+    from memecoin_agent.watch import launch_check
+
+    monkeypatch.setattr(launch_check, "MAX_LOG_CALLS", 3)
+    chain = FakeChain([], head=10_000)
+    assert scan_transfers(chain, TOKEN, 100, 10) == []
+    assert chain.get_logs_calls == 3

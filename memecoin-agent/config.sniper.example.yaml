@@ -238,6 +238,12 @@ jupiter:
   min_organic_score: 20            # null = off
   organic_min_age_hours: 1          # live: 4 of 4 unscored coins past an hour fell 33-100% within 20 min
   organic_min_volume_1h_usd: 20000
+  # Farmed volume on coins under 48h old: Jupiter's organic share of 24h buying, and of traders (null = off)
+  min_organic_buy_share_pct: 0.5
+  min_organic_buyer_share_pct: 0.2
+  organic_share_max_age_hours: 48
+  organic_share_min_buy_volume_usd: 20000
+  organic_buyers_min_traders: 2000
   shell_min_market_cap_usd: 1000000  # a market cap this big held by fewer than shell_max_holders: a shell
   shell_max_holders: 100
   wash_max_holders: 150            # 24h volume far past what the pool explains, among fewer holders: wash

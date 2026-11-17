@@ -29,8 +29,9 @@ TRANSFER = keccak256_hex("Transfer(address,address,uint256)")
 ZERO = "0x" + "0" * 40
 DEAD = "0x000000000000000000000000000000000000dead"
 EIP7702_PREFIX = "0xef0100"
-CHUNK_BLOCKS = 2_000
+CHUNK_BLOCKS = 10  # Alchemy's free plan allows eth_getLogs over 10 blocks at most
 MIN_CHUNK_BLOCKS = 10
+MAX_LOG_CALLS = 500
 MIN_IDENTICAL = 3
 
 
@@ -66,8 +67,9 @@ def scan_transfers(rpc: Rpc, token: str, creation_block: int, first_n: int) -> l
     head = _int(rpc.request("eth_blockNumber", []))
     times: dict[int, int] = {}
     out: list[Transfer] = []
-    lo, chunk = creation_block, CHUNK_BLOCKS
-    while lo <= head and len(out) < first_n and chunk >= MIN_CHUNK_BLOCKS:
+    lo, chunk, calls = creation_block, CHUNK_BLOCKS, 0
+    while lo <= head and len(out) < first_n and calls < MAX_LOG_CALLS:
+        calls += 1
         hi = min(head, lo + chunk - 1)
         try:
             logs = rpc.request("eth_getLogs", [{"address": token, "topics": [TRANSFER],
@@ -75,6 +77,8 @@ def scan_transfers(rpc: Rpc, token: str, creation_block: int, first_n: int) -> l
         except RuntimeError as exc:
             if "HTTP 400" not in str(exc) and "HTTP 413" not in str(exc) and "range" not in str(exc).lower():
                 raise
+            if chunk // 2 < MIN_CHUNK_BLOCKS:
+                raise RuntimeError(f"provider refuses log reads even at {MIN_CHUNK_BLOCKS} blocks: {exc}") from None
             chunk //= 2
             log.info("Log range %d blocks refused, trying %d: %s", hi - lo + 1, chunk, exc)
             continue

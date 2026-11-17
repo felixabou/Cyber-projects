@@ -118,3 +118,36 @@ def test_wired_before_gmgn_and_into_manual_buys():
     agent = Agent(cfg, FakeMarket([make_snap()]), CompositeSafety(JupiterTokenSafety(cfg.jupiter, jup, clock=lambda: NOW)),
                   PaperExecutor(cfg.execution), Portfolio(cash_usd=1000), persist=False)
     assert "jupiter: creator has minted 9,999 coins (coin factory)" in agent.manual_check(make_snap(), 20)
+
+
+def farmed(organic_buy=398.0, buy=453_770.0, organic_buyers=5, traders=9_148, created="2027-01-15T00:00:00Z"):
+    """Shaped on GTA (Grand Theft Anthropic, 16 Nov 2026): organic score 35, clean rug checks, farmed volume."""
+    t = token("FARMED", organic=35.3, holders=7_986, mcap=942_000, liq=71_000, created=created)
+    t["stats24h"].update({"buyVolume": buy, "buyOrganicVolume": organic_buy, "numTraders": traders,
+                          "numOrganicBuyers": organic_buyers})
+    return t
+
+
+def test_farmed_volume_on_a_young_coin_is_ruled_out():
+    why = reasons_for(JupiterConfig(), farmed(), NOW)
+    assert any("0.09% of $453,770 of 24h buying is organic" in r for r in why)
+    assert any("5 organic buyers among 9,148 traders" in r for r in why)
+
+
+def test_real_young_coins_and_old_coins_pass_the_organic_share_rules():
+    cfg = JupiterConfig()
+    # The lowest young trending coin in the live sample: 1.8% organic buying, 0.59% organic buyers.
+    assert reasons_for(cfg, farmed(organic_buy=0.018 * 453_770, organic_buyers=54), NOW) == []
+    # Old coins are left out: arbitrage bots make most of their volume.
+    assert reasons_for(cfg, farmed(created="2027-01-10T00:00:00Z"), NOW) == []
+    # Too little buying, or too few traders, to judge.
+    assert reasons_for(cfg, farmed(buy=10_000, organic_buy=1, traders=900), NOW) == []
+    # Fields Jupiter hasn't filled in are not read as zero.
+    t = farmed()
+    del t["stats24h"]["buyOrganicVolume"], t["stats24h"]["numOrganicBuyers"]
+    assert reasons_for(cfg, t, NOW) == []
+
+
+def test_organic_share_rules_can_be_turned_off():
+    cfg = JupiterConfig(min_organic_buy_share_pct=None, min_organic_buyer_share_pct=None)
+    assert reasons_for(cfg, farmed(), NOW) == []

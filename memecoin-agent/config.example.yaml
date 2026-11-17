@@ -279,6 +279,12 @@ jupiter:
   min_organic_score: 20            # null = off
   organic_min_age_hours: 1          # live: 4 of 4 unscored coins past an hour fell 33-100% within 20 min
   organic_min_volume_1h_usd: 20000
+  # Farmed volume on coins under 48h old: Jupiter's organic share of 24h buying, and of traders (null = off)
+  min_organic_buy_share_pct: 0.5
+  min_organic_buyer_share_pct: 0.2
+  organic_share_max_age_hours: 48
+  organic_share_min_buy_volume_usd: 20000
+  organic_buyers_min_traders: 2000
   shell_min_market_cap_usd: 1000000  # a market cap this big held by fewer than shell_max_holders: a shell
   shell_max_holders: 100
   wash_max_holders: 150            # 24h volume far past what the pool explains, among fewer holders: wash
@@ -389,3 +395,30 @@ longterm:
   hard_stop_pct: 50
   secure_at_pct: 100            # initials + half the profit out at 2x; the rest runs
 
+# Discord calls: every automatic buy is posted as a call with a full report (numbers, safety, why, description,
+# the paper buy), then followed up. The webhook URL comes from the DISCORD_WEBHOOK_URL environment variable.
+caller:
+  enabled: false
+  webhook_env: DISCORD_WEBHOOK_URL
+  username: Memecoin Caller
+  follow_up_minutes: [15, 60, 240]
+  recap_hour_utc: 0             # daily recap of the last 24h of calls (null = off)
+  describe: true                # description from GMGN token info, else the project's DexScreener profile
+  state_file: state/calls.json
+
+# Chains no honeypot or tax checker covers. Coins there are called with an UNCHECKED warning and paper-bought at
+# a small fixed size; never in live mode. Their own size limits apply, since these coins are small.
+unchecked:
+  enabled: true
+  chains: [elysium]
+  position_usd: 10
+  quote_symbols: [HYPE, WHYPE, USDC, USDT, USDT0]
+  discover_every_s: 120
+  min_liquidity_usd: 3000
+  min_market_cap_usd: 3000
+  max_market_cap_usd: 500000
+  min_volume_h1_usd: 1000
+  min_txns_h1: 20
+  min_buy_sell_ratio_h1: 1.0
+  min_price_change_h1: -10
+  max_age_hours: 72

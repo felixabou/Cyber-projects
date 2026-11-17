@@ -338,6 +338,15 @@ class JupiterConfig:
     min_organic_score: float | None = 20
     organic_min_age_hours: float = 1.0  # live: 4 of 4 unscored coins past an hour fell 33-100% in 20 min
     organic_min_volume_1h_usd: float = 20_000
+    # Farmed volume on young coins: Jupiter's organic (non-bot) share of the last 24h of buying, and the share of
+    # traders it counts as organic buyers. Live sample: the lowest of 31 trending coins under 48h old were 1.8% and
+    # 0.59%; a bot-farmed coin bought on 16 Nov showed 0.09% and 0.05% (5 organic buyers among 9,148 traders)
+    # while passing every rug check. Old coins are left out: arbitrage bots make most of their volume.
+    min_organic_buy_share_pct: float | None = 0.5
+    min_organic_buyer_share_pct: float | None = 0.2
+    organic_share_max_age_hours: float = 48.0
+    organic_share_min_buy_volume_usd: float = 20_000
+    organic_buyers_min_traders: int = 2_000
     # Holders leaving: the holder count fell this much (%) over the last hour (null = off).
     max_holder_drop_1h_pct: float | None = 5.0
     shell_min_market_cap_usd: float = 1_000_000
@@ -651,6 +660,42 @@ class LongTermConfig:
 
 
 @dataclass
+class CallerConfig:
+    """Calls to Discord: every automatic buy is posted as a call with a full report, then followed up.
+
+    The webhook URL is read from the `webhook_env` environment variable, never from this file."""
+
+    enabled: bool = False
+    webhook_env: str = "DISCORD_WEBHOOK_URL"
+    username: str = "Memecoin Caller"
+    follow_up_minutes: list[float] = field(default_factory=lambda: [15, 60, 240])
+    recap_hour_utc: int | None = 0  # daily recap of the last 24h of calls at this UTC hour (null = off)
+    describe: bool = True  # look up a description (GMGN token info, then DexScreener's profile)
+    state_file: str = "state/calls.json"
+
+
+@dataclass
+class UncheckedConfig:
+    """Chains no honeypot or tax checker covers (Elysium). Coins there are found, called with an UNCHECKED
+    warning and paper-bought at a small fixed size; never bought in live mode. Size limits are its own,
+    since these chains' coins are much smaller than the other lanes allow."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["elysium"])
+    position_usd: float = 10.0
+    quote_symbols: list[str] = field(default_factory=lambda: ["HYPE", "WHYPE", "USDC", "USDT", "USDT0"])
+    discover_every_s: float = 120.0
+    min_liquidity_usd: float = 3_000.0
+    min_market_cap_usd: float = 3_000.0
+    max_market_cap_usd: float = 500_000.0
+    min_volume_h1_usd: float = 1_000.0
+    min_txns_h1: int = 20
+    min_buy_sell_ratio_h1: float = 1.0
+    min_price_change_h1: float = -10.0
+    max_age_hours: float = 72.0
+
+
+@dataclass
 class WatchConfig:
     """Read-only watchers (`memecoin-agent --watch`): alerts only, never trades. Off until enabled."""
 
@@ -693,8 +738,16 @@ class Config:
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
+    caller: CallerConfig = field(default_factory=CallerConfig)
+    unchecked: UncheckedConfig = field(default_factory=UncheckedConfig)
 
     def validate(self) -> None:
+        if any(m <= 0 for m in self.caller.follow_up_minutes):
+            raise ValueError("caller.follow_up_minutes must all be > 0")
+        if self.caller.recap_hour_utc is not None and not 0 <= self.caller.recap_hour_utc <= 23:
+            raise ValueError("caller.recap_hour_utc must be 0-23 or null")
+        if self.unchecked.position_usd <= 0:
+            raise ValueError("unchecked.position_usd must be > 0")
         if self.watch.interval_s <= 0:
             raise ValueError("watch.interval_s must be > 0")
         for t in self.watch.approvals:
@@ -804,6 +857,8 @@ _SECTIONS: dict[str, type] = {
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
     "watch": WatchConfig,
+    "caller": CallerConfig,
+    "unchecked": UncheckedConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,
