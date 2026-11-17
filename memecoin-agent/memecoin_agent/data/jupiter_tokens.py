@@ -78,6 +78,17 @@ def reasons_for(cfg: JupiterConfig, t: dict[str, Any], now: float) -> list[str]:
     if (cfg.shell_max_holders and holders is not None and mcap and mcap >= cfg.shell_min_market_cap_usd
             and holders < cfg.shell_max_holders):
         why.append(f"${mcap:,.0f} market cap held by {holders:.0f} wallets (shell)")
+    young = age is not None and age <= cfg.organic_share_max_age_hours
+    buy_24, organic_buy_24 = _f(s24.get("buyVolume")) or 0.0, _f(s24.get("buyOrganicVolume"))
+    if (young and cfg.min_organic_buy_share_pct is not None and organic_buy_24 is not None
+            and buy_24 >= cfg.organic_share_min_buy_volume_usd
+            and (share := organic_buy_24 / buy_24 * 100) < cfg.min_organic_buy_share_pct):
+        why.append(f"only {share:.2f}% of ${buy_24:,.0f} of 24h buying is organic: farmed volume")
+    traders, organic_buyers = _f(s24.get("numTraders")) or 0.0, _f(s24.get("numOrganicBuyers"))
+    if (young and cfg.min_organic_buyer_share_pct is not None and organic_buyers is not None
+            and traders >= cfg.organic_buyers_min_traders
+            and (share := organic_buyers / traders * 100) < cfg.min_organic_buyer_share_pct):
+        why.append(f"{organic_buyers:.0f} organic buyers among {traders:,.0f} traders in 24h: bot crowd")
     holder_change = _f(s1h.get("holderChange"))
     if cfg.max_holder_drop_1h_pct is not None and holder_change is not None and holder_change <= -cfg.max_holder_drop_1h_pct:
         why.append(f"holders down {-holder_change:.0f}% in the last hour: they are leaving")

@@ -338,6 +338,15 @@ class JupiterConfig:
     min_organic_score: float | None = 20
     organic_min_age_hours: float = 1.0  # live: 4 of 4 unscored coins past an hour fell 33-100% in 20 min
     organic_min_volume_1h_usd: float = 20_000
+    # Farmed volume on young coins: Jupiter's organic (non-bot) share of the last 24h of buying, and the share of
+    # traders it counts as organic buyers. Live sample: the lowest of 31 trending coins under 48h old were 1.8% and
+    # 0.59%; a bot-farmed coin bought on 16 Nov showed 0.09% and 0.05% (5 organic buyers among 9,148 traders)
+    # while passing every rug check. Old coins are left out: arbitrage bots make most of their volume.
+    min_organic_buy_share_pct: float | None = 0.5
+    min_organic_buyer_share_pct: float | None = 0.2
+    organic_share_max_age_hours: float = 48.0
+    organic_share_min_buy_volume_usd: float = 20_000
+    organic_buyers_min_traders: int = 2_000
     # Holders leaving: the holder count fell this much (%) over the last hour (null = off).
     max_holder_drop_1h_pct: float | None = 5.0
     shell_min_market_cap_usd: float = 1_000_000
