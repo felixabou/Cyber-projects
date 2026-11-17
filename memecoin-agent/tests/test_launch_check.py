@@ -92,3 +92,17 @@ def test_scan_respects_the_chunk_range():
     chain = FakeChain([log(100 + 5000, 0, POOL, "0x" + "d" * 40, 1)], head=6000)
     got = scan_transfers(chain, TOKEN, 100, 10)
     assert len(got) == 1 and chain.get_logs_calls >= 2
+
+
+def test_range_refused_by_provider_is_split_until_accepted():
+    class Strict(FakeChain):
+        def request(self, method, params):
+            if method == "eth_getLogs":
+                f = params[0]
+                if int(f["toBlock"], 16) - int(f["fromBlock"], 16) >= 100:
+                    raise RuntimeError("RPC HTTP 400: block range too large")
+            return super().request(method, params)
+
+    chain = Strict([log(105, 0, POOL, "0x" + "e" * 40, 3)], head=400, creation=100)
+    got = scan_transfers(chain, TOKEN, 100, 10)
+    assert [t.amount for t in got] == [3]
