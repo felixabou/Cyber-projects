@@ -89,10 +89,10 @@ def test_scan_stops_at_first_n_transfers():
     assert len(got) == 3
 
 
-def test_scan_respects_the_chunk_range():
-    chain = FakeChain([log(100 + 5000, 0, POOL, "0x" + "d" * 40, 1)], head=6000)
+def test_scan_reads_in_ten_block_steps():
+    chain = FakeChain([log(100 + 450, 0, POOL, "0x" + "d" * 40, 1)], head=600)
     got = scan_transfers(chain, TOKEN, 100, 10)
-    assert len(got) == 1 and chain.get_logs_calls >= 2
+    assert len(got) == 1 and chain.get_logs_calls >= 46
 
 
 def test_range_refused_by_provider_is_split_until_accepted():
