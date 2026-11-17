@@ -327,6 +327,7 @@ td.reason .verdict.v-fail { white-space: normal; }
 /* Positions: lane / chain / stage pills and per-row controls */
 .pill-chain { background: var(--series-1-track); color: var(--text); }
 .pill-runner { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--text); }
+.pill-unchecked { background: color-mix(in srgb, var(--warning) 45%, transparent); color: var(--text); font-weight: 600; }
 .pill-dip { background: color-mix(in srgb, var(--warning) 28%, transparent); color: var(--text); }
 .token-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .row-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; white-space: nowrap; }

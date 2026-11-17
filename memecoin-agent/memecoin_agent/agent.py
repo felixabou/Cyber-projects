@@ -14,7 +14,7 @@ from .config import Config
 from .data import MarketData, SafetyChecker
 from .data.dexscreener import canonical_chain
 from .execution import Executor
-from .models import TokenSnapshot, TradeRecord, utcnow
+from .models import ALWAYS_UNCHECKED_CHAINS, UNCHECKED_MAX_USD, TokenSnapshot, TradeRecord, is_unchecked, utcnow
 from .portfolio import Portfolio
 from .risk import RiskManager
 from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit, launch_reasons, lowcap_reasons
@@ -52,6 +52,7 @@ class Agent:
         caller: object | None = None,
         kols: object | None = None,
         memeos: object | None = None,
+        telemetry: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -96,6 +97,8 @@ class Agent:
         self.kols = kols
         # data.memeos.MemeosGate: MEME OS X-Ray, the last check before a buy (it costs credits).
         self.memeos = memeos
+        # telemetry.Telemetry: every blocked candidate by stage and reason (why the agent isn't buying).
+        self.telemetry = telemetry
         self._regime_state: str | None = None
         self._lowcap_first: dict[str, tuple[datetime, float]] = {}  # mint -> when it first qualified, and its price
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
@@ -343,10 +346,18 @@ class Agent:
             state = self.regime.risk_off()
             if state != self._regime_state and (state is None) != (self._regime_state is None):
                 log.info("Market regime: %s", state or "recovered; automatic entries allowed again")
+                if self.caller is not None and hasattr(self.caller, "notice"):
+                    try:
+                        self.caller.notice(f"Market regime: new entries on hold ({state})" if state
+                                           else "Market regime recovered: automatic entries allowed again", warn=bool(state))
+                    except Exception as exc:
+                        log.warning("Discord regime notice failed: %s", exc)
             self._regime_state = state
         unchecked = {canonical_chain(c) for c in self.cfg.unchecked.chains} if self.cfg.unchecked.enabled else set()
         for s in snaps.values():
             self._remember_price(s, now)
+            if s.chain in unchecked or s.chain in ALWAYS_UNCHECKED_CHAINS:
+                s.unchecked = True  # paper only, capped, labelled: whatever lane or config comes next
             if s.chain in unchecked:
                 evals.append(self._unchecked_lane(s, now))
                 continue
@@ -446,6 +457,46 @@ class Agent:
             reasons.append(f"older than {c.max_age_hours:g}h")
         score = evaluate_entry(s, self.cfg.filters, now).score
         return EntryEvaluation(snapshot=s, passed=not reasons, score=score, reasons=reasons, lane="unchecked")
+
+    def _unchecked_guard(self, snap: TokenSnapshot, lane: str) -> str | None:
+        """Why an unchecked coin may not be bought here (None: it may). Paper only, and only through the unchecked
+        lane, so it is never shown as a safety-approved trade. The live executors refuse it again on their own."""
+        if not (is_unchecked(snap) or lane == "unchecked"):
+            return None
+        if self.cfg.execution.mode == "live" or getattr(self.executor, "live", True):
+            log.error("Refused UNCHECKED %s (%s): unchecked coins never reach a live executor", snap.symbol, snap.chain)
+            return f"refused: {snap.chain} is UNCHECKED (no safety check); unchecked coins are paper-only"
+        if lane != "unchecked":
+            return f"unsafe: {snap.chain} is UNCHECKED (no safety check); only the unchecked lane may paper-buy it"
+        return None
+
+    def _intended_size(self, ev: EntryEvaluation) -> float | None:
+        """What the candidate would have been bought for (the lane's cap, before conviction scaling)."""
+        try:
+            size = self.risk.position_size_usd(self.pf, self.executor.available_usd(self.pf))
+        except Exception:
+            return None
+        cap = {"unchecked": self.cfg.unchecked.position_usd, "sniper": self.cfg.sniper.max_position_usd,
+               "lowcap": self.cfg.lowcap.max_position_usd}.get(ev.lane)
+        return round(min(size, cap) if cap is not None and size > 0 else size, 2)
+
+    def _block(self, outcomes: dict[str, str], ev: EntryEvaluation, stage: str, reason: str, text: str,
+               history: str | None = None, size: float | None = None) -> None:
+        """A candidate that won't be bought this scan: its outcome for the scanner, and a telemetry record."""
+        outcomes[ev.snapshot.mint] = text
+        if self.telemetry is not None:
+            s = ev.snapshot
+            self.telemetry.block(stage, reason, lane=ev.lane, chain=s.chain, mint=s.mint, symbol=s.symbol, detail=text,
+                                 regime_state=self._regime_state, history_verdict=history, score=ev.score,
+                                 intended_position_size=size if size is not None else self._intended_size(ev))
+
+    def _safety_stage(self, report: Any) -> tuple[str, str]:
+        from .telemetry import slug
+
+        category = getattr(report, "category", "") or ""
+        if category.startswith("larpcheck"):
+            return "larpcheck", category
+        return "safety", category or slug(report.reasons[0] if report.reasons else "", "safety_check")
 
     def _announce(self, snap: TokenSnapshot, now: datetime, lane: str, why: str | None, size: float, price: float,
                   safety: Any = None, unchecked: bool = False, score: float | None = None) -> None:
@@ -680,8 +731,13 @@ class Agent:
     def scan_and_enter(self, now: datetime) -> None:
         self._set_entry_block(self._entry_block_reason(now))
         if self.entry_block:
-            if self.scan_when_blocked:
-                self._record_scan(now, self.evaluate_candidates(now), {})
+            evals = self.evaluate_candidates(now) if self.scan_when_blocked else []
+            if self.telemetry is not None:
+                self.telemetry.begin_scan(len(evals), sum(e.passed for e in evals), entry_block=self.entry_block)
+            outcomes: dict[str, str] = {}
+            for ev in (e for e in evals if e.passed):
+                self._block(outcomes, ev, "risk", "entry_block", f"skipped: new entries blocked: {self.entry_block}")
+            self._finish_scan(now, evals, outcomes, record=bool(evals))
             return
 
         scan_started = time.monotonic()
@@ -689,60 +745,67 @@ class Agent:
         passed = [e for e in evals if e.passed]
         log.info("Scan: %d candidates, %d passed filters (discovery and snapshots %.2fs)",
                  len(evals), len(passed), time.monotonic() - scan_started)
+        if self.telemetry is not None:
+            self.telemetry.begin_scan(len(evals), len(passed))
         outcomes: dict[str, str] = {}  # mint -> what happened after passing filters
-        for ev in passed:
+        for i, ev in enumerate(passed):
             snap = ev.snapshot
             if block := self._entry_block_reason(now):
                 self._set_entry_block(block)
+                for rest in passed[i:]:
+                    self._block(outcomes, rest, "risk", "entry_block", f"skipped: new entries blocked: {block}")
                 break
             if self._regime_state and ev.lane in self.cfg.regime.lanes:
-                outcomes[snap.mint] = f"waiting: {self._regime_state}"
+                self._block(outcomes, ev, "regime", "market_falling", f"waiting: {self._regime_state}")
                 continue
             # Free checks first (fake chart, then the wallet scan for launches and early or small buys):
             # they spare a LarpCheck credit on manipulated and bundled coins.
             dumped = self._dumped(snap, now)
             if dumped:
-                outcomes[snap.mint] = dumped
+                self._block(outcomes, ev, "filters", "just_dumped", dumped)
                 continue
             prof, fake = self._profile_check(snap, now)
             if fake:
-                outcomes[snap.mint] = fake
+                self._block(outcomes, ev, "safety", "fake_chart", fake)
                 continue
             note = None
             if self._needs_wallet_scan(ev, now):
                 ok, note = self._launch_check(snap, ev.lane)
                 if not ok:
-                    outcomes[snap.mint] = note
+                    self._block(outcomes, ev, "safety", "wallet_scan", note)
                     continue
             if blocked := self._narrative_block(snap, now):
-                outcomes[snap.mint] = blocked
+                self._block(outcomes, ev, "safety", "narrative", blocked)
                 log.info("Skip %s: %s", snap.symbol, blocked)
                 continue
             if self.kols is not None and (blocked := self.kols.skip_reason(snap.chain, snap.mint)):
-                outcomes[snap.mint] = blocked
+                self._block(outcomes, ev, "filters", "kols_sold", blocked)
                 log.info("Skip %s: %s", snap.symbol, blocked)
                 continue
             if snap.chain != "solana" and self.memeos is not None and (why := self.memeos.block_reason(snap.mint)):
-                outcomes[snap.mint] = why  # MEME OS first; Solana runs it inside self.safety, after LarpCheck
+                self._block(outcomes, ev, "safety", "memeos_xray", why)  # Solana runs it inside self.safety
                 log.info("Skip %s: %s", snap.symbol, why)
                 continue
             if ev.lane == "unchecked":
                 if self.cfg.execution.mode == "live":
-                    outcomes[snap.mint] = f"skipped: {snap.chain} has no safety check; paper only"
+                    self._block(outcomes, ev, "execution", "paper_only_chain",
+                                f"skipped: {snap.chain} has no safety check; paper only")
                     continue
                 report = None
             elif snap.chain == "solana":
                 report = self.safety.check(snap.mint)
             elif self.cfg.execution.mode == "live":
-                outcomes[snap.mint] = f"skipped: live trading is Solana-only ({snap.chain} needs a chain executor)"
+                self._block(outcomes, ev, "execution", "paper_only_chain",
+                            f"skipped: live trading is Solana-only ({snap.chain} needs a chain executor)")
                 continue
             elif self.chain_safety is None:
-                outcomes[snap.mint] = f"unsafe: no honeypot check available on {snap.chain}"
+                self._block(outcomes, ev, "safety", "no_honeypot_check", f"unsafe: no honeypot check available on {snap.chain}")
                 continue
             else:
                 report = self.chain_safety.check(snap.chain, snap.mint)
             if report is not None and not report.ok:
-                outcomes[snap.mint] = "unsafe: " + "; ".join(report.reasons)
+                stage, reason = self._safety_stage(report)
+                self._block(outcomes, ev, stage, reason, "unsafe: " + "; ".join(report.reasons))
                 log.info("Skip %s: %s", snap.symbol, "; ".join(report.reasons))
                 continue
             record, learned, sizing = None, 1.0, ""
@@ -753,21 +816,27 @@ class Agent:
                     log.warning("Track record failed for %s: %s", snap.symbol, exc)
                     why = None
                 if why:
-                    outcomes[snap.mint] = why
+                    reason = "too_many_rugs" if "rugged)" in why else "low_returns"
+                    self._block(outcomes, ev, "history", reason, why, history=record.text() if record is not None else None)
                     log.info("Skip %s: %s", snap.symbol, why)
                     continue
             size = self.risk.position_size_usd(self.pf, self.executor.available_usd(self.pf))
             if size <= 0:
                 log.info("Insufficient balance for a minimum-size position")
+                for rest in passed[i:]:
+                    self._block(outcomes, rest, "risk", "insufficient_balance",
+                                "skipped: insufficient balance for a minimum-size position", size=0.0)
                 break
             if ev.lane == "unchecked":
-                size = round(min(self.cfg.unchecked.position_usd, self.executor.available_usd(self.pf)), 2)
+                size = round(min(self.cfg.unchecked.position_usd, UNCHECKED_MAX_USD,
+                                 self.executor.available_usd(self.pf)), 2)
             elif ev.lane == "sniper":
                 size = min(size, self.cfg.sniper.max_position_usd)
             elif ev.lane == "lowcap":
                 size = min(size, self.cfg.lowcap.max_position_usd)
                 if size < self.cfg.risk.min_position_usd:
-                    outcomes[snap.mint] = "skipped: low-cap position cap is below the risk minimum"
+                    self._block(outcomes, ev, "risk", "lane_cap_below_minimum",
+                                "skipped: low-cap position cap is below the risk minimum", size=size)
                     continue
             # Conviction and the track record scale the lane's size (never above the lane's own cap).
             factor = self._size_factor(ev) * learned
@@ -779,20 +848,24 @@ class Agent:
                 sizing = f"size x{factor:.2f}" + (f" ({record.text()})" if record is not None else " (score)")
             if self.route_check is not None and snap.chain == "solana" and ev.lane != "sniper" \
                     and (why := self.route_check.check(snap.mint, size)):
-                outcomes[snap.mint] = "unsafe: " + why
+                self._block(outcomes, ev, "safety", "honeypot_route", "unsafe: " + why, size=size)
                 log.info("Skip %s: %s", snap.symbol, why)
+                continue
+            if why := self._unchecked_guard(snap, ev.lane):  # the last word before any executor sees the coin
+                self._block(outcomes, ev, "execution" if why.startswith("refused") else "safety", "unchecked_guard",
+                            why, size=size)
                 continue
             preflight = getattr(self.executor, "preflight_pregraduation", self.executor.preflight) \
                 if ev.lane == "sniper" else self.executor.preflight
             if reason := preflight(snap, size):
-                outcomes[snap.mint] = f"skipped: {reason}"
+                self._block(outcomes, ev, "execution", "preflight", f"skipped: {reason}", size=size)
                 log.info("Skip %s: %s", snap.symbol, reason)
                 continue
             try:
                 buy_curve = getattr(self.executor, "buy_pregraduation", None) if ev.lane == "sniper" else None
                 fill = buy_curve(snap, size) if buy_curve is not None else self.executor.buy(snap, size)
             except Exception as exc:
-                outcomes[snap.mint] = f"buy failed: {exc}"
+                self._block(outcomes, ev, "execution", "buy_failed", f"buy failed: {exc}", size=size)
                 log.error("BUY %s failed: %s", snap.symbol, exc)
                 continue
             if ev.lane == "narrative":
@@ -812,12 +885,32 @@ class Agent:
                 self.analytics.log_entry(snap, ev.lane, ev.score, size, fill.price_usd, now, verdicts.get(snap.mint),
                                          kind=pos.kind, holders=prof.holders if prof else None)
             outcomes[snap.mint] = "bought"
+            if self.telemetry is not None:
+                self.telemetry.bought(ev.lane)
             self._announce(snap, now, ev.lane, note, size, fill.price_usd, report, unchecked=ev.lane == "unchecked",
                            score=ev.score)
             log.info("BUY %s $%.2f @ %.10g | %s liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
                      snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,
                      snap.market_cap_usd, snap.price_change_h1, snap.url)
-        self._record_scan(now, evals, outcomes)
+        self._finish_scan(now, evals, outcomes)
+
+    def _finish_scan(self, now: datetime, evals: list[EntryEvaluation], outcomes: dict[str, str],
+                     record: bool = True) -> None:
+        if self.telemetry is not None:
+            from .scanlog import reason_key
+            from .telemetry import key
+
+            for e in evals:
+                if not e.passed:
+                    self._block(outcomes, e, "filters", key(reason_key("; ".join(e.reasons)), "filters"),
+                                "; ".join(e.reasons[:2]))
+                    outcomes.pop(e.snapshot.mint, None)  # the scanner shows these by their reasons, not an outcome
+            try:
+                self.telemetry.end_scan()
+            except OSError as exc:
+                log.warning("Telemetry save failed: %s", exc)
+        if record:
+            self._record_scan(now, evals, outcomes)
 
     # -- copy lane, long-term lane, manual trades ---------------------------------------------------
     def _lane_note(self, now: datetime, lane: str, snap_or_symbol: Any, chain: str, mint: str, outcome: str) -> None:
@@ -830,6 +923,12 @@ class Agent:
         self._lane_last[mint] = outcome
         if len(self._lane_last) > 5000:
             self._lane_last = {mint: outcome}
+        if self.telemetry is not None and outcome != "bought":
+            from .telemetry import classify
+
+            stage, reason = classify(outcome)
+            self.telemetry.block(stage, reason, lane=lane, chain=chain, mint=mint, symbol=symbol, detail=outcome,
+                                 regime_state=self._regime_state)
         self.lane_outcomes.append({"at": now.isoformat(), "lane": lane, "symbol": symbol, "chain": chain,
                                    "mint": mint, "outcome": outcome})
         if outcome == "bought" or outcome.startswith(("unsafe", "skipped")):
@@ -839,6 +938,8 @@ class Agent:
         """The checks every non-momentum buy gets, by chain. None: buy it."""
         if lane in ("copy", "longterm") and (knife := self.falling_knife(snap)):
             return f"waiting: {knife}"
+        if lane != "manual" and snap.chain in ALWAYS_UNCHECKED_CHAINS | {canonical_chain(c) for c in self.cfg.unchecked.chains}:
+            return f"unsafe: {snap.chain} is UNCHECKED (no safety check); only the unchecked lane may paper-buy it"
         if snap.chain != "solana":
             if self.cfg.execution.mode == "live":
                 return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
@@ -881,6 +982,15 @@ class Agent:
 
     def _open(self, snap: TokenSnapshot, size: float, now: datetime, lane: str, reason: str,
               managed: bool = True) -> Any:
+        unchecked = {canonical_chain(c) for c in self.cfg.unchecked.chains}
+        if snap.chain in unchecked or snap.chain in ALWAYS_UNCHECKED_CHAINS:
+            snap.unchecked = True
+        if is_unchecked(snap):
+            if self.cfg.execution.mode == "live" or getattr(self.executor, "live", True):
+                from .execution import UncheckedLiveError
+
+                raise UncheckedLiveError(f"refused: {snap.chain} is UNCHECKED (no safety check); paper-only")
+            reason = f"UNCHECKED: no safety check exists for {snap.chain} | {reason}"
         fill = self.executor.buy(snap, size)
         pos = self.pf.open(snap, fill, now, 0.0, reason=reason, lane=lane, managed=managed)
         pos.kind = self.kinds.get(snap.mint, "")
@@ -889,6 +999,8 @@ class Agent:
         log.info("BUY %s (%s, %s lane) $%.2f @ %.10g | %s | liq $%.0f mcap $%.0f | %s", snap.symbol, snap.chain,
                  lane, size, fill.price_usd, reason, snap.liquidity_usd, snap.market_cap_usd, snap.url)
         if lane != "manual":
+            if self.telemetry is not None:
+                self.telemetry.bought(lane)
             self._announce(snap, now, lane, reason, size, fill.price_usd)
         return pos
 

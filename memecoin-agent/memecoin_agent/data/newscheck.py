@@ -42,7 +42,7 @@ def load_api_key(cfg: NarrativeConfig) -> str | None:
     if cfg.api_key_file:
         path = Path(cfg.api_key_file).expanduser()
         try:
-            return path.read_text(encoding="utf-8").strip() or None
+            return path.read_text(encoding="utf-8-sig").strip() or None
         except OSError:
             return None
     return None

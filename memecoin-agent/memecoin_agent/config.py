@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,10 @@ class AgentConfig:
     # price and liquidity did 15 min, 1 h and 4 h later (state/scans.csv). `memecoin-agent scans` reads it.
     scan_log: bool = True
     scan_log_file: str | None = "state/scans.csv"
+    # Why candidates were blocked, by stage and reason (state/rejections.jsonl, state/telemetry.json);
+    # `memecoin-agent blocked` reads it. A coin blocked again for the same reason within the window adds no row.
+    telemetry: bool = True
+    telemetry_dedupe_minutes: float = 60.0
     # If this file exists the agent opens no new positions (exits still run).
     kill_switch_file: str = "STOP"
 
@@ -237,17 +242,20 @@ class LarpCheckConfig:
     # Coin stamps are OK / NEUTRAL / SKETCHY / RIGGED (how fair the coin is for a buyer).
     reject_coin_stamps: list[str] = field(default_factory=lambda: ["RIGGED"])
     min_coin_score: float | None = None
-    # Never buy a coin LarpCheck hasn't checked: no verdict means no buy, whatever the reason
-    # (unchecked and no credits left, a check that didn't finish, LarpCheck down, no API key).
-    require_verdict: bool = True
-    # A coin nobody has checked yet: "check" (start one, spending a daily credit, and buy only once
-    # it passes), "reject", or "allow" (free; other checks decide; only with require_verdict: false).
+    # What happens when LarpCheck has no verdict to give: it is down, has no key, has no credits, has never
+    # checked the coin, or a check it started hasn't finished. Chosen separately for paper and live trading:
+    #   strict:   no buy
+    #   fallback: the other safety checks (MEME OS, RugCheck, Jupiter, GMGN, the honeypot test) decide
+    # A bad verdict (reject_verdicts / reject_coin_stamps) blocks the coin under both.
+    paper_policy: str = "fallback"
+    live_policy: str = "strict"
+    # A coin nobody has checked yet: "check" (start one, spending a daily credit; buy only once it passes or,
+    # under fallback, once the check is unavailable), "reject" (never buy it), or "allow" (start nothing; the
+    # policy above decides).
     on_unchecked: str = "check"
     max_checks_per_day: int = 4
-    # How long to hold off a buy while a check is running before falling back to on_unchecked.
+    # How long to hold off a buy while a check is running; after that the policy decides.
     pending_max_minutes: float = 5.0
-    # LarpCheck unreachable: false = let the other checks decide, true = skip the buy.
-    fail_closed: bool = False
     # Held coins: re-read LarpCheck's verdict every few minutes (free); when it flags one, read the
     # reasoning and sell. Coins rated one of dust_verdicts sell exit_sell_fraction and keep the rest
     # as dust; any other flagged coin (LARP, SCAM, RIGGED on another verdict) sells in full.
@@ -267,12 +275,8 @@ class LarpCheckConfig:
     # Memes (classify): "lookup" = only LarpCheck's free lookup: a bad verdict someone else got still
     # blocks the buy, but no verdict is required, no check is started and no credit is spent.
     # "full" = same rules as tech tokens. "off" = LarpCheck isn't consulted for memes at all.
+    # Under strict, a meme with no verdict is not bought either ("off" leaves memes out of LarpCheck entirely).
     memes: str = "lookup"
-    # LarpCheck credits used up (its premium plan, or the day's checks spent), or no API key: "allow" lets the other
-    # safety checks decide the coin (a bad verdict LarpCheck already has still blocks it); "reject" skips the buy.
-    on_no_credits: str = "allow"
-    # LarpCheck down, or a check it started never finishing: "allow" = the other safety checks decide; "reject" = no buy.
-    on_unavailable: str = "allow"
 
 
 @dataclass
@@ -796,8 +800,10 @@ class Config:
             raise ValueError("memeos.max_xray_per_day and memeos.max_bundle_per_day must be >= 0")
         if self.kols.skip_sold_share is not None and not 0 < self.kols.skip_sold_share <= 1:
             raise ValueError("kols.skip_sold_share must be in (0, 1] or null")
-        if self.unchecked.position_usd <= 0:
-            raise ValueError("unchecked.position_usd must be > 0")
+        from .models import UNCHECKED_MAX_USD
+
+        if not 0 < self.unchecked.position_usd <= UNCHECKED_MAX_USD:
+            raise ValueError(f"unchecked.position_usd must be > 0 and at most ${UNCHECKED_MAX_USD:g} (a hard limit)")
         if self.watch.interval_s <= 0:
             raise ValueError("watch.interval_s must be > 0")
         for t in self.watch.approvals:
@@ -851,11 +857,9 @@ class Config:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
-        if self.larpcheck.on_no_credits not in ("allow", "reject") or self.larpcheck.on_unavailable not in ("allow", "reject"):
-            raise ValueError("larpcheck.on_no_credits and larpcheck.on_unavailable must be 'allow' or 'reject'")
-        if self.larpcheck.require_verdict and self.larpcheck.on_unchecked == "allow":
-            raise ValueError("larpcheck.on_unchecked: allow contradicts require_verdict: true "
-                             "(use 'check' or 'reject', or set require_verdict: false)")
+        for key in ("paper_policy", "live_policy"):
+            if getattr(self.larpcheck, key) not in ("strict", "fallback"):
+                raise ValueError(f"larpcheck.{key} must be 'strict' or 'fallback'")
         if self.recorder.interval_s <= 0 or self.recorder.discover_every_ticks < 1:
             raise ValueError("recorder.interval_s must be > 0 and recorder.discover_every_ticks >= 1")
         if self.larpcheck.memes not in ("lookup", "full", "off"):
@@ -920,6 +924,8 @@ _SECTIONS: dict[str, type] = {
 
 
 def _build_section(cls: type, data: dict[str, Any], name: str) -> Any:
+    if cls is LarpCheckConfig:
+        data = migrate_larpcheck(data)
     known = {f.name for f in dataclasses.fields(cls)}
     unknown = set(data) - known
     if unknown:
@@ -927,6 +933,26 @@ def _build_section(cls: type, data: dict[str, Any], name: str) -> Any:
     if cls is ExitConfig:
         data = build_exit_data(data)
     return cls(**data)
+
+
+# LarpCheck settings replaced by paper_policy / live_policy. Read from older config files so they still load; they
+# can only make the paper policy stricter, never looser (live is strict by default either way).
+LARPCHECK_LEGACY = ("require_verdict", "fail_closed", "on_no_credits", "on_unavailable")
+
+
+def migrate_larpcheck(data: dict[str, Any]) -> dict[str, Any]:
+    old = {k: data[k] for k in LARPCHECK_LEGACY if k in data}
+    if not old:
+        return data
+    data = {k: v for k, v in data.items() if k not in LARPCHECK_LEGACY}
+    stricter = (old.get("fail_closed") is True or old.get("on_no_credits") == "reject"
+                or old.get("on_unavailable") == "reject")
+    if stricter and "paper_policy" not in data:
+        data["paper_policy"] = "strict"
+    logging.getLogger(__name__).warning(
+        "larpcheck: %s replaced by paper_policy / live_policy (now %s / %s); remove the old key(s) from your config",
+        ", ".join(sorted(old)), data.get("paper_policy", "fallback"), data.get("live_policy", "strict"))
+    return data
 
 
 def build_exit_data(data: dict[str, Any]) -> dict[str, Any]:

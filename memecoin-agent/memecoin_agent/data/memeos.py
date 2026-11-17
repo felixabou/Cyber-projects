@@ -37,7 +37,7 @@ def load_api_key(cfg: MemeosConfig) -> str | None:
         return key
     if cfg.api_key_file:
         try:
-            return Path(cfg.api_key_file).expanduser().read_text(encoding="utf-8").strip() or None
+            return Path(cfg.api_key_file).expanduser().read_text(encoding="utf-8-sig").strip() or None
         except OSError:
             return None
     return None

@@ -190,7 +190,7 @@ def test_alerts_and_csv_downloads(tmp_path):
     recent = TradeRecord(NOW - timedelta(minutes=30), "buy", "MINT_B", "BONK", 10.0, 40.0, 0.004, 0.2, "copy")
     assert bot.respond(OWNER, "/csv") == "No trades yet."
     Portfolio(cash_usd=0, trades=[buy, sell, recent]).flush_trades(cfg.agent.trades_csv)
-    with open(cfg.agent.trades_csv, "a") as fh:
+    with open(cfg.agent.trades_csv, "a", encoding="utf-8") as fh:
         fh.write("2026-10-22T13:06:00+00:00,buy,PARTIAL")  # a row the agent is still writing
     assert bot.respond(OWNER, "/csv") is None  # all
     assert bot.respond(OWNER, "/csv session") is None
@@ -254,7 +254,7 @@ def test_token_and_chat_loading(monkeypatch, tmp_path):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     assert load_token(cfg) is None and allowed_chats(cfg) == {5}
-    (tmp_path / "token").write_text(" from-file \n")
+    (tmp_path / "token").write_text(" from-file \n", encoding="utf-8")
     assert load_token(cfg) == "from-file"
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "from-env")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "111, -100222,oops")

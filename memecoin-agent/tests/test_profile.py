@@ -103,7 +103,7 @@ def test_profiler_survives_outages():
 # -- LarpCheck: memes get the free lookup only --------------------------------------------------
 def test_meme_lookup_only_tech_full_gate():
     fake = FakeWithReports({"BAD": coin("BAD", "LARP", "RIGGED")})
-    gate = review_gate(fake, on_unchecked="check", require_verdict=True)
+    gate = review_gate(fake, on_unchecked="check")
     gate.kinds.update({"MEME": "meme", "BAD": "meme", "TECH": "tech"})
     assert gate.check("MEME").ok  # unchecked meme: allowed, nothing started
     assert not gate.check("BAD").ok  # someone else's verdict still blocks it

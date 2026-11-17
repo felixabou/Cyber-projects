@@ -114,7 +114,8 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=Non
     """The agent's pre-buy checks: LarpCheck and MEME OS X-Ray first, then RugCheck, Jupiter and GMGN. Every one
     runs on each coin; when LarpCheck or MEME OS is out of credits or unreachable it passes the coin on and the
     others decide. The recorder passes with_larpcheck=False and no GMGN client: it vets hundreds of tokens."""
-    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+    from .data.larpcheck import (FALLBACK, CompositeSafety, LarpCheckClient, LarpCheckGate, MissingLarpCheck, load_api_key,
+                                 policy_for)
 
     f = cfg.filters
     rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
@@ -134,21 +135,23 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=Non
         checks.insert(0, memeos)
     if not (with_larpcheck and cfg.larpcheck.enabled):
         return CompositeSafety(*checks) if len(checks) > 1 else rug
+    mode = cfg.execution.mode
+    policy = policy_for(cfg.larpcheck, mode)
+    if mode == "live" and policy == FALLBACK:
+        log.warning("Live trading with larpcheck.live_policy: fallback: coins LarpCheck can't vouch for are bought "
+                    "on the other checks alone")
     key = load_api_key(cfg.larpcheck)
     if not key:
-        if cfg.larpcheck.require_verdict and cfg.larpcheck.on_no_credits == "allow":
-            log.warning("LarpCheck off: no API key found; the other safety checks decide each coin")
-            return CompositeSafety(*checks) if len(checks) > 1 else rug
-        if cfg.larpcheck.require_verdict:
-            log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
-                      "larpcheck.api_key_file): the agent will open no positions; exits still run")
-            return CompositeSafety(*checks, RequireLarpCheck("no LarpCheck API key configured"))
-        log.warning("LarpCheck is enabled but no API key was found; continuing without it")
-        return CompositeSafety(*checks) if len(checks) > 1 else rug
-    gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
-    log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
-             "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
-             cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
+        if policy == FALLBACK:
+            log.warning("LarpCheck: no API key found (%s, fallback policy): the other safety checks decide each coin", mode)
+        else:
+            log.error("LarpCheck: no API key found (%s, strict policy; set LARPCHECK_API_KEY or larpcheck.api_key_file): "
+                      "the agent will open no positions; exits still run", mode)
+        return CompositeSafety(MissingLarpCheck(policy), *checks)
+    gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url), policy=policy)
+    log.info("LarpCheck gate on (%s, %s policy: %s): rejects %s and coin stamps %s; unchecked coins: %s", mode, policy,
+             "no verdict, no buy" if policy != FALLBACK else "no verdict, the other checks decide",
+             "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps), cfg.larpcheck.on_unchecked)
     return CompositeSafety(gate, *checks)
 
 
@@ -192,7 +195,7 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
             log.warning("PumpPortal pre-graduation execution enabled; entries remain gated by agent checks")
         log.warning("LIVE TRADING ENABLED for wallet %s", keypair.pubkey())
     else:
-        executor = PaperExecutor(cfg.execution)
+        executor = PaperExecutor(cfg.execution, unchecked_cap_usd=cfg.unchecked.position_usd)
     pf = Portfolio.load(cfg.agent.state_file, cfg.risk.starting_balance_usd)
     from .data.larpcheck import CompositeSafety, LarpCheckGate
 
@@ -302,6 +305,11 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
                  cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
                  f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
+    telemetry = None
+    if cfg.agent.telemetry:
+        from .telemetry import Telemetry
+
+        telemetry = Telemetry(Path(cfg.agent.state_file).parent, cfg.agent.telemetry_dedupe_minutes)
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
@@ -314,13 +322,14 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
             larp = find(LarpCheckGate) if find else (safety if isinstance(safety, LarpCheckGate) else None)
             caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn),
                             facts=FactGatherer(gmgn, kols, larp, memeos=memeos))
+            caller.telemetry = telemetry
             log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
                      ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
         else:
             log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
                         cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, caller=caller, kols=kols, memeos=memeos, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, kols=kols, memeos=memeos, telemetry=telemetry, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
@@ -469,6 +478,17 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> None:
     print(build_report(args.trades or cfg.agent.trades_csv, state / "entries.csv", state / "after_exit.csv"))
 
 
+def cmd_blocked(args: argparse.Namespace, cfg: Config) -> None:
+    from .telemetry import Telemetry, build_report
+
+    tel = Telemetry(Path(args.dir or Path(cfg.agent.state_file).parent), cfg.agent.telemetry_dedupe_minutes)
+    if args.reset:
+        tel.reset()
+        print("Telemetry totals reset (the block log is kept).")
+        return
+    print(build_report(tel, None if args.all else args.hours))
+
+
 def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
     from .scanlog import build_scan_report
 
@@ -570,7 +590,20 @@ def cmd_exitlab(args: argparse.Namespace, cfg: Config) -> None:
     source = Candles(args.cache or str(Path(cfg.agent.state_file).parent / "candles"))
     print(f"Exit lab: {len(entries)} entries; downloading minute candles for the ones not cached yet "
           f"(about 5 seconds each)...", flush=True)
-    print(compare(entries, source.after, variants, cfg.execution.paper_fee_pct))
+    if not args.validate:
+        print(compare(entries, source.after, variants, cfg.execution.paper_fee_pct))
+        return
+    from .exitval import SimParams, default_strategies, from_exits, validate
+
+    fractions = tuple(float(x) for x in args.split.split(","))
+    params = SimParams(fee_pct=cfg.execution.paper_fee_pct, slip_pct=args.slippage, entry_latency_s=args.entry_latency,
+                       exit_latency_s=args.exit_latency, fail_rate=args.fail_rate,
+                       max_volume_share=args.max_volume_share or None, horizon_hours=args.horizon)
+    strategies = default_strategies(cfg.exits, cfg.execution.paper_fee_pct, args.fixed_stop, args.fixed_take)
+    for name, exits in variants.items():
+        if name not in ("your settings", "wide (50% stop, 70% leash)"):
+            strategies[name] = from_exits(exits, cfg.execution.paper_fee_pct)
+    print(validate(entries, source.after, strategies, params, fractions, args.purge_hours)[0])
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
@@ -776,6 +809,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. a downloaded slice (default: agent.trades_csv)")
     p.set_defaults(func=cmd_report)
 
+    p = sub.add_parser("blocked", help="why candidates weren't bought: counts by stage, reason and lane")
+    p.add_argument("--hours", type=float, default=24.0, help="look back this many hours (default 24)")
+    p.add_argument("--all", action="store_true", help="every recorded block")
+    p.add_argument("--reset", action="store_true", help="zero the totals since the last reset")
+    p.add_argument("--dir", default=None, help="state directory (default: next to agent.state_file)")
+    p.set_defaults(func=cmd_blocked)
+
     p = sub.add_parser("scans", help="what the scan-everything log says: which filters block winners, which let rugs through")
     p.add_argument("--file", default=None, help="a scans.csv (default: agent.scan_log_file)")
     p.set_defaults(func=cmd_scans)
@@ -786,6 +826,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="another set of exit settings to compare, e.g. --set exits.hard_stop_pct=35 (repeatable)")
     p.add_argument("--last", type=int, default=None, help="only the newest N entries")
     p.add_argument("--cache", default=None, help="candle cache directory (default: next to the state file)")
+    p.add_argument("--validate", action="store_true",
+                   help="out-of-sample check: split by date into train / validation / holdout, with realistic fills")
+    p.add_argument("--split", default="0.6,0.2,0.2", help="period fractions, two or three (default 0.6,0.2,0.2)")
+    p.add_argument("--entry-latency", type=float, default=10.0, help="seconds from signal to entry fill (default 10)")
+    p.add_argument("--exit-latency", type=float, default=10.0, help="seconds from exit signal to fill (default 10)")
+    p.add_argument("--slippage", type=float, default=1.0, help="%% per side (default 1)")
+    p.add_argument("--fail-rate", type=float, default=0.05, help="share of exit orders that fail and retry (default 0.05)")
+    p.add_argument("--max-volume-share", type=float, default=0.2,
+                   help="most of a candle's volume one sale can take (default 0.2; 0 = no cap)")
+    p.add_argument("--fixed-stop", type=float, default=30.0, help="the fixed baseline's stop %% (default 30)")
+    p.add_argument("--fixed-take", type=float, default=100.0, help="the fixed baseline's take-profit %% (default 100)")
+    p.add_argument("--horizon", type=float, default=30.0, help="hours a trade may run before it is closed (default 30)")
+    p.add_argument("--purge-hours", type=float, default=None,
+                   help="drop entries this close to the next period (default: the horizon; shorter keeps more trades)")
     p.set_defaults(func=cmd_exitlab)
 
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)
@@ -816,7 +870,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
-    offline = args.command in ("status", "demo", "backtest", "report", "scans", "exitlab") or getattr(args, "synthetic", False)
+    offline = args.command in ("status", "demo", "backtest", "report", "scans", "exitlab", "blocked") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
@@ -824,7 +878,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in ("run", "ui"):
         # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
         signal.signal(signal.SIGTERM, _raise_interrupt)
-    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans", "exitlab") or (args.command == "record" and args.synthetic)
+    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans", "exitlab", "blocked") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)

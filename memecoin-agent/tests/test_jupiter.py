@@ -161,6 +161,6 @@ def test_load_keypair_formats(monkeypatch, tmp_path):
     assert load_keypair().pubkey() == kp.pubkey()
     monkeypatch.delenv("SOLANA_PRIVATE_KEY")
     path = tmp_path / "id.json"
-    path.write_text(json.dumps(list(bytes(kp))))
+    path.write_text(json.dumps(list(bytes(kp))), encoding="utf-8")
     monkeypatch.setenv("SOLANA_KEYPAIR_PATH", str(path))
     assert load_keypair().pubkey() == kp.pubkey()

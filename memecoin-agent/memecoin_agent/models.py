@@ -11,6 +11,17 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Chains no honeypot or tax checker covers. Hard-coded on purpose: the config can add chains to the unchecked lane,
+# but it can never take these out of it, raise the cap below, or let a coin on them reach a live executor.
+ALWAYS_UNCHECKED_CHAINS = frozenset({"elysium"})
+UNCHECKED_MAX_USD = 25.0  # the most any paper buy of an unchecked coin may be, whatever the config says
+
+
+def is_unchecked(snap: "TokenSnapshot") -> bool:
+    """A coin no safety check has vetted: marked by the unchecked lane, or on a chain in ALWAYS_UNCHECKED_CHAINS."""
+    return bool(getattr(snap, "unchecked", False)) or str(getattr(snap, "chain", "")).lower() in ALWAYS_UNCHECKED_CHAINS
+
+
 @dataclass
 class TokenSnapshot:
     """Point-in-time market view of a token's most liquid pair."""
@@ -42,6 +53,8 @@ class TokenSnapshot:
     chain: str = "solana"  # DexScreener chain id; EVM addresses are kept lowercase
     buys_h24: int = 0
     sells_h24: int = 0
+    # Set by the agent for the unchecked lane (chains no safety check covers): paper only, capped, labelled.
+    unchecked: bool = False
 
     def age_minutes(self, now: datetime) -> float | None:
         if self.pair_created_at is None:
@@ -86,6 +99,8 @@ class SafetyReport:
     ok: bool
     score: float | None
     reasons: list[str]
+    # Machine-readable kind of the result, e.g. "larpcheck_no_credits" (data/larpcheck.py); "" when not set.
+    category: str = ""
 
 
 @dataclass

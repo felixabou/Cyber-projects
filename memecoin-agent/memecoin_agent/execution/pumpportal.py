@@ -16,7 +16,7 @@ import httpx
 from ..config import SniperConfig
 from ..models import Fill, Position, TokenSnapshot
 from ..portfolio import Portfolio
-from . import ExecutionError
+from . import ExecutionError, refuse_unchecked_live
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 class PumpPortalExecutor:
     """Route pre-graduation buys through PumpPortal, other trades through Jupiter."""
+
+    live = True
 
     def __init__(
         self,
@@ -53,6 +55,10 @@ class PumpPortalExecutor:
         return self.jupiter.preflight(snap, usd)
 
     def preflight_pregraduation(self, snap: TokenSnapshot, usd: float) -> str | None:
+        try:
+            refuse_unchecked_live(snap)
+        except ExecutionError as exc:
+            return str(exc)
         if not self.is_pregraduation(snap.mint):
             return "PumpPortal launch is no longer marked pre-graduation"
         if usd <= 0 or usd > self.cfg.max_position_usd:
@@ -70,9 +76,11 @@ class PumpPortalExecutor:
         self.jupiter.sync_cash(pf)
 
     def buy(self, snap: TokenSnapshot, usd: float) -> Fill:
+        refuse_unchecked_live(snap)
         return self.jupiter.buy(snap, usd)
 
     def buy_pregraduation(self, snap: TokenSnapshot, usd: float) -> Fill:
+        refuse_unchecked_live(snap)
         if not self.is_pregraduation(snap.mint):
             raise ExecutionError("Pump.fun launch is no longer marked pre-graduation")
         if usd > self.cfg.max_position_usd:

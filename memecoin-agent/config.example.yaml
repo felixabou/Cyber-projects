@@ -125,6 +125,8 @@ execution:
 agent:
   scan_log: true                   # log every scanned coin and what it did 15m / 1h / 4h later (state/scans.csv)
   scan_log_file: state/scans.csv   # read it with `memecoin-agent scans`
+  telemetry: true                 # why candidates weren't bought, by stage and reason (state/rejections.jsonl); `memecoin-agent blocked`
+  telemetry_dedupe_minutes: 60     # the same coin blocked for the same reason again within this adds no row
   tick_seconds: 10           # open positions are re-priced and exits checked every tick
   scan_every_ticks: 2        # discovery scan every 20s (tick_seconds x scan_every_ticks)
   max_candidates_per_scan: 250  # 30 mints per DexScreener request
@@ -155,18 +157,18 @@ recorder:
   record_while_trading: false  # true = `run`/`ui` also record (same as --record)
 
 larpcheck:
-  # LarpCheck (larpcheck.app) verdicts as the last gate before a buy, after the filters and
-  # RugCheck. Key: LARPCHECK_API_KEY env var, or this file. Looking up verdicts is free.
+  # LarpCheck (larpcheck.app) verdicts: the first safety check before a buy. Key: LARPCHECK_API_KEY env var,
+  # or this file. Looking up verdicts is free. A bad verdict (below) blocks a coin under both policies.
   enabled: true
   api_key_file: ~/.config/larpcheck/api_key
   reject_verdicts: [LARP, LIKELY LARP, SCAM]
   reject_coin_stamps: [RIGGED]    # stamps: OK / NEUTRAL / SKETCHY / RIGGED
   min_coin_score: null
-  require_verdict: true           # never buy a coin LarpCheck hasn't checked (LarpCheck down = no buy; no credits / no key: see on_no_credits)
-  on_unchecked: check             # check (spends a daily credit, buys only if it passes) | reject | allow (needs require_verdict: false)
+  paper_policy: fallback          # LarpCheck has no verdict (down, no key, no credits, unchecked, check unfinished): strict = no buy; fallback = the other checks decide
+  live_policy: strict             # the same for live trading; keep strict
+  on_unchecked: check             # check (spends a daily credit; buys once it passes, or per the policy if it can't) | reject | allow (start nothing; the policy decides)
   max_checks_per_day: 4           # free plan: 5 credits a day
-  pending_max_minutes: 5
-  fail_closed: false              # only used with require_verdict: false (LarpCheck down: other checks decide)
+  pending_max_minutes: 5          # a buy waits this long for a running check; then the policy decides
   # Held coins: re-read the verdict every few minutes (free). When LarpCheck flags one, read its
   # reasoning and sell. Only a LIKELY LARP / LIKELY REAL coin stamped OK, never RIGGED in any check,
   # sells 80% and keeps 20% as dust; everything else LarpCheck flags sells in full.
@@ -182,8 +184,6 @@ larpcheck:
   # Memes (see classify): lookup = LarpCheck's free lookup only (a bad verdict still blocks; nothing is
   # required, started or opened, so no credits); full = the tech rules; off = no LarpCheck for memes.
   memes: lookup
-  on_no_credits: allow          # credits used up (premium plan, or today's checks spent) or no key: allow = the other safety checks decide; reject = no buy
-  on_unavailable: allow         # LarpCheck down, or a check that never finishes: allow = the other safety checks decide; reject = no buy
 
 classify:
   # Tech (launchpads, AI agents, apps, protocols, labs...) or meme, from the token's name, description
@@ -413,7 +413,7 @@ caller:
 unchecked:
   enabled: true
   chains: [elysium]
-  position_usd: 10
+  position_usd: 10              # hard ceiling $25: the config can't raise it, and live mode never buys these
   quote_symbols: [HYPE, WHYPE, USDC, USDT, USDT0]
   discover_every_s: 120
   min_liquidity_usd: 3000

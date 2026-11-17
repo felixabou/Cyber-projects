@@ -1,5 +1,7 @@
 # memecoin-agent
 
+[![CI](https://github.com/felixabou/Cyber-projects/actions/workflows/ci.yml/badge.svg)](https://github.com/felixabou/Cyber-projects/actions/workflows/ci.yml)
+
 An automated trading agent for memecoins. Its main lane finds new Solana tokens on
 DexScreener, screens out obvious rugs, enters tokens with real liquidity and steady buy
 pressure, takes its initial stake out early and lets the rest run. Separate lanes handle
@@ -100,6 +102,21 @@ The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
 performance.
 
+## Tests
+
+```
+pip install -e ".[dev]"
+python -m pytest -q                                                           # the whole suite, offline
+python -X warn_default_encoding -m pytest -q -W error::EncodingWarning        # also fail on any file opened without an encoding
+pip install pytest-socket && python -m pytest -q --allow-hosts=127.0.0.1,localhost,::1   # prove no test touches the network
+```
+
+No test needs an API key, a wallet, an RPC endpoint or a Discord webhook: every outside service is mocked. GitHub
+Actions (`.github/workflows/ci.yml`) runs the suite on every pull request and every push to main, on Linux and
+Windows with Python 3.10 and 3.12 (Windows keeps its cp1252 default, so a file opened without an encoding fails the
+build), plus an offline job with all outbound connections blocked and a syntax check of the dashboard script. Test
+results and coverage are uploaded as artifacts. No lint or type checker is configured yet.
+
 ## GMGN: discovery and safety
 
 With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only calls GMGN's read-only data endpoints; nothing here trades through GMGN.
@@ -142,6 +159,35 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
 2. `npx gmgn-cli config --apply <your key>` saves it to `~/.config/gmgn/.env`, which the agent reads. Or set `GMGN_API_KEY`.
 
 Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
+
+## Why isn't it buying? (`memecoin-agent blocked`)
+
+Every candidate that isn't bought is recorded with the stage that stopped it and a machine-readable reason, in
+`state/rejections.jsonl`: `lane`, `chain`, `mint`, `rejection_stage`, `rejection_reason`, `regime_state`,
+`history_verdict`, `score` and `intended_position_size`. The stages, in the order a candidate meets them:
+
+| Stage | What stopped it |
+|---|---|
+| `discovery` | no candidates at all this scan |
+| `filters` | the entry filters (market cap, liquidity, age, volume...), a recent dump, most KOL buyers already out |
+| `safety` | RugCheck, Jupiter, GMGN, MEME OS, the wallet scan, the honeypot round trip, chain checks |
+| `larpcheck` | a bad LarpCheck verdict, or no verdict under the strict policy |
+| `regime` | the market-regime gate (market falling) |
+| `history` | the scan-log track record |
+| `risk` | entries paused or limited (kill switch, daily loss, positions, entries per hour, balance, lane cap) |
+| `execution` | paper-only chains in live mode, preflight refusals, failed buys |
+
+```
+memecoin-agent blocked              # the last 24 hours: by stage, by lane, top reasons, regime and history blocks
+memecoin-agent blocked --hours 6
+memecoin-agent blocked --reset      # zero the totals (the log itself is kept)
+```
+
+The same coin blocked for the same reason again within `agent.telemetry_dedupe_minutes` (60) adds no row, so the file
+records decisions rather than one line per scan. Totals since the last reset survive restarts (`state/telemetry.json`).
+The dashboard shows the last scan by stage and the regime and track-record blocks since the last reset; Discord gets a
+notice when the market regime pauses or resumes entries, and the daily recap counts both. Only a buy counts as a buy:
+a blocked candidate never shows up as a trade. This is observability only; no threshold changed.
 
 ## Scan log: data to tune the filters on
 
@@ -475,14 +521,24 @@ The last check before any buy is [LarpCheck](https://larpcheck.app). It investig
 
 These catch what market data and RugCheck's summary miss. In the first live paper session, both tokens the agent bought had already been stamped RIGGED (linked wallets held 82% of supply; a 230-wallet farm held 30%). One dumped 99% three minutes after the buy. RugCheck had passed both.
 
-- **Where it runs:** only on tokens that already passed every filter and RugCheck, so a few lookups a day. Looking up existing verdicts is free.
+- **Where it runs:** first among the safety checks, on tokens that passed every filter, so a few lookups a day. Looking up existing verdicts is free.
 - **What it blocks:** a story verdict of LARP, LIKELY LARP or SCAM, or a RIGGED stamp (configurable). Bad verdicts block even when out of date: a rigged holder base stays rigged.
 - **If a check is running:** the buy waits for the verdict (up to `pending_max_minutes`).
-- **No verdict, no buy** (`require_verdict: true`, the default). A coin nobody has checked gets a check started (`on_unchecked: check`), spending one of your daily credits (`max_checks_per_day`). The agent buys only once the coin passes. When the credits run out, a check doesn't finish in `pending_max_minutes`, LarpCheck is unreachable, or there's no API key, the coin isn't bought.
-- **Exits never depend on LarpCheck.** With `require_verdict: false` you can let the other checks decide instead (`on_unchecked: allow`, `fail_closed: false`).
+- **When LarpCheck has no verdict to give**, a policy decides, set separately for paper and live trading:
+
+  | Setting | Default | No verdict means |
+  |---|---|---|
+  | `larpcheck.paper_policy` | `fallback` | the other safety checks (MEME OS, RugCheck, Jupiter, GMGN, the honeypot test) decide |
+  | `larpcheck.live_policy` | `strict` | no buy |
+
+  "No verdict" covers six distinct cases, each with its own machine-readable reason (`SafetyReport.category`): an explicit bad verdict (`larpcheck_bad_verdict`, blocked under both policies), no verdict yet (`larpcheck_no_verdict`), an outage (`larpcheck_outage`), no API key (`larpcheck_no_key`), credits used up (`larpcheck_no_credits`), and a check that is still running (`larpcheck_pending`: the buy waits up to `pending_max_minutes`) or didn't finish in time (`larpcheck_timeout`). A bad verdict seen earlier keeps blocking a coin even while LarpCheck is down. Under `strict`, a meme with no verdict isn't bought either (`memes: off` leaves memes out of LarpCheck).
+- **Counters** in the log and on the dashboard: `larpcheck_rejected`, `larpcheck_unavailable`, `larpcheck_fallback_allowed`, `larpcheck_pending`.
+- **A coin nobody has checked** gets a check started (`on_unchecked: check`), spending one of your daily credits (`max_checks_per_day`); `reject` never buys one, `allow` starts nothing and leaves it to the policy.
+- **Older config files**: `require_verdict`, `fail_closed`, `on_no_credits` and `on_unavailable` are read and translated with a warning; they can only make the paper policy stricter.
+- **Exits never depend on LarpCheck.**
 - **In the dashboard:** the Scanner shows blocked coins as *Unsafe: larpcheck …* with an **evidence** link to the check's page. Coins it couldn't get a verdict for show as *No LarpCheck verdict: …*.
 
-Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the agent opens no positions and logs an error; exits still run.
+Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key, paper trading runs on the other checks (fallback) and live trading opens no positions (strict); exits still run.
 
 **Held coins.** LarpCheck keeps watching after a buy. Every 5 minutes it re-reads the verdict of each coin held (free). When a coin is flagged, the agent first reads LarpCheck's reasoning: the summary, the claim and whether it held up, each risk finding with its evidence, and what would change the picture. Then it sells:
 
@@ -666,8 +722,9 @@ comparison shows those coins doing worse.
 ### MEME OS
 
 Safety checks run in this order on every coin the agent would buy: LarpCheck, MEME OS X-Ray, then RugCheck,
-Jupiter and GMGN (and the honeypot round trip). When LarpCheck or MEME OS is out of credits, down, or never finishes
-a check, it passes the coin on and the original checks decide; those always run.
+Jupiter and GMGN (and the honeypot round trip). When MEME OS is out of credits or down, it passes the coin on and the
+original checks decide; LarpCheck does the same in paper trading (`paper_policy: fallback`) but refuses the buy in live
+trading (`live_policy: strict`). The original checks always run.
 
 With a MEME OS key (`MEMEOS_API_KEY`), each candidate gets an X-Ray report (5 credits). A verdict in
 `memeos.reject_verdicts` (HIGH RISK and worse) skips the coin; CAUTION does not, since X-Ray gives every new, thin
@@ -676,9 +733,9 @@ the share of supply held by wallets funded from the same source (bundle check, 3
 `bundle_min_credits` (500) or more are left so a small balance such as the free checks goes to the buy checks.
 When the balance can't pay for another X-Ray, or MEME OS answers 402, X-Ray switches off for the day.
 
-When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
-safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks
-a coin.
+When LarpCheck has no verdict to give (no credits, no key, down, unchecked, or a check that didn't finish), paper
+trading lets the other safety checks decide (`larpcheck.paper_policy: fallback`) and live trading doesn't buy
+(`larpcheck.live_policy: strict`); a bad verdict LarpCheck already has blocks a coin either way.
 
 Follow-ups at 15 minutes, 1 hour and 4 hours show the move since the call, and a daily recap (00:00 UTC) shows
 the last 24 hours: how many calls, how many went up 50% or doubled, the median after an hour, and the best.
@@ -693,6 +750,20 @@ No honeypot or tax checker covers Elysium, so its coins skip the safety step. Th
 search, qualify on their own size and activity limits (`unchecked:` in the config; these coins are much smaller
 than the other lanes allow), are paper-bought at a fixed $10, and are called as **UNCHECKED** with a warning that
 they may be impossible to sell. They are never bought in live mode.
+
+That guarantee doesn't rest on one check or on the config:
+
+- **Explicit marker.** Coins on an unchecked chain carry `unchecked = True` on their snapshot, and their positions the
+  `unchecked` lane. Elysium is also listed in the code (`ALWAYS_UNCHECKED_CHAINS`), so removing it from
+  `unchecked.chains` or disabling the lane doesn't make its coins look checked: they are refused instead.
+- **The agent** refuses an unchecked coin right before any executor sees it: in live mode, on any executor that
+  reports itself live, or through any lane other than the unchecked lane (so it can't appear as a safety-approved
+  trade). The copy and long-term lanes refuse unchecked chains too.
+- **Every live executor** (Jupiter, PumpPortal) refuses to buy an unchecked coin, or anything off Solana, on its own,
+  whatever the caller or the config says. Sells are never blocked, so an exit always works.
+- **Paper buys are capped**: `unchecked.position_usd` (default $10) can't be set above $25, and the paper executor
+  refuses anything larger. Trades are labelled UNCHECKED in the trade log, the dashboard and Discord, and reported as
+  their own lane in `memecoin-agent report`.
 
 ## Run it 24/7 in the cloud
 
@@ -766,6 +837,32 @@ Known live-mode limitations:
 - If a buy times out and lands later, the tokens sit in the wallet without being tracked. Check the wallet if you see `did not change ... balance` errors.
 - The `status` command's "return vs start" figure compares against `starting_balance_usd`, not your real deposit.
 - The launch feed only sees graduations that happen while the agent (or recorder) is running. Downtime leaves gaps, which DexScreener's feeds partly cover.
+
+## Exit validation out of sample (`exitlab --validate`)
+
+`memecoin-agent exitlab` replays your past entries under different exit settings. Choosing the best of those on the
+same trades overfits, so `--validate` checks exits the way a forecast should be checked:
+
+- **Chronological split**: training, validation and an optional final holdout (`--split 0.6,0.2,0.2`). Entries in an
+  earlier period whose replay window reaches into the next one are dropped (`--purge-hours`, default the horizon), so
+  no candle is used twice. The best strategy is picked on the training period only, and its out-of-sample rank shown.
+- **Baselines**: your current exits, the previous defaults (50% stop, 70% leash), a fixed stop / take-profit
+  (`--fixed-stop 30 --fixed-take 100`) and buy-and-hold to the horizon.
+- **Frictions**: entry and exit latency (`--entry-latency 10 --exit-latency 10` seconds), slippage per side
+  (`--slippage 1`), the paper fee per side, exit orders that fail and are decided again (`--fail-rate 0.05`), fills
+  capped at a share of each candle's volume so a large sale takes several candles (`--max-volume-share 0.2`), partial
+  exits, and a horizon (`--horizon 30` hours) after which what is left is sold at the last price.
+- **Metrics per period**: net return (cost-weighted), win rate, median and average return with a 90% bootstrap
+  interval, maximum drawdown (cumulative, in % of one stake), profit factor, worst trade, trades and time held. Each
+  period is labelled IN-SAMPLE or OUT-OF-SAMPLE; periods under 30 trades carry a small-sample warning and under 10
+  a "too few to judge" one.
+
+Limits: minute candles hold no order book, so slippage and the volume cap are assumptions, not measurements; each
+minute is replayed open, low, high, close; liquidity pulls aren't in the candles; and with a few dozen trades the
+intervals are wide. On the 68 cached entries from October and November, the fixed 30%/100% baseline led on the
+training period and finished level with the current exits out of sample (-12.4% and -12.8% net on the 14-trade
+holdout), inside the noise. A strategy that only wins in-sample has shown nothing. The agent's live exits are not
+changed by any of this.
 
 ## Backtesting
 

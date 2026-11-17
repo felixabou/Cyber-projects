@@ -24,7 +24,7 @@ import httpx
 
 from .config import CallerConfig
 from .facts import GMGN_CHAIN, FactGatherer, TokenFacts, bubblemaps_url, judge
-from .models import SafetyReport, TokenSnapshot
+from .models import SafetyReport, TokenSnapshot, is_unchecked
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ class Caller:
     def __init__(self, cfg: CallerConfig, webhook: DiscordWebhook, describer: Describer | None = None,
                  state_path: str | Path | None = None, facts: FactGatherer | None = None) -> None:
         self.cfg, self.webhook, self.describer, self.facts = cfg, webhook, describer, facts
+        self.telemetry: Any = None  # telemetry.Telemetry, for the recap's "blocked by regime / history" counts
         self.state_path = Path(state_path or cfg.state_file)
         self.calls: list[Call] = []
         self.last_recap: str | None = None
@@ -301,6 +302,7 @@ class Caller:
              safety: SafetyReport | None = None, unchecked: bool = False, score: float | None = None) -> bool:
         if any(c.mint == snap.mint and c.chain == snap.chain for c in self.calls):
             return False  # already called and still being followed
+        unchecked = unchecked or lane == "unchecked" or is_unchecked(snap)  # never shown as safety-approved
         description, source = (None, "")
         if self.cfg.describe and self.describer is not None:
             description, source = self.describer.describe(snap)
@@ -360,7 +362,8 @@ class Caller:
         since = now - timedelta(hours=24)
         day = [c for c in self.calls if datetime.fromisoformat(c.called_at) >= since]
         if not day:
-            self.webhook.post(embeds=[{"title": "Daily recap: no calls in the last 24h", "color": BLUE}])
+            self.webhook.post(embeds=[{"title": "Daily recap: no calls in the last 24h", "color": BLUE,
+                                       "description": "\n".join(self._blocked_lines()) or None}])
             self._save()
             return
         key = str(60.0) if any("60.0" in c.moves for c in day) else None
@@ -373,9 +376,23 @@ class Caller:
             lines.append(f"1h after the call: median {_pct(statistics.median(hour))}, "
                          f"{sum(x > 0 for x in hour)} of {len(hour)} up")
         lines.append(f"Best: {best.symbol} ({best.chain}) {_pct(best.peak_pct)}")
+        lines += self._blocked_lines()
         self.webhook.post(embeds=[{"title": "Daily recap: last 24h of calls", "color": BLUE,
                                    "description": "\n".join(lines), "timestamp": now.isoformat()}])
         self._save()
+
+    def _blocked_lines(self) -> list[str]:
+        if self.telemetry is None:
+            return []
+        try:
+            regime, history = self.telemetry.count("regime", 24), self.telemetry.count("history", 24)
+        except OSError:
+            return []
+        return [f"Blocked in the last 24h: market regime **{regime}** · track record **{history}**"]
+
+    def notice(self, text: str, warn: bool = False) -> bool:
+        """A one-line status post (e.g. the market regime pausing or resuming entries)."""
+        return self.webhook.post(embeds=[{"description": text[:2000], "color": ORANGE if warn else BLUE}])
 
     def _prune(self, now: datetime) -> None:
         keep_for = timedelta(minutes=max(self.cfg.follow_up_minutes, default=0)) + timedelta(hours=26)

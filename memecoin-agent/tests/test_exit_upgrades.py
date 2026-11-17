@@ -99,10 +99,10 @@ def test_lane_overrides_and_validation(tmp_path):
     with pytest.raises(ValueError, match="exits.lanes.lowcap: nope"):
         lane_exits(ExitConfig(lanes={"lowcap": {"nope": 1}}), "lowcap")
     f = tmp_path / "c.yaml"
-    f.write_text("exits:\n  runner_trail:\n    - {above_pct: 0, drawdown_pct: 20}\n  lanes:\n    lowcap: {hard_stop_pct: 40}\n")
+    f.write_text("exits:\n  runner_trail:\n    - {above_pct: 0, drawdown_pct: 20}\n  lanes:\n    lowcap: {hard_stop_pct: 40}\n", encoding="utf-8")
     cfg = load_config(f)
     assert cfg.exits.runner_trail[0].drawdown_pct == 20 and lane_exits(cfg.exits, "lowcap").hard_stop_pct == 40
-    f.write_text("exits:\n  lanes:\n    lowcap: {stop: 40}\n")
+    f.write_text("exits:\n  lanes:\n    lowcap: {stop: 40}\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_config(f)
 
@@ -167,7 +167,7 @@ def test_agent_waits_while_the_market_falls_and_buys_when_it_recovers(tmp_path):
 
 # -- track record ----------------------------------------------------------------------------------
 def write_scans(path, rows):
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=COLS)
         w.writeheader()
         for r in rows:
@@ -249,6 +249,6 @@ def test_tick_follows_scanned_coins_up_and_writes_the_scan_log(tmp_path):
         clock.t = at(m)
         weak.price_usd *= 1.1
         a.tick()
-    rows = list(csv.DictReader(open(tmp_path / "scans.csv")))
+    rows = list(csv.DictReader(open(tmp_path / "scans.csv", encoding="utf-8")))
     assert len(rows) == 1 and rows[0]["mint"] == "WEAK" and float(rows[0]["ret_15m"]) > 0 and rows[0]["vol_m5"] == "8000.0"
     assert (tmp_path / "scans_pending.json").exists()

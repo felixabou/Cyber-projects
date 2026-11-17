@@ -4,7 +4,7 @@ real order suffers while it lands."""
 from __future__ import annotations
 
 from ..config import ExecutionConfig
-from ..models import Fill, Position, TokenSnapshot
+from ..models import UNCHECKED_MAX_USD, Fill, Position, TokenSnapshot, is_unchecked
 from ..portfolio import Portfolio
 from . import ExecutionError
 
@@ -13,8 +13,12 @@ MAX_DRIFT = 0.15
 
 
 class PaperExecutor:
-    def __init__(self, cfg: ExecutionConfig) -> None:
+    live = False
+
+    def __init__(self, cfg: ExecutionConfig, unchecked_cap_usd: float = UNCHECKED_MAX_USD) -> None:
         self.cfg = cfg
+        # Unchecked coins (no safety check exists for their chain) only up to this, never above UNCHECKED_MAX_USD.
+        self.unchecked_cap_usd = min(unchecked_cap_usd, UNCHECKED_MAX_USD)
 
     def _impact(self, usd: float, liquidity_usd: float) -> float:
         if not self.cfg.paper_price_impact or liquidity_usd <= 0:
@@ -40,6 +44,8 @@ class PaperExecutor:
         pass
 
     def buy(self, snap: TokenSnapshot, usd: float) -> Fill:
+        if is_unchecked(snap) and usd > self.unchecked_cap_usd + 1e-9:
+            raise ExecutionError(f"UNCHECKED {snap.symbol}: ${usd:.2f} is over the ${self.unchecked_cap_usd:.2f} paper cap")
         if snap.price_usd <= 0:
             raise ExecutionError(f"No price for {snap.symbol}")
         fee = usd * self.cfg.paper_fee_pct / 100

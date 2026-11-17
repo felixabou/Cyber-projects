@@ -113,7 +113,7 @@ def test_rate_limit_error_keeps_state_and_does_not_raise(tmp_path):
     api.status = 403
     w = make(tmp_path, api)
     assert w.poll_once() == []
-    assert not (tmp_path / "statics.json").exists() or '"seen": []' in (tmp_path / "statics.json").read_text()
+    assert not (tmp_path / "statics.json").exists() or '"seen": []' in (tmp_path / "statics.json").read_text(encoding="utf-8")
 
 
 def test_token_is_sent_but_never_in_errors():

@@ -475,8 +475,10 @@ function renderHeader(v) {
   if (v.recorder && v.recorder.active) bits.push(`recording · ${v.recorder.tracked} tokens`);
   if (v.gmgn) bits.push(`GMGN ${[v.gmgn.discovery && "discovery", v.gmgn.safety && "safety"].filter(Boolean).join(" + ")}`);
   if (v.larpcheck) {
-    bits.push(v.larpcheck.on_unchecked === "check"
-      ? `LarpCheck gate · ${v.larpcheck.checks_left_today} checks left today` : "LarpCheck gate on");
+    const pol = v.larpcheck.policy ? ` (${v.larpcheck.policy})` : "";
+    if (v.larpcheck.no_key) bits.push(`LarpCheck: no key${pol}`);
+    else bits.push(v.larpcheck.on_unchecked === "check"
+      ? `LarpCheck gate${pol} · ${v.larpcheck.checks_left_today} checks left today` : `LarpCheck gate on${pol}`);
   }
   if (v.telegram) bits.push(v.telegram.state === "ok" ? `Telegram ${v.telegram.bot || "bot"}` : `Telegram: ${v.telegram.state}`);
   if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
@@ -550,6 +552,18 @@ function renderOverview(v) {
       h("div", { class: `meter-track ${sev}`, role: "meter", "aria-label": label,
         "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(frac * 100) }, fill));
   };
+  // Why candidates aren't bought: the last scan by stage, and the regime / track-record blocks since the last reset.
+  function blockedLines(t) {
+    if (!t || !t.last_scan) return [];
+    const ls = t.last_scan, stages = Object.entries(ls.by_stage || {}).filter(([, n]) => n > 0);
+    const scan = ls.candidates
+      ? `Last scan: ${ls.candidates} checked, ${ls.passed} passed filters, ${ls.bought} bought` +
+        (stages.length ? ` · blocked: ${stages.map(([s, n]) => `${s} ${n}`).join(" · ")}` : "")
+      : (ls.at ? "Last scan: no candidates found" : "");
+    const since = `Since ${String(t.since || "").slice(0, 10)}: blocked by the market regime ${t.regime_blocked} · ` +
+      `by the track record ${t.history_blocked} · ${t.bought} bought`;
+    return [scan, since].filter(Boolean).map((text) => h("div", { class: "entry-state", text }));
+  }
   let entry = "✓ Opening new positions when signals appear";
   if (v.kill_switch) entry = "✕ Kill switch file present — no new entries (exits still run)";
   else if (v.entries_paused) entry = "‖ Paused from the dashboard — exits still run";
@@ -559,12 +573,13 @@ function renderOverview(v) {
     meter("Daily loss limit", `${usd(r.daily_loss_usd)} of ${usd(r.daily_loss_limit_usd)} (${r.daily_loss_limit_pct}%)`, lossPct / 100, true),
     meter("Open positions", `${r.open_positions} of ${r.max_open_positions}`, r.open_positions / r.max_open_positions),
     meter("Entries in the last hour", `${r.entries_last_hour} of ${r.max_entries_per_hour}`, r.entries_last_hour / r.max_entries_per_hour),
-    h("div", { class: "entry-state", text: entry }));
+    h("div", { class: "entry-state", text: entry }),
+    ...blockedLines(v.telemetry));
 
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
 }
 
-const LANE_LABELS = { copy: "Copy", lowcap: "Low cap", longterm: "Long-term", manual: "Manual", launch: "Launch" };
+const LANE_LABELS = { copy: "Copy", lowcap: "Low cap", longterm: "Long-term", manual: "Manual", launch: "Launch", unchecked: "UNCHECKED" };
 const CHAIN_LABELS = {
   solana: "SOL", ethereum: "ETH", bsc: "BSC", base: "Base", arbitrum: "ARB", polygon: "Polygon",
   optimism: "OP", avalanche: "AVAX", fantom: "FTM", linea: "Linea", scroll: "Scroll", zksync: "zkSync",
@@ -575,7 +590,8 @@ const CHAIN_LABELS = {
 function positionPills(p) {
   const pills = [];
   if (p.chain && p.chain !== "solana") pills.push(h("span", { class: "pill pill-chain", text: CHAIN_LABELS[p.chain] || p.chain }));
-  if (LANE_LABELS[p.lane]) pills.push(h("span", { class: "pill", text: LANE_LABELS[p.lane] }));
+  if (p.lane === "unchecked") pills.push(h("span", { class: "pill pill-unchecked", title: "No safety check exists for this chain: paper only, capped size", text: "UNCHECKED" }));
+  else if (LANE_LABELS[p.lane]) pills.push(h("span", { class: "pill", text: LANE_LABELS[p.lane] }));
   if (p.dust) pills.push(h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }));
   if (p.stage === "runner") pills.push(h("span", { class: "pill pill-runner", title: "Initials and half the profit are out; the rest runs", text: "runner" }));
   if (p.stage === "dip watch") pills.push(h("span", { class: "pill pill-dip", title: p.review_note || "", text: "dip watch" }));
@@ -707,9 +723,9 @@ function verdict(c) {
   if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
   else if (c.outcome === "unsafe: larpcheck check running") { cls = "v-pass"; icon = "…"; text = "Waiting for LarpCheck verdict"; }
   else if (c.outcome.startsWith("waiting: ")) { cls = "v-pass"; icon = "…"; text = "Waiting: " + c.outcome.slice(9); }
-  else if (/^unsafe: larpcheck( unavailable|:| required:)/.test(c.outcome)) {
-    // No verdict to go on: never bought (require_verdict).
-    icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck( required)?:? ?/, "");
+  else if (/^unsafe: larpcheck (no verdict|outage|no key|no credits|timeout)/.test(c.outcome)) {
+    // No verdict to go on under the strict policy: not bought.
+    icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck /, "");
   }
   else if (c.outcome.startsWith("unsafe")) {
     cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: ");
