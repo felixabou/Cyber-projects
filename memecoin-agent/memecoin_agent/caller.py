@@ -29,6 +29,7 @@ from .models import SafetyReport, TokenSnapshot, is_unchecked
 log = logging.getLogger(__name__)
 
 GREEN, ORANGE, BLUE, GREY = 0x2ECC71, 0xE67E22, 0x3498DB, 0x95A5A6
+MAX_TRIES = 5  # a call Discord keeps refusing is dropped after this many posts (the log says why)
 DESCRIPTION_KEYS = ("description", "intro", "introduction", "summary", "narrative", "desc")
 DEX_PROFILE_FEEDS = ("/token-profiles/latest/v1", "/token-boosts/latest/v1", "/token-boosts/top/v1")
 LANE_LABEL = {"launch": "LAUNCH", "sniper": "SNIPE", "lowcap": "LOW-CAP", "momentum": "MOMENTUM",
@@ -109,15 +110,29 @@ class Describer:
         return (text, "DexScreener") if text else (None, "")
 
 
+def clean(obj: Any) -> Any:
+    """An embed without empty values: Discord refuses null or blank fields, so they are left out."""
+    if isinstance(obj, dict):
+        out = {k: clean(v) for k, v in obj.items() if v is not None and v != ""}
+        return {k: v for k, v in out.items() if v not in ({}, [])}
+    if isinstance(obj, list):
+        return [clean(v) for v in obj if v is not None]
+    return obj
+
+
 class DiscordWebhook:
     def __init__(self, url: str, username: str = "Memecoin Caller", http: httpx.Client | None = None,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.url, self.username, self.sleep = url, username, sleep
         self.http = http or httpx.Client(timeout=10.0)
+        self.last_error = ""
 
     def post(self, content: str = "", embeds: list[dict] | None = None) -> bool:
-        payload = {"username": self.username, "content": content[:2000], "embeds": (embeds or [])[:10],
+        payload = {"username": self.username, "embeds": [clean(e) for e in (embeds or [])[:10]],
                    "allowed_mentions": {"parse": []}}
+        if content:
+            payload["content"] = content[:2000]
+        self.last_error = ""
         for attempt in range(2):
             try:
                 resp = self.http.post(self.url, json=payload)
@@ -132,9 +147,12 @@ class DiscordWebhook:
                 self.sleep(min(max(wait, 0.5), 5.0))
                 continue
             if resp.status_code >= 400:
-                log.warning("Discord post rejected: HTTP %s", resp.status_code)
+                # Discord's reply names the field it refused; it never contains the webhook URL.
+                self.last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                log.warning("Discord post rejected: %s", self.last_error)
                 return False
             return True
+        self.last_error = "rate limited twice"
         return False
 
 
@@ -160,6 +178,7 @@ class Caller:
         self.telemetry: Any = None  # telemetry.Telemetry, for the recap's "blocked by regime / history" counts
         self.state_path = Path(state_path or cfg.state_file)
         self.calls: list[Call] = []
+        self.unsent: list[dict] = []  # calls Discord didn't take yet: {"embed", "tries", "symbol"}, retried each tick
         self.last_recap: str | None = None
         self._load()
 
@@ -168,13 +187,14 @@ class Caller:
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
             self.calls = [Call(**c) for c in data.get("calls", [])]
+            self.unsent = [u for u in data.get("unsent", []) if isinstance(u, dict) and u.get("embed")]
             self.last_recap = data.get("last_recap")
         except (OSError, ValueError, TypeError):
             self.calls = []
 
     def _save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps({"calls": [asdict(c) for c in self.calls],
+        self.state_path.write_text(json.dumps({"calls": [asdict(c) for c in self.calls], "unsent": self.unsent,
                                                "last_recap": self.last_recap}, indent=1), encoding="utf-8")
 
     # -- the call ---------------------------------------------------------------------------------
@@ -202,6 +222,8 @@ class Caller:
             checks = f"Passed every safety check the agent runs on {snap.chain}"
             if safety.score is not None:
                 checks += f" (score {safety.score:.2f})"
+        elif lane == "test":
+            checks = "TEST call: no trade was made, so no buy checks ran"
         else:
             checks = "Passed the lane's checks"
 
@@ -276,7 +298,8 @@ class Caller:
             {"name": "Best", "value": _cut("\n".join(f"• {b}" for b in best) or "• nothing stands out", 1024), "inline": True},
             {"name": "Worst", "value": _cut("\n".join(f"• {w}" for w in worst) or "• nothing major found", 1024), "inline": True},
             {"name": "Why it was called", "value": _cut(why or f"{lane} lane", 1024), "inline": False},
-            {"name": "Paper buy", "value": f"${size_usd:.2f} at ${price:.10g}", "inline": True},
+            {"name": "Paper buy", "value": "none (test call)" if lane == "test" else f"${size_usd:.2f} at ${price:.10g}",
+             "inline": True},
         ]
         if links:
             fields.append({"name": "Links", "value": _cut(" | ".join(links), 1024), "inline": False})
@@ -303,21 +326,50 @@ class Caller:
         if any(c.mint == snap.mint and c.chain == snap.chain for c in self.calls):
             return False  # already called and still being followed
         unchecked = unchecked or lane == "unchecked" or is_unchecked(snap)  # never shown as safety-approved
-        description, source = (None, "")
-        if self.cfg.describe and self.describer is not None:
-            description, source = self.describer.describe(snap)
-        facts = self.facts.gather(snap) if self.facts is not None else None
-        embed = self.report(snap, now, lane, why, size_usd, price, safety, unchecked, description, source, facts, score)
-        ok = self.webhook.post(embeds=[embed])
+        try:  # descriptions and facts are extras: a failure there must never cost the call itself
+            description, source = (None, "")
+            if self.cfg.describe and self.describer is not None:
+                description, source = self.describer.describe(snap)
+            facts = self.facts.gather(snap) if self.facts is not None else None
+            embed = self.report(snap, now, lane, why, size_usd, price, safety, unchecked, description, source,
+                                facts, score)
+        except Exception as exc:
+            log.warning("Full call report for %s failed (%s: %s); posting a basic call", snap.symbol,
+                        type(exc).__name__, exc)
+            embed = self.report(snap, now, lane, why, size_usd, price, safety, unchecked, None, "", None, score)
         self.calls.append(Call(snap.mint, snap.symbol, snap.chain, now.isoformat(), price, snap.market_cap_usd,
                                lane, unchecked))
-        self._save()
+        ok = self.webhook.post(embeds=[embed])
         if ok:
             log.info("Called %s (%s) on Discord", snap.symbol, snap.chain)
+        else:
+            self.unsent.append({"embed": embed, "tries": 1, "symbol": snap.symbol})
+            log.warning("Discord call for %s not sent (%s); retrying on the next ticks", snap.symbol,
+                        getattr(self.webhook, "last_error", "") or "no reply")
+        self._save()
         return ok
+
+    def _retry_unsent(self) -> None:
+        if not self.unsent:
+            return
+        left = []
+        for u in self.unsent:
+            if self.webhook.post(embeds=[u["embed"]]):
+                log.info("Called %s on Discord (retry %d)", u.get("symbol", "?"), u["tries"])
+                continue
+            u["tries"] += 1
+            if u["tries"] < MAX_TRIES:
+                left.append(u)
+            else:
+                log.error("Discord call for %s dropped after %d tries: %s", u.get("symbol", "?"), u["tries"],
+                          getattr(self.webhook, "last_error", "") or "no reply")
+        if left != self.unsent:
+            self.unsent = left
+            self._save()
 
     # -- follow-ups and recap ---------------------------------------------------------------------
     def tick(self, now: datetime, fetch: Callable[[list[str]], dict[str, TokenSnapshot]]) -> None:
+        self._retry_unsent()
         due: list[tuple[Call, float]] = []
         for c in self.calls:
             age = (now - datetime.fromisoformat(c.called_at)).total_seconds() / 60

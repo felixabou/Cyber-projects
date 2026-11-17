@@ -478,6 +478,44 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> None:
     print(build_report(args.trades or cfg.agent.trades_csv, state / "entries.csv", state / "after_exit.csv"))
 
 
+def cmd_callertest(args: argparse.Namespace, cfg: Config) -> None:
+    """Post one TEST call for a live coin through the same caller, report and data sources the agent uses."""
+    import tempfile
+
+    import httpx
+
+    from .caller import Caller, Describer, DiscordWebhook
+    from .data.dexscreener import DexScreenerClient
+    from .data.larpcheck import LarpCheckGate
+    from .facts import FactGatherer
+
+    url = os.environ.get(cfg.caller.webhook_env)
+    if not url:
+        raise SystemExit(f"{cfg.caller.webhook_env} is not set in this window: set it (setx) and open a new window")
+    if not cfg.caller.enabled:
+        print("Note: caller.enabled is false in this config, so the agent itself won't post calls.")
+    mint, chain = args.mint, args.chain
+    if not mint:
+        rows = httpx.get("https://lite-api.jup.ag/tokens/v2/toptrending/1h", params={"limit": 50}, timeout=15).json()
+        mint = next((t["id"] for t in rows if 20_000 <= (t.get("mcap") or 0) <= 2_000_000), rows[0]["id"])
+        chain = "solana"
+    snap = next(iter(DexScreenerClient(cfg.filters.quote_symbols).snapshots_on(chain, [mint]).values()), None)
+    if snap is None:
+        raise SystemExit(f"No DexScreener price for {mint} on {chain}")
+    gmgn = build_gmgn(cfg)
+    safety = build_safety(cfg, gmgn=gmgn)
+    find = getattr(safety, "find", None)
+    larp = find(LarpCheckGate) if find else None
+    memeos = build_memeos(cfg) if args.with_memeos else None
+    hook = DiscordWebhook(url, cfg.caller.username)
+    state = Path(tempfile.mkdtemp()) / "calls.json"  # a test call doesn't count as a real call
+    caller = Caller(cfg.caller, hook, Describer(gmgn), state, facts=FactGatherer(gmgn, None, larp, memeos=memeos))
+    print(f"Posting a TEST call for {snap.symbol} ({chain}, {snap.mint})...")
+    ok = caller.call(snap, utcnow(), "test", "callertest: what a real call looks like (no trade was made)",
+                     0.0, snap.price_usd, None, score=None)
+    print("Posted: check your Discord channel." if ok else f"Discord refused it: {hook.last_error or 'no reply'}")
+
+
 def cmd_blocked(args: argparse.Namespace, cfg: Config) -> None:
     from .telemetry import Telemetry, build_report
 
@@ -808,6 +846,12 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("report", help="win rate and profit by exit reason, lane, liquidity, age... from the trade files")
     p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. a downloaded slice (default: agent.trades_csv)")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("callertest", help="post one TEST call to Discord for a live coin, exactly as a real call looks")
+    p.add_argument("--mint", default=None, help="a token address (default: a coin on Jupiter's trending list)")
+    p.add_argument("--chain", default="solana", help="its chain (default solana)")
+    p.add_argument("--with-memeos", action="store_true", help="include MEME OS X-Ray (spends credits)")
+    p.set_defaults(func=cmd_callertest)
 
     p = sub.add_parser("blocked", help="why candidates weren't bought: counts by stage, reason and lane")
     p.add_argument("--hours", type=float, default=24.0, help="look back this many hours (default 24)")

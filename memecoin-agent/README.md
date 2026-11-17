@@ -744,6 +744,13 @@ Set it up: in the Discord channel, **Edit Channel -> Integrations -> Webhooks ->
 Put it in the `DISCORD_WEBHOOK_URL` environment variable (or `.env` on the cloud server), never in the config, and
 set `caller.enabled: true`. Anyone with the URL can post to the channel.
 
+**Not seeing calls?** Run `memecoin-agent -c config.yaml callertest`. It posts one TEST call for a live coin through the
+same report and data sources the agent uses (with your keys; MEME OS only with `--with-memeos`, since it spends
+credits) and prints Discord's answer. In the agent's log, "Called SYMBOL on Discord" means a call went out; "Discord
+post rejected: HTTP 400: ..." shows Discord's own reason. A call Discord doesn't take is retried on the next ticks (up
+to 5 times, kept across restarts), and if the full report can't be built (a data source failing), a basic call with
+the coin, contract, links and paper buy goes out instead.
+
 ### Chains without a safety check (Elysium)
 
 No honeypot or tax checker covers Elysium, so its coins skip the safety step. They are found through DexScreener's
