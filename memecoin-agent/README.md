@@ -639,6 +639,29 @@ trade downloads, and control from your phone.
 One bot token belongs to one running agent. If two copies use the same token (say, your PC and a server), only one
 of them gets each command. The log then warns that another program is reading the bot's messages.
 
+## Discord calls
+
+Every automatic buy is posted to a Discord channel as a call, at the moment the paper buy is made:
+
+- the coin, its contract, chain and DEX, market cap, liquidity, age, volume, buy/sell counts and price changes;
+- the safety result (or an UNCHECKED warning), why it was picked, and the paper buy's size and price;
+- a description when one is found: GMGN's token info first, then the project's own DexScreener profile;
+- links to DexScreener, GMGN and the project's website and socials.
+
+Follow-ups at 15 minutes, 1 hour and 4 hours show the move since the call, and a daily recap (00:00 UTC) shows
+the last 24 hours: how many calls, how many went up 50% or doubled, the median after an hour, and the best.
+
+Set it up: in the Discord channel, **Edit Channel -> Integrations -> Webhooks -> New Webhook -> Copy Webhook URL**.
+Put it in the `DISCORD_WEBHOOK_URL` environment variable (or `.env` on the cloud server), never in the config, and
+set `caller.enabled: true`. Anyone with the URL can post to the channel.
+
+### Chains without a safety check (Elysium)
+
+No honeypot or tax checker covers Elysium, so its coins skip the safety step. They are found through DexScreener's
+search, qualify on their own size and activity limits (`unchecked:` in the config; these coins are much smaller
+than the other lanes allow), are paper-bought at a fixed $10, and are called as **UNCHECKED** with a warning that
+they may be impossible to sell. They are never bought in live mode.
+
 ## Run it 24/7 in the cloud
 
 To keep paper trading while your computer is off, run the agent on a server. The

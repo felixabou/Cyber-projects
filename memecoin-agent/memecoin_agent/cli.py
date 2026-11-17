@@ -91,6 +91,13 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
         base = ExtraDiscoveryMarket(base, TrendingDiscovery(cfg.discovery, cfg.filters))
         log.info("Trending discovery on: Jupiter (%s) and GeckoTerminal trending pools, one list at a time, a round every %.0fs",
                  ", ".join(cfg.discovery.jupiter_lists), cfg.discovery.refresh_s)
+    if cfg.unchecked.enabled and cfg.unchecked.chains:
+        from .data.gmgn import ExtraDiscoveryMarket
+        from .data.unchecked import ChainSearchDiscovery
+
+        base = ExtraDiscoveryMarket(base, ChainSearchDiscovery(cfg.unchecked))
+        log.info("Unchecked chains on: %s (no safety check exists; called with a warning, paper-bought at $%.0f)",
+                 ", ".join(cfg.unchecked.chains), cfg.unchecked.position_usd)
     fc = cfg.feeds
     if not with_feed or not (fc.pumpportal_migrations or fc.pumpportal_new_tokens):
         return base, None
@@ -264,8 +271,20 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         history = ScanHistory(cfg.learning, cfg.agent.scan_log_file)
         log.info("Track record on: buys are checked against what earlier coins in the scan log did (needs %d+ "
                  "finished rows per group)", cfg.learning.min_lane_samples)
+    caller = None
+    if cfg.caller.enabled:
+        url = os.environ.get(cfg.caller.webhook_env)
+        if url:
+            from .caller import Caller, DiscordWebhook, Describer
+
+            caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn))
+            log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
+                     ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
+        else:
+            log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
+                        cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 

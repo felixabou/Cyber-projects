@@ -651,6 +651,42 @@ class LongTermConfig:
 
 
 @dataclass
+class CallerConfig:
+    """Calls to Discord: every automatic buy is posted as a call with a full report, then followed up.
+
+    The webhook URL is read from the `webhook_env` environment variable, never from this file."""
+
+    enabled: bool = False
+    webhook_env: str = "DISCORD_WEBHOOK_URL"
+    username: str = "Memecoin Caller"
+    follow_up_minutes: list[float] = field(default_factory=lambda: [15, 60, 240])
+    recap_hour_utc: int | None = 0  # daily recap of the last 24h of calls at this UTC hour (null = off)
+    describe: bool = True  # look up a description (GMGN token info, then DexScreener's profile)
+    state_file: str = "state/calls.json"
+
+
+@dataclass
+class UncheckedConfig:
+    """Chains no honeypot or tax checker covers (Elysium). Coins there are found, called with an UNCHECKED
+    warning and paper-bought at a small fixed size; never bought in live mode. Size limits are its own,
+    since these chains' coins are much smaller than the other lanes allow."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["elysium"])
+    position_usd: float = 10.0
+    quote_symbols: list[str] = field(default_factory=lambda: ["HYPE", "WHYPE", "USDC", "USDT", "USDT0"])
+    discover_every_s: float = 120.0
+    min_liquidity_usd: float = 3_000.0
+    min_market_cap_usd: float = 3_000.0
+    max_market_cap_usd: float = 500_000.0
+    min_volume_h1_usd: float = 1_000.0
+    min_txns_h1: int = 20
+    min_buy_sell_ratio_h1: float = 1.0
+    min_price_change_h1: float = -10.0
+    max_age_hours: float = 72.0
+
+
+@dataclass
 class WatchConfig:
     """Read-only watchers (`memecoin-agent --watch`): alerts only, never trades. Off until enabled."""
 
@@ -693,8 +729,16 @@ class Config:
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
+    caller: CallerConfig = field(default_factory=CallerConfig)
+    unchecked: UncheckedConfig = field(default_factory=UncheckedConfig)
 
     def validate(self) -> None:
+        if any(m <= 0 for m in self.caller.follow_up_minutes):
+            raise ValueError("caller.follow_up_minutes must all be > 0")
+        if self.caller.recap_hour_utc is not None and not 0 <= self.caller.recap_hour_utc <= 23:
+            raise ValueError("caller.recap_hour_utc must be 0-23 or null")
+        if self.unchecked.position_usd <= 0:
+            raise ValueError("unchecked.position_usd must be > 0")
         if self.watch.interval_s <= 0:
             raise ValueError("watch.interval_s must be > 0")
         for t in self.watch.approvals:
@@ -804,6 +848,8 @@ _SECTIONS: dict[str, type] = {
     "sniper": SniperConfig,
     "lowcap": LowCapConfig,
     "watch": WatchConfig,
+    "caller": CallerConfig,
+    "unchecked": UncheckedConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

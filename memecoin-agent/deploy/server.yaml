@@ -22,6 +22,13 @@ agent:
 recorder:
   record_while_trading: false   # market recordings take a lot of disk; record on your PC instead
 
+caller:
+  enabled: true   # every automatic buy is posted to Discord (DISCORD_WEBHOOK_URL in .env)
+
+unchecked:
+  chains: [elysium]   # no safety check exists on these: called with a warning, paper-bought at $10
+  position_usd: 10
+
 telegram:
   notify_trades: true
   allow_controls: true
