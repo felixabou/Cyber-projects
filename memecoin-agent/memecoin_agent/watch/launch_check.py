@@ -15,6 +15,7 @@ A shared recipient or an identical buy is a lead to check, not proof of coordina
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,12 +23,14 @@ from typing import Any
 
 from .approvals import Rpc, keccak256_hex
 
+log = logging.getLogger(__name__)
+
 TRANSFER = keccak256_hex("Transfer(address,address,uint256)")
 ZERO = "0x" + "0" * 40
 DEAD = "0x000000000000000000000000000000000000dead"
 EIP7702_PREFIX = "0xef0100"
 CHUNK_BLOCKS = 2_000
-MAX_CHUNKS = 40
+MIN_CHUNK_BLOCKS = 10
 MIN_IDENTICAL = 3
 
 
@@ -63,13 +66,18 @@ def scan_transfers(rpc: Rpc, token: str, creation_block: int, first_n: int) -> l
     head = _int(rpc.request("eth_blockNumber", []))
     times: dict[int, int] = {}
     out: list[Transfer] = []
-    lo = creation_block
-    for _ in range(MAX_CHUNKS):
-        if lo > head or len(out) >= first_n:
-            break
-        hi = min(head, lo + CHUNK_BLOCKS - 1)
-        logs = rpc.request("eth_getLogs", [{"address": token, "topics": [TRANSFER],
-                                            "fromBlock": hex(lo), "toBlock": hex(hi)}])
+    lo, chunk = creation_block, CHUNK_BLOCKS
+    while lo <= head and len(out) < first_n and chunk >= MIN_CHUNK_BLOCKS:
+        hi = min(head, lo + chunk - 1)
+        try:
+            logs = rpc.request("eth_getLogs", [{"address": token, "topics": [TRANSFER],
+                                                "fromBlock": hex(lo), "toBlock": hex(hi)}])
+        except RuntimeError as exc:
+            if "HTTP 400" not in str(exc) and "HTTP 413" not in str(exc) and "range" not in str(exc).lower():
+                raise
+            chunk //= 2
+            log.info("Log range %d blocks refused, trying %d: %s", hi - lo + 1, chunk, exc)
+            continue
         for lg in sorted(logs, key=lambda x: (_int(x["blockNumber"]), _int(x["logIndex"]))):
             if len(lg.get("topics", [])) != 3:
                 continue

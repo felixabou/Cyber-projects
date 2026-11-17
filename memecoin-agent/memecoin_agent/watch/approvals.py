@@ -63,12 +63,19 @@ class Rpc:
     def request(self, method: str, params: list[Any]) -> Any:
         try:
             resp = self.client.post(self.url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-            resp.raise_for_status()
-            body = resp.json()
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(f"RPC HTTP {exc.response.status_code}") from None
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPError as exc:
             raise RuntimeError(f"RPC request failed ({type(exc).__name__})") from None
+        if resp.status_code >= 400:
+            # The provider's message explains the rejection; it never contains the URL.
+            try:
+                detail = str(resp.json().get("error", {}).get("message", ""))[:200]
+            except (ValueError, AttributeError):
+                detail = ""
+            raise RuntimeError(f"RPC HTTP {resp.status_code}" + (f": {detail}" if detail else ""))
+        try:
+            body = resp.json()
+        except ValueError:
+            raise RuntimeError("RPC returned a non-JSON response") from None
         if "error" in body:
             raise RuntimeError(f"RPC error: {body['error']}")
         return body["result"]
