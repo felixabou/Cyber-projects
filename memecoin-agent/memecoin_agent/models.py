@@ -86,6 +86,8 @@ class SafetyReport:
     ok: bool
     score: float | None
     reasons: list[str]
+    # Machine-readable kind of the result, e.g. "larpcheck_no_credits" (data/larpcheck.py); "" when not set.
+    category: str = ""
 
 
 @dataclass

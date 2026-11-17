@@ -475,14 +475,24 @@ The last check before any buy is [LarpCheck](https://larpcheck.app). It investig
 
 These catch what market data and RugCheck's summary miss. In the first live paper session, both tokens the agent bought had already been stamped RIGGED (linked wallets held 82% of supply; a 230-wallet farm held 30%). One dumped 99% three minutes after the buy. RugCheck had passed both.
 
-- **Where it runs:** only on tokens that already passed every filter and RugCheck, so a few lookups a day. Looking up existing verdicts is free.
+- **Where it runs:** first among the safety checks, on tokens that passed every filter, so a few lookups a day. Looking up existing verdicts is free.
 - **What it blocks:** a story verdict of LARP, LIKELY LARP or SCAM, or a RIGGED stamp (configurable). Bad verdicts block even when out of date: a rigged holder base stays rigged.
 - **If a check is running:** the buy waits for the verdict (up to `pending_max_minutes`).
-- **No verdict, no buy** (`require_verdict: true`, the default). A coin nobody has checked gets a check started (`on_unchecked: check`), spending one of your daily credits (`max_checks_per_day`). The agent buys only once the coin passes. When the credits run out, a check doesn't finish in `pending_max_minutes`, LarpCheck is unreachable, or there's no API key, the coin isn't bought.
-- **Exits never depend on LarpCheck.** With `require_verdict: false` you can let the other checks decide instead (`on_unchecked: allow`, `fail_closed: false`).
+- **When LarpCheck has no verdict to give**, a policy decides, set separately for paper and live trading:
+
+  | Setting | Default | No verdict means |
+  |---|---|---|
+  | `larpcheck.paper_policy` | `fallback` | the other safety checks (MEME OS, RugCheck, Jupiter, GMGN, the honeypot test) decide |
+  | `larpcheck.live_policy` | `strict` | no buy |
+
+  "No verdict" covers six distinct cases, each with its own machine-readable reason (`SafetyReport.category`): an explicit bad verdict (`larpcheck_bad_verdict`, blocked under both policies), no verdict yet (`larpcheck_no_verdict`), an outage (`larpcheck_outage`), no API key (`larpcheck_no_key`), credits used up (`larpcheck_no_credits`), and a check that is still running (`larpcheck_pending`: the buy waits up to `pending_max_minutes`) or didn't finish in time (`larpcheck_timeout`). A bad verdict seen earlier keeps blocking a coin even while LarpCheck is down. Under `strict`, a meme with no verdict isn't bought either (`memes: off` leaves memes out of LarpCheck).
+- **Counters** in the log and on the dashboard: `larpcheck_rejected`, `larpcheck_unavailable`, `larpcheck_fallback_allowed`, `larpcheck_pending`.
+- **A coin nobody has checked** gets a check started (`on_unchecked: check`), spending one of your daily credits (`max_checks_per_day`); `reject` never buys one, `allow` starts nothing and leaves it to the policy.
+- **Older config files**: `require_verdict`, `fail_closed`, `on_no_credits` and `on_unavailable` are read and translated with a warning; they can only make the paper policy stricter.
+- **Exits never depend on LarpCheck.**
 - **In the dashboard:** the Scanner shows blocked coins as *Unsafe: larpcheck …* with an **evidence** link to the check's page. Coins it couldn't get a verdict for show as *No LarpCheck verdict: …*.
 
-Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key the agent opens no positions and logs an error; exits still run.
+Create an API key at https://larpcheck.app/me. Provide it as `LARPCHECK_API_KEY`, or in `~/.config/larpcheck/api_key`. Without a key, paper trading runs on the other checks (fallback) and live trading opens no positions (strict); exits still run.
 
 **Held coins.** LarpCheck keeps watching after a buy. Every 5 minutes it re-reads the verdict of each coin held (free). When a coin is flagged, the agent first reads LarpCheck's reasoning: the summary, the claim and whether it held up, each risk finding with its evidence, and what would change the picture. Then it sells:
 
@@ -666,8 +676,9 @@ comparison shows those coins doing worse.
 ### MEME OS
 
 Safety checks run in this order on every coin the agent would buy: LarpCheck, MEME OS X-Ray, then RugCheck,
-Jupiter and GMGN (and the honeypot round trip). When LarpCheck or MEME OS is out of credits, down, or never finishes
-a check, it passes the coin on and the original checks decide; those always run.
+Jupiter and GMGN (and the honeypot round trip). When MEME OS is out of credits or down, it passes the coin on and the
+original checks decide; LarpCheck does the same in paper trading (`paper_policy: fallback`) but refuses the buy in live
+trading (`live_policy: strict`). The original checks always run.
 
 With a MEME OS key (`MEMEOS_API_KEY`), each candidate gets an X-Ray report (5 credits). A verdict in
 `memeos.reject_verdicts` (HIGH RISK and worse) skips the coin; CAUTION does not, since X-Ray gives every new, thin
@@ -676,9 +687,9 @@ the share of supply held by wallets funded from the same source (bundle check, 3
 `bundle_min_credits` (500) or more are left so a small balance such as the free checks goes to the buy checks.
 When the balance can't pay for another X-Ray, or MEME OS answers 402, X-Ray switches off for the day.
 
-When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
-safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks
-a coin.
+When LarpCheck has no verdict to give (no credits, no key, down, unchecked, or a check that didn't finish), paper
+trading lets the other safety checks decide (`larpcheck.paper_policy: fallback`) and live trading doesn't buy
+(`larpcheck.live_policy: strict`); a bad verdict LarpCheck already has blocks a coin either way.
 
 Follow-ups at 15 minutes, 1 hour and 4 hours show the move since the call, and a daily recap (00:00 UTC) shows
 the last 24 hours: how many calls, how many went up 50% or doubled, the median after an hour, and the best.

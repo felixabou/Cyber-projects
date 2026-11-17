@@ -114,7 +114,8 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=Non
     """The agent's pre-buy checks: LarpCheck and MEME OS X-Ray first, then RugCheck, Jupiter and GMGN. Every one
     runs on each coin; when LarpCheck or MEME OS is out of credits or unreachable it passes the coin on and the
     others decide. The recorder passes with_larpcheck=False and no GMGN client: it vets hundreds of tokens."""
-    from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
+    from .data.larpcheck import (FALLBACK, CompositeSafety, LarpCheckClient, LarpCheckGate, MissingLarpCheck, load_api_key,
+                                 policy_for)
 
     f = cfg.filters
     rug = (RugCheckClient(max_score=f.max_rugcheck_score, reject_danger=f.reject_danger_risks,
@@ -134,21 +135,23 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=Non
         checks.insert(0, memeos)
     if not (with_larpcheck and cfg.larpcheck.enabled):
         return CompositeSafety(*checks) if len(checks) > 1 else rug
+    mode = cfg.execution.mode
+    policy = policy_for(cfg.larpcheck, mode)
+    if mode == "live" and policy == FALLBACK:
+        log.warning("Live trading with larpcheck.live_policy: fallback: coins LarpCheck can't vouch for are bought "
+                    "on the other checks alone")
     key = load_api_key(cfg.larpcheck)
     if not key:
-        if cfg.larpcheck.require_verdict and cfg.larpcheck.on_no_credits == "allow":
-            log.warning("LarpCheck off: no API key found; the other safety checks decide each coin")
-            return CompositeSafety(*checks) if len(checks) > 1 else rug
-        if cfg.larpcheck.require_verdict:
-            log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
-                      "larpcheck.api_key_file): the agent will open no positions; exits still run")
-            return CompositeSafety(*checks, RequireLarpCheck("no LarpCheck API key configured"))
-        log.warning("LarpCheck is enabled but no API key was found; continuing without it")
-        return CompositeSafety(*checks) if len(checks) > 1 else rug
-    gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url))
-    log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
-             "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
-             cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
+        if policy == FALLBACK:
+            log.warning("LarpCheck: no API key found (%s, fallback policy): the other safety checks decide each coin", mode)
+        else:
+            log.error("LarpCheck: no API key found (%s, strict policy; set LARPCHECK_API_KEY or larpcheck.api_key_file): "
+                      "the agent will open no positions; exits still run", mode)
+        return CompositeSafety(MissingLarpCheck(policy), *checks)
+    gate = LarpCheckGate(cfg.larpcheck, LarpCheckClient(key, cfg.larpcheck.url), policy=policy)
+    log.info("LarpCheck gate on (%s, %s policy: %s): rejects %s and coin stamps %s; unchecked coins: %s", mode, policy,
+             "no verdict, no buy" if policy != FALLBACK else "no verdict, the other checks decide",
+             "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps), cfg.larpcheck.on_unchecked)
     return CompositeSafety(gate, *checks)
 
 

@@ -540,11 +540,12 @@ class AgentRunner:
         return {"discovery": discovery, "safety": safety} if (discovery or safety) else None
 
     def _larpcheck_view(self) -> dict[str, Any] | None:
-        from ..data.larpcheck import CompositeSafety, LarpCheckGate
+        from ..data.larpcheck import CompositeSafety, LarpCheckGate, MissingLarpCheck
 
         safety = self.agent.safety
         gate = safety.find(LarpCheckGate) if isinstance(safety, CompositeSafety) else None
         if gate is None:
-            return None
+            missing = safety.find(MissingLarpCheck) if isinstance(safety, CompositeSafety) else None
+            return None if missing is None else {"policy": missing.policy, "no_key": True, "counters": dict(missing.counters)}
         return {"on_unchecked": gate.cfg.on_unchecked, "checks_left_today": gate.checks_left_today(),
-                "verdicts_seen": len(gate.last_verdicts)}
+                "verdicts_seen": len(gate.last_verdicts), "policy": gate.policy, "counters": dict(gate.counters)}

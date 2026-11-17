@@ -6,9 +6,10 @@ coin stamp (OK / NEUTRAL / SKETCHY / RIGGED: how fair the coin is for a buyer,
 e.g. "linked wallets hold 82% of supply"). Those are exactly the signals the
 market data and RugCheck's summary miss.
 
-It is the last gate before a buy, after the filters and RugCheck, so it runs
-a few times a day. Looking up existing verdicts is free; starting a new check
-spends a daily credit and only happens with `on_unchecked: check`.
+It is the first safety check (see cli.build_safety). Looking up existing verdicts is
+free; starting a new check spends a daily credit and only happens with
+`on_unchecked: check`. When LarpCheck has no verdict to give, larpcheck.paper_policy /
+live_policy decide: strict (no buy) or fallback (the other checks decide).
 
 The API is MCP over HTTP. The server is stateless, so each call is a single
 JSON-RPC `tools/call` POST.
@@ -34,8 +35,51 @@ from ..strategy import ExitDecision
 log = logging.getLogger(__name__)
 
 ENV_KEY = "LARPCHECK_API_KEY"
-UNAVAILABLE = "larpcheck unavailable"
 PENDING = "larpcheck check running"
+
+STRICT, FALLBACK = "strict", "fallback"
+# SafetyReport.category of every LarpCheck answer that isn't a plain pass.
+BAD_VERDICT = "larpcheck_bad_verdict"  # LARP / SCAM / RIGGED...: never bought, under either policy
+NO_VERDICT = "larpcheck_no_verdict"  # nobody has checked the coin (and no check was started)
+OUTAGE = "larpcheck_outage"  # LarpCheck unreachable or answering errors
+NO_KEY = "larpcheck_no_key"
+NO_CREDITS = "larpcheck_no_credits"  # premium plan, or today's checks spent
+PENDING_CHECK = "larpcheck_pending"  # a check is running: the buy waits (pending_max_minutes)
+TIMEOUT = "larpcheck_timeout"  # the check didn't finish in pending_max_minutes
+COUNTERS = ("larpcheck_rejected", "larpcheck_unavailable", "larpcheck_fallback_allowed", "larpcheck_pending")
+
+
+def policy_for(cfg: LarpCheckConfig, mode: str) -> str:
+    """The policy in force for an execution mode: live_policy for live trading, paper_policy otherwise."""
+    return cfg.live_policy if mode == "live" else cfg.paper_policy
+
+
+class LarpStats:
+    """Decision counters (fresh decisions, not cache hits), logged when they change, at most every 10 minutes.
+
+    larpcheck_rejected: buys refused by LarpCheck (a bad verdict, or no verdict under strict)
+    larpcheck_unavailable: no verdict to give (no verdict yet, outage, no key, no credits, timeout)
+    larpcheck_fallback_allowed: ...of those, coins passed on to the other checks (fallback)
+    larpcheck_pending: buys held while a check runs
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic, log_every_s: float = 600.0) -> None:
+        self.counts: dict[str, int] = {k: 0 for k in COUNTERS}
+        self.clock, self.log_every_s = clock, log_every_s
+        self._logged: dict[str, int] = dict(self.counts)
+        self._next_log = 0.0
+
+    def add(self, *keys: str) -> None:
+        for k in keys:
+            self.counts[k] += 1
+        if self.counts != self._logged and self.clock() >= self._next_log:
+            self._next_log = self.clock() + self.log_every_s
+            self._logged = dict(self.counts)
+            log.info("LarpCheck counters: %s", " ".join(f"{k}={v}" for k, v in self.counts.items()))
+
+
+def _label(category: str) -> str:
+    return category.removeprefix("larpcheck_").replace("_", " ")
 REASON_KINDS = ("risk", "missing")  # LarpCheck finding kinds that explain a LARP call
 
 
@@ -159,9 +203,11 @@ class LarpCheckGate:
         client: LarpCheckClient,
         clock: Callable[[], float] = time.monotonic,
         today: Callable[[], str] = lambda: datetime.now(timezone.utc).date().isoformat(),
+        policy: str = STRICT,
     ) -> None:
         self.cfg = cfg
         self.client = client
+        self.policy = policy  # policy_for(cfg, execution mode); strict unless told otherwise
         self.clock = clock
         self.today = today
         self._cache: dict[str, tuple[float, SafetyReport]] = {}
@@ -174,17 +220,31 @@ class LarpCheckGate:
         # mint -> "tech" / "meme", set by the agent before it calls check() (data/profile.py).
         # Unknown counts as tech: the full gate.
         self.kinds: dict[str, str] = {}
-        self._credits_warned_on: str | None = None
+        self.stats = LarpStats(clock)
+        self._warned: set[tuple[str, str]] = set()  # (day, category) already logged
 
-    def _without_credits(self, mint: str, why: str) -> SafetyReport:
-        """No credits: the other safety checks decide (larpcheck.on_no_credits: allow), or no buy (reject)."""
-        if self._credits_warned_on != self.today():
-            self._credits_warned_on = self.today()
-            log.warning("LarpCheck %s: %s", why, "the other safety checks decide each coin today"
-                        if self.cfg.on_no_credits == "allow" else "no buys until credits are back")
-        if self.cfg.on_no_credits == "allow":
-            return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 300)
-        return self._cached(mint, SafetyReport(ok=False, score=None, reasons=[f"larpcheck: {why}"]), 300)
+    @property
+    def counters(self) -> dict[str, int]:
+        return self.stats.counts
+
+    def _unavailable(self, mint: str, category: str, detail: str, ttl_s: float) -> SafetyReport:
+        """LarpCheck has no verdict to give. strict: no buy. fallback: the other safety checks decide. A bad
+        verdict seen earlier for this coin still blocks it, under both."""
+        self.stats.add("larpcheck_unavailable")
+        seen = self.last_verdicts.get(mint)
+        if seen is not None and not (old := self._judge(seen)).ok:
+            self.stats.add("larpcheck_rejected")
+            return self._cached(mint, old, ttl_s)
+        if (self.today(), category) not in self._warned:
+            self._warned.add((self.today(), category))
+            log.warning("LarpCheck %s (%s): %s", _label(category), detail,
+                        "the other safety checks decide (fallback)" if self.policy == FALLBACK else "no buy (strict)")
+        if self.policy == FALLBACK:
+            self.stats.add("larpcheck_fallback_allowed")
+            return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[], category=category), ttl_s)
+        self.stats.add("larpcheck_rejected")
+        return self._cached(mint, SafetyReport(ok=False, score=None, category=category,
+                                               reasons=[f"larpcheck {_label(category)}: {detail} (strict policy)"]), ttl_s)
 
     def lookup_only(self, kind: str | None) -> bool:
         """Memes get LarpCheck's free lookup only (larpcheck.memes: lookup), or nothing (off)."""
@@ -336,14 +396,23 @@ class LarpCheckGate:
         bad |= bool(v.coin_word) and v.coin_word in {x.upper() for x in self.cfg.reject_coin_stamps}
         if self.cfg.min_coin_score is not None and v.coin_score is not None:
             bad |= v.coin_score < self.cfg.min_coin_score
-        return SafetyReport(ok=not bad, score=v.score, reasons=[f"{v.describe()} ({v.url})"] if bad else [])
+        return SafetyReport(ok=not bad, score=v.score, reasons=[f"{v.describe()} ({v.url})"] if bad else [],
+                            category=BAD_VERDICT if bad else "")
 
-    def _no_verdict(self, mint: str, why: str, ttl_s: float = 60) -> SafetyReport:
-        """No finished verdict to go on. With require_verdict that means no buy."""
-        if self.cfg.require_verdict:
-            return self._cached(mint, SafetyReport(ok=False, score=None, reasons=[f"larpcheck: {why}"]), ttl_s)
-        # Short TTL: someone may check it in the next minutes, and we want that verdict.
-        return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 120)
+    def _verdict(self, mint: str, verdict: Verdict) -> SafetyReport:
+        self._pending_since.pop(mint, None)
+        self.last_verdicts[mint] = verdict
+        report = self._judge(verdict)
+        if not report.ok:
+            self.stats.add("larpcheck_rejected")
+        # Bad verdicts rarely improve (a rigged holder base stays rigged); good ones can sour.
+        return self._cached(mint, report, 3600 if not report.ok else 600)
+
+    def _failed(self, mint: str, exc: Exception) -> SafetyReport:
+        if out_of_credits(exc):
+            return self._unavailable(mint, NO_CREDITS, f"refused for lack of credits ({_short(exc)})", 300)
+        log.debug("LarpCheck lookup failed for %s: %s", mint, exc)
+        return self._unavailable(mint, OUTAGE, _short(exc), 60)
 
     def check(self, mint: str) -> SafetyReport:
         hit = self._cache.get(mint)
@@ -357,49 +426,33 @@ class LarpCheckGate:
                 raise LarpCheckError(f"unexpected lookup_coin reply: {str(data)[:120]}")
             verdict = Verdict.from_latest(data.get("latest") or {})
             if verdict is not None:
-                self._pending_since.pop(mint, None)
-                self.last_verdicts[mint] = verdict
-                report = self._judge(verdict)
-                # Bad verdicts rarely improve (a rigged holder base stays rigged); good ones can sour.
-                return self._cached(mint, report, 3600 if not report.ok else 600)
+                return self._verdict(mint, verdict)
 
             now = self.clock()
             # A check we just started may not be listed as running yet: it counts as pending too.
             if data.get("running") or mint in self._pending_since:
                 since = self._pending_since.setdefault(mint, now)
                 if now - since < self.cfg.pending_max_minutes * 60:
-                    return SafetyReport(ok=False, score=None, reasons=[PENDING])
+                    self.stats.add("larpcheck_pending")
+                    return SafetyReport(ok=False, score=None, reasons=[PENDING], category=PENDING_CHECK)
                 # Don't spend another credit on it; if the check finishes later, its verdict is used.
-                if self.cfg.on_unavailable == "allow":
-                    return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 120)
-                return self._no_verdict(mint, f"check still running after {self.cfg.pending_max_minutes:g} min")
+                return self._unavailable(mint, TIMEOUT, f"check still running after {self.cfg.pending_max_minutes:g} min", 120)
             return self._unchecked(mint)
         except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
-            if out_of_credits(exc):
-                return self._without_credits(mint, f"refused for lack of credits ({_short(exc)})")
-            log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
-            if self.cfg.on_unavailable == "allow" and not self.cfg.fail_closed:
-                return self._cached(mint, SafetyReport(ok=True, score=None, reasons=[]), 60)  # the other checks decide
-            if self.cfg.require_verdict or self.cfg.fail_closed:
-                return SafetyReport(ok=False, score=None, reasons=[UNAVAILABLE])
-            return SafetyReport(ok=True, score=None, reasons=[])
+            return self._failed(mint, exc)
 
     def _check_meme(self, mint: str) -> SafetyReport:
         """A meme: no verdict needed and no credit spent, but a bad verdict someone else got still blocks it."""
-        ok = SafetyReport(ok=True, score=None, reasons=[])
         if self.cfg.memes == "off":
-            return ok
+            return SafetyReport(ok=True, score=None, reasons=[])
         try:
             data = self.client.lookup_coin(mint)
             verdict = Verdict.from_latest((data.get("latest") or {}) if isinstance(data, dict) else {})
         except (httpx.HTTPError, LarpCheckError, ValueError) as exc:
-            log.warning("LarpCheck lookup failed for %s: %s", mint, exc)
-            return ok
-        if verdict is None:
-            return self._cached(mint, ok, 120)  # someone may check it soon; look again then
-        self.last_verdicts[mint] = verdict
-        report = self._judge(verdict)
-        return self._cached(mint, report, 3600 if not report.ok else 600)
+            return self._failed(mint, exc)
+        if verdict is None:  # someone may check it soon; look again in two minutes
+            return self._unavailable(mint, NO_VERDICT, "meme not checked yet (memes get the free lookup only)", 120)
+        return self._verdict(mint, verdict)
 
     def _unchecked(self, mint: str) -> SafetyReport:
         mode = self.cfg.on_unchecked
@@ -408,31 +461,44 @@ class LarpCheckGate:
                 try:
                     started = self.client.start_check(mint)
                 except (httpx.HTTPError, LarpCheckError) as exc:
-                    if not out_of_credits(exc):
-                        raise
-                    self.checks_started[self.today()] = self.cfg.max_checks_per_day  # don't ask again today
-                    return self._without_credits(mint, f"has no credits left ({_short(exc)})")
+                    if out_of_credits(exc):
+                        self.checks_started[self.today()] = self.cfg.max_checks_per_day  # don't ask again today
+                    return self._failed(mint, exc)
                 day = self.today()
                 self.checks_started[day] = self.checks_started.get(day, 0) + 1
                 self._pending_since[mint] = self.clock()
                 log.info("Started LarpCheck check on %s (%d left today): %s",
                          mint, self.checks_left_today(), started.get("url") if isinstance(started, dict) else "")
-                return SafetyReport(ok=False, score=None, reasons=[PENDING])
-            return self._without_credits(mint, "checks for today are used up")
-        if mode == "reject":
-            return self._cached(mint, SafetyReport(ok=False, score=None, reasons=["larpcheck: no verdict yet"]), 120)
-        return self._no_verdict(mint, "not checked yet")
+                self.stats.add("larpcheck_pending")
+                return SafetyReport(ok=False, score=None, reasons=[PENDING], category=PENDING_CHECK)
+            return self._unavailable(mint, NO_CREDITS, f"today's {self.cfg.max_checks_per_day} checks are used up", 300)
+        if mode == "reject":  # explicit: never buy an unchecked coin, whatever the policy
+            self.stats.add("larpcheck_rejected")
+            return self._cached(mint, SafetyReport(ok=False, score=None, reasons=["larpcheck no verdict: not checked "
+                                                   "yet (on_unchecked: reject)"], category=NO_VERDICT), 120)
+        return self._unavailable(mint, NO_VERDICT, "not checked yet", 120)
 
 
-class RequireLarpCheck:
-    """Stands in for the gate when a verdict is required but LarpCheck can't be reached at all
-    (no API key): every buy is refused, loudly, instead of trading without the check."""
+class MissingLarpCheck:
+    """Stands in for the gate when there is no LarpCheck API key: strict refuses every buy, loudly; fallback lets the
+    other safety checks decide."""
 
-    def __init__(self, why: str) -> None:
-        self.why = why
+    def __init__(self, policy: str, clock: Callable[[], float] = time.monotonic) -> None:
+        self.policy = policy
+        self.stats = LarpStats(clock)
+
+    @property
+    def counters(self) -> dict[str, int]:
+        return self.stats.counts
 
     def check(self, mint: str) -> SafetyReport:
-        return SafetyReport(ok=False, score=None, reasons=[f"larpcheck required: {self.why}"])
+        self.stats.add("larpcheck_unavailable")
+        if self.policy == FALLBACK:
+            self.stats.add("larpcheck_fallback_allowed")
+            return SafetyReport(ok=True, score=None, reasons=[], category=NO_KEY)
+        self.stats.add("larpcheck_rejected")
+        return SafetyReport(ok=False, score=None, category=NO_KEY,
+                            reasons=["larpcheck no key: no LarpCheck API key configured (strict policy)"])
 
 
 class CompositeSafety:

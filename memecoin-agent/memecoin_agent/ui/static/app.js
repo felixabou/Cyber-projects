@@ -475,8 +475,10 @@ function renderHeader(v) {
   if (v.recorder && v.recorder.active) bits.push(`recording · ${v.recorder.tracked} tokens`);
   if (v.gmgn) bits.push(`GMGN ${[v.gmgn.discovery && "discovery", v.gmgn.safety && "safety"].filter(Boolean).join(" + ")}`);
   if (v.larpcheck) {
-    bits.push(v.larpcheck.on_unchecked === "check"
-      ? `LarpCheck gate · ${v.larpcheck.checks_left_today} checks left today` : "LarpCheck gate on");
+    const pol = v.larpcheck.policy ? ` (${v.larpcheck.policy})` : "";
+    if (v.larpcheck.no_key) bits.push(`LarpCheck: no key${pol}`);
+    else bits.push(v.larpcheck.on_unchecked === "check"
+      ? `LarpCheck gate${pol} · ${v.larpcheck.checks_left_today} checks left today` : `LarpCheck gate on${pol}`);
   }
   if (v.telegram) bits.push(v.telegram.state === "ok" ? `Telegram ${v.telegram.bot || "bot"}` : `Telegram: ${v.telegram.state}`);
   if (v.tick_errors) bits.push(`${v.tick_errors} tick error${v.tick_errors > 1 ? "s" : ""}`);
@@ -707,9 +709,9 @@ function verdict(c) {
   if (c.outcome === "bought") { cls = "v-buy"; icon = "●"; text = "Bought"; }
   else if (c.outcome === "unsafe: larpcheck check running") { cls = "v-pass"; icon = "…"; text = "Waiting for LarpCheck verdict"; }
   else if (c.outcome.startsWith("waiting: ")) { cls = "v-pass"; icon = "…"; text = "Waiting: " + c.outcome.slice(9); }
-  else if (/^unsafe: larpcheck( unavailable|:| required:)/.test(c.outcome)) {
-    // No verdict to go on: never bought (require_verdict).
-    icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck( required)?:? ?/, "");
+  else if (/^unsafe: larpcheck (no verdict|outage|no key|no credits|timeout)/.test(c.outcome)) {
+    // No verdict to go on under the strict policy: not bought.
+    icon = "–"; text = "No LarpCheck verdict: " + c.outcome.replace(/^unsafe: larpcheck /, "");
   }
   else if (c.outcome.startsWith("unsafe")) {
     cls = "v-unsafe"; icon = "✗"; text = c.outcome.replace(/^unsafe: /, "Unsafe: ");
