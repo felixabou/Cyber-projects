@@ -191,6 +191,10 @@ class AgentConfig:
     # price and liquidity did 15 min, 1 h and 4 h later (state/scans.csv). `memecoin-agent scans` reads it.
     scan_log: bool = True
     scan_log_file: str | None = "state/scans.csv"
+    # Why candidates were blocked, by stage and reason (state/rejections.jsonl, state/telemetry.json);
+    # `memecoin-agent blocked` reads it. A coin blocked again for the same reason within the window adds no row.
+    telemetry: bool = True
+    telemetry_dedupe_minutes: float = 60.0
     # If this file exists the agent opens no new positions (exits still run).
     kill_switch_file: str = "STOP"
 

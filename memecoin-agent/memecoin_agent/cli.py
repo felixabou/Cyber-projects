@@ -305,6 +305,11 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
                  cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
                  f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
+    telemetry = None
+    if cfg.agent.telemetry:
+        from .telemetry import Telemetry
+
+        telemetry = Telemetry(Path(cfg.agent.state_file).parent, cfg.agent.telemetry_dedupe_minutes)
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
@@ -317,13 +322,14 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
             larp = find(LarpCheckGate) if find else (safety if isinstance(safety, LarpCheckGate) else None)
             caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn),
                             facts=FactGatherer(gmgn, kols, larp, memeos=memeos))
+            caller.telemetry = telemetry
             log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
                      ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
         else:
             log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
                         cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, caller=caller, kols=kols, memeos=memeos, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, kols=kols, memeos=memeos, telemetry=telemetry, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
@@ -470,6 +476,17 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> None:
 
     state = Path(cfg.agent.state_file).parent
     print(build_report(args.trades or cfg.agent.trades_csv, state / "entries.csv", state / "after_exit.csv"))
+
+
+def cmd_blocked(args: argparse.Namespace, cfg: Config) -> None:
+    from .telemetry import Telemetry, build_report
+
+    tel = Telemetry(Path(args.dir or Path(cfg.agent.state_file).parent), cfg.agent.telemetry_dedupe_minutes)
+    if args.reset:
+        tel.reset()
+        print("Telemetry totals reset (the block log is kept).")
+        return
+    print(build_report(tel, None if args.all else args.hours))
 
 
 def cmd_scans(args: argparse.Namespace, cfg: Config) -> None:
@@ -779,6 +796,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trades", nargs="+", default=None, help="one or more trades CSVs, e.g. a downloaded slice (default: agent.trades_csv)")
     p.set_defaults(func=cmd_report)
 
+    p = sub.add_parser("blocked", help="why candidates weren't bought: counts by stage, reason and lane")
+    p.add_argument("--hours", type=float, default=24.0, help="look back this many hours (default 24)")
+    p.add_argument("--all", action="store_true", help="every recorded block")
+    p.add_argument("--reset", action="store_true", help="zero the totals since the last reset")
+    p.add_argument("--dir", default=None, help="state directory (default: next to agent.state_file)")
+    p.set_defaults(func=cmd_blocked)
+
     p = sub.add_parser("scans", help="what the scan-everything log says: which filters block winners, which let rugs through")
     p.add_argument("--file", default=None, help="a scans.csv (default: agent.scan_log_file)")
     p.set_defaults(func=cmd_scans)
@@ -819,7 +843,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(_default_to_ui(argv, set(sub.choices)))
     cfg = load_config(args.config)
-    offline = args.command in ("status", "demo", "backtest", "report", "scans", "exitlab") or getattr(args, "synthetic", False)
+    offline = args.command in ("status", "demo", "backtest", "report", "scans", "exitlab", "blocked") or getattr(args, "synthetic", False)
     if args.command == "record" and not args.synthetic and cfg.recorder.record_while_trading:
         log.warning("recorder.record_while_trading is on: a separate `record` process duplicates the "
                     "recording your trading session already does")
@@ -827,7 +851,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in ("run", "ui"):
         # Docker and cloud hosts stop a container with SIGTERM: shut down as cleanly as on Ctrl-C.
         signal.signal(signal.SIGTERM, _raise_interrupt)
-    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans", "exitlab") or (args.command == "record" and args.synthetic)
+    quiet = args.command in ("status", "scan", "demo", "backtest", "report", "scans", "exitlab", "blocked") or (args.command == "record" and args.synthetic)
     if quiet and not args.verbose:
         # Backtests replay thousands of ticks; per-tick warnings (e.g. stale data) would drown the report.
         logging.getLogger().setLevel(logging.ERROR if args.command == "backtest" else logging.WARNING)

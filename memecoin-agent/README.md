@@ -143,6 +143,35 @@ With a [GMGN](https://gmgn.ai) API key the agent gets two more things. It only c
 
 Without a key the agent runs exactly as before. If GMGN is down or rate-limited, the other checks decide (`fail_closed: true` skips the buy instead), and discovery keeps the last trending list.
 
+## Why isn't it buying? (`memecoin-agent blocked`)
+
+Every candidate that isn't bought is recorded with the stage that stopped it and a machine-readable reason, in
+`state/rejections.jsonl`: `lane`, `chain`, `mint`, `rejection_stage`, `rejection_reason`, `regime_state`,
+`history_verdict`, `score` and `intended_position_size`. The stages, in the order a candidate meets them:
+
+| Stage | What stopped it |
+|---|---|
+| `discovery` | no candidates at all this scan |
+| `filters` | the entry filters (market cap, liquidity, age, volume...), a recent dump, most KOL buyers already out |
+| `safety` | RugCheck, Jupiter, GMGN, MEME OS, the wallet scan, the honeypot round trip, chain checks |
+| `larpcheck` | a bad LarpCheck verdict, or no verdict under the strict policy |
+| `regime` | the market-regime gate (market falling) |
+| `history` | the scan-log track record |
+| `risk` | entries paused or limited (kill switch, daily loss, positions, entries per hour, balance, lane cap) |
+| `execution` | paper-only chains in live mode, preflight refusals, failed buys |
+
+```
+memecoin-agent blocked              # the last 24 hours: by stage, by lane, top reasons, regime and history blocks
+memecoin-agent blocked --hours 6
+memecoin-agent blocked --reset      # zero the totals (the log itself is kept)
+```
+
+The same coin blocked for the same reason again within `agent.telemetry_dedupe_minutes` (60) adds no row, so the file
+records decisions rather than one line per scan. Totals since the last reset survive restarts (`state/telemetry.json`).
+The dashboard shows the last scan by stage and the regime and track-record blocks since the last reset; Discord gets a
+notice when the market regime pauses or resumes entries, and the daily recap counts both. Only a buy counts as a buy:
+a blocked candidate never shows up as a trade. This is observability only; no threshold changed.
+
 ## Scan log: data to tune the filters on
 
 Every coin the agent scans (not just the ones it buys) is written to `state/scans.csv` when it has been followed for

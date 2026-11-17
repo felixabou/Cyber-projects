@@ -552,6 +552,18 @@ function renderOverview(v) {
       h("div", { class: `meter-track ${sev}`, role: "meter", "aria-label": label,
         "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(frac * 100) }, fill));
   };
+  // Why candidates aren't bought: the last scan by stage, and the regime / track-record blocks since the last reset.
+  function blockedLines(t) {
+    if (!t || !t.last_scan) return [];
+    const ls = t.last_scan, stages = Object.entries(ls.by_stage || {}).filter(([, n]) => n > 0);
+    const scan = ls.candidates
+      ? `Last scan: ${ls.candidates} checked, ${ls.passed} passed filters, ${ls.bought} bought` +
+        (stages.length ? ` · blocked: ${stages.map(([s, n]) => `${s} ${n}`).join(" · ")}` : "")
+      : (ls.at ? "Last scan: no candidates found" : "");
+    const since = `Since ${String(t.since || "").slice(0, 10)}: blocked by the market regime ${t.regime_blocked} · ` +
+      `by the track record ${t.history_blocked} · ${t.bought} bought`;
+    return [scan, since].filter(Boolean).map((text) => h("div", { class: "entry-state", text }));
+  }
   let entry = "✓ Opening new positions when signals appear";
   if (v.kill_switch) entry = "✕ Kill switch file present — no new entries (exits still run)";
   else if (v.entries_paused) entry = "‖ Paused from the dashboard — exits still run";
@@ -561,7 +573,8 @@ function renderOverview(v) {
     meter("Daily loss limit", `${usd(r.daily_loss_usd)} of ${usd(r.daily_loss_limit_usd)} (${r.daily_loss_limit_pct}%)`, lossPct / 100, true),
     meter("Open positions", `${r.open_positions} of ${r.max_open_positions}`, r.open_positions / r.max_open_positions),
     meter("Entries in the last hour", `${r.entries_last_hour} of ${r.max_entries_per_hour}`, r.entries_last_hour / r.max_entries_per_hour),
-    h("div", { class: "entry-state", text: entry }));
+    h("div", { class: "entry-state", text: entry }),
+    ...blockedLines(v.telemetry));
 
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
 }

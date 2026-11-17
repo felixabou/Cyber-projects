@@ -125,6 +125,8 @@ execution:
 agent:
   scan_log: true                   # log every scanned coin and what it did 15m / 1h / 4h later (state/scans.csv)
   scan_log_file: state/scans.csv   # read it with `memecoin-agent scans`
+  telemetry: true                 # why candidates weren't bought, by stage and reason (state/rejections.jsonl); `memecoin-agent blocked`
+  telemetry_dedupe_minutes: 60     # the same coin blocked for the same reason again within this adds no row
   tick_seconds: 10           # open positions are re-priced and exits checked every tick
   scan_every_ticks: 2        # discovery scan every 20s (tick_seconds x scan_every_ticks)
   max_candidates_per_scan: 250  # 30 mints per DexScreener request
