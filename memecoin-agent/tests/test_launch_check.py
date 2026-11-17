@@ -118,3 +118,12 @@ def test_provider_refusing_every_range_raises_instead_of_returning_empty():
 
     with pytest.raises(RuntimeError, match="unsupported"):
         scan_transfers(Refuses([]), TOKEN, 100, 10)
+
+
+def test_scan_stops_at_the_call_cap(monkeypatch):
+    from memecoin_agent.watch import launch_check
+
+    monkeypatch.setattr(launch_check, "MAX_LOG_CALLS", 3)
+    chain = FakeChain([], head=10_000)
+    assert scan_transfers(chain, TOKEN, 100, 10) == []
+    assert chain.get_logs_calls == 3
