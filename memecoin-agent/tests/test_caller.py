@@ -61,7 +61,7 @@ def test_checked_call_report_has_numbers_checks_and_description(tmp_path):
     snap = make_snap()
     assert caller.call(snap, NOW, "lowcap", "low-cap lane", 25.0, 0.001, SafetyReport(True, 0.9, []))
     embed = hook.posts[0][0]
-    assert embed["title"].startswith("CALL: DOGE2") and embed["color"] == 0x2ECC71
+    assert embed["title"].startswith("CALL · LOW-CAP · $DOGE2") and embed["color"] == 0x2ECC71
     assert "Elon posted" in embed["description"]
     fields = {f["name"]: f["value"] for f in embed["fields"]}
     assert snap.mint in fields["Contract"]
@@ -222,7 +222,7 @@ def test_checked_chains_still_run_their_safety_check_and_get_called(isolated):
     agent, hook, gate, _ = make_agent([bsc_snap()])
     agent.scan_and_enter(NOW)
     assert gate.calls and agent.pf.positions
-    assert hook.posts[0][0]["title"].startswith("CALL:")
+    assert hook.posts[0][0]["title"].startswith("CALL · LOW-CAP")
 
 
 def test_a_failed_discord_post_does_not_undo_the_buy(isolated):

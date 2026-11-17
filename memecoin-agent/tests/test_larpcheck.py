@@ -114,10 +114,11 @@ def test_allow_mode_only_without_require_verdict():
 def test_never_buys_without_a_verdict():
     clock = Clock()
     fake = FakeLarpCheck({})
-    gate = make_gate(fake, clock=clock, max_checks_per_day=1, pending_max_minutes=5)
+    gate = make_gate(fake, clock=clock, max_checks_per_day=1, pending_max_minutes=5, on_no_credits="reject",
+                     on_unavailable="reject")
     assert gate.check("A1").reasons == [PENDING] and fake.started == ["A1"]
-    b = gate.check("B2")  # no credits left: refused, not waved through
-    assert not b.ok and "no checks left today" in b.reasons[0] and fake.started == ["A1"]
+    b = gate.check("B2")  # no credits left, with on_no_credits: reject: refused, not waved through
+    assert not b.ok and "checks for today are used up" in b.reasons[0] and fake.started == ["A1"]
     clock.t += 5 * 60 + 1
     a = gate.check("A1")  # our check never finished: refused, and no second credit spent on it
     assert not a.ok and "still running" in a.reasons[0] and fake.started == ["A1"]
@@ -133,7 +134,8 @@ def test_never_buys_without_a_verdict():
 def test_outages_refuse_buys_unless_verdicts_are_optional():
     fake = FakeLarpCheck({})
     fake.down = True
-    assert make_gate(fake).check("X1").reasons == [UNAVAILABLE]
+    assert make_gate(fake).check("X1").ok  # default on_unavailable: allow: the other checks decide
+    assert make_gate(fake, on_unavailable="reject").check("X1").reasons == [UNAVAILABLE]
     open_gate = make_gate(fake, require_verdict=False, on_unchecked="check")
     assert open_gate.check("X1") == SafetyReport(ok=True, score=None, reasons=[])
     assert make_gate(fake, require_verdict=False, on_unchecked="check", fail_closed=True).check("X1").reasons == [UNAVAILABLE]
@@ -168,8 +170,11 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
     cfg.larpcheck.api_key_file = str(tmp_path / "key")
     monkeypatch.delenv("LARPCHECK_API_KEY", raising=False)
     assert load_api_key(cfg.larpcheck) is None
-    no_key = cli.build_safety(cfg)  # verdicts required but no key: every buy refused, loudly
+    assert cli.build_safety(cfg).check("ANY").ok  # no key, on_no_credits: allow: the other checks decide
+    cfg.larpcheck.on_no_credits = "reject"
+    no_key = cli.build_safety(cfg)  # verdicts required, no key, reject: every buy refused, loudly
     assert not no_key.check("ANY").ok and "no LarpCheck API key" in no_key.check("ANY").reasons[0]
+    cfg.larpcheck.on_no_credits = "allow"
     cfg.larpcheck.require_verdict = False
     cfg.larpcheck.on_unchecked = "check"
     assert not isinstance(cli.build_safety(cfg), CompositeSafety)  # optional: RugCheck only, with a warning
@@ -392,3 +397,42 @@ def test_dust_that_stops_qualifying_is_sold():
     assert d.fraction == 1.0 and "RIGGED" in d.reason and not d.make_dust
     fake.coins["H2"] = coin("H2", "LIKELY REAL", "SKETCHY")
     assert "coin stamp is SKETCHY" in gate.review_dust(held("H2")).reason
+
+
+def test_out_of_credits_falls_back_to_the_other_checks():
+    from memecoin_agent.data.larpcheck import LarpCheckError, out_of_credits
+
+    fake = FakeLarpCheck({"FAIR1": FAIR, "RIGGED1": RIGGED})
+    gate = make_gate(fake, max_checks_per_day=1)
+    assert gate.check("A1").reasons == [PENDING]  # the day's one check is spent
+    assert gate.check("B2") == SafetyReport(ok=True, score=None, reasons=[])  # the other checks decide
+    assert not gate.check("RIGGED1").ok  # a verdict LarpCheck already has still blocks a coin
+
+    class NoCredits(FakeLarpCheck):
+        def __call__(self, req):
+            body = json.loads(req.content)
+            if body["params"]["name"] == "start_check":
+                return httpx.Response(402, text="Out of credits: upgrade to Pro")
+            return super().__call__(req)
+
+    broke = NoCredits({})
+    g = make_gate(broke, max_checks_per_day=4)
+    assert g.check("C3").ok and g.checks_left_today() == 0  # server says no credits: not asked again today
+    assert g.check("D4").ok and not broke.started
+
+    class PremiumOnly(FakeLarpCheck):
+        def __call__(self, req):
+            return httpx.Response(403, text="This tool needs a premium plan")
+
+    assert make_gate(PremiumOnly({})).check("E5").ok  # lookups refused by plan: the other checks decide
+    assert not make_gate(PremiumOnly({}), on_no_credits="reject").check("E5").ok
+    assert out_of_credits(LarpCheckError("start_check: no credits left")) and not out_of_credits(LarpCheckError("timeout"))
+
+
+def test_a_check_that_never_finishes_falls_back_to_the_other_checks():
+    clock = Clock()
+    fake = FakeLarpCheck({})
+    gate = make_gate(fake, clock=clock, pending_max_minutes=5)
+    assert gate.check("A1").reasons == [PENDING]
+    clock.t += 5 * 60 + 1
+    assert gate.check("A1").ok and fake.started == ["A1"]  # no second credit; the other checks decide

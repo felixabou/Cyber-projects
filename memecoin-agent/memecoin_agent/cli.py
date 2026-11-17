@@ -110,11 +110,10 @@ def build_market(cfg: Config, with_feed: bool = True, gmgn=None):
                                launch_window_s=cfg.sniper.max_age_minutes * 60), feed
 
 
-def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
-    """The agent's pre-buy checks, cheapest first: RugCheck, Jupiter, GMGN, then LarpCheck (which can
-    spend credits, so it only sees coins the others passed). The recorder passes with_larpcheck=False
-    and no GMGN client: it vets hundreds of tokens, and the later checks are for the few the agent would
-    buy."""
+def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None, memeos=None):
+    """The agent's pre-buy checks: LarpCheck and MEME OS X-Ray first, then RugCheck, Jupiter and GMGN. Every one
+    runs on each coin; when LarpCheck or MEME OS is out of credits or unreachable it passes the coin on and the
+    others decide. The recorder passes with_larpcheck=False and no GMGN client: it vets hundreds of tokens."""
     from .data.larpcheck import CompositeSafety, LarpCheckClient, LarpCheckGate, RequireLarpCheck, load_api_key
 
     f = cfg.filters
@@ -131,10 +130,15 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
 
         checks.append(GmgnSafety(cfg.gmgn, gmgn))
         log.info("GMGN safety check on (rug ratio, wash trading, holder concentration, bundlers/insiders)")
+    if memeos is not None:
+        checks.insert(0, memeos)
     if not (with_larpcheck and cfg.larpcheck.enabled):
         return CompositeSafety(*checks) if len(checks) > 1 else rug
     key = load_api_key(cfg.larpcheck)
     if not key:
+        if cfg.larpcheck.require_verdict and cfg.larpcheck.on_no_credits == "allow":
+            log.warning("LarpCheck off: no API key found; the other safety checks decide each coin")
+            return CompositeSafety(*checks) if len(checks) > 1 else rug
         if cfg.larpcheck.require_verdict:
             log.error("LarpCheck verdicts are required but no API key was found (set LARPCHECK_API_KEY or "
                       "larpcheck.api_key_file): the agent will open no positions; exits still run")
@@ -145,13 +149,32 @@ def build_safety(cfg: Config, with_larpcheck: bool = True, gmgn=None):
     log.info("LarpCheck gate on: rejects %s and coin stamps %s; unchecked coins: %s%s",
              "/".join(cfg.larpcheck.reject_verdicts), "/".join(cfg.larpcheck.reject_coin_stamps),
              cfg.larpcheck.on_unchecked, "; no buy without a verdict" if cfg.larpcheck.require_verdict else "")
-    return CompositeSafety(*checks, gate)
+    return CompositeSafety(gate, *checks)
+
+
+def build_memeos(cfg: Config):
+    if not cfg.memeos.enabled:
+        return None
+    from .data.memeos import MemeosClient, MemeosGate, load_api_key as memeos_key
+
+    key = memeos_key(cfg.memeos)
+    if not key:
+        log.info("MEME OS off: no key (set the %s environment variable)", cfg.memeos.api_key_env)
+        return None
+    gate = MemeosGate(cfg.memeos, MemeosClient(key, cfg.memeos.base_url))
+    balance = gate.start()
+    log.info("MEME OS X-Ray on, right after LarpCheck (up to %d a day)%s; %s credits left. When they run out the "
+             "other safety checks decide", cfg.memeos.max_xray_per_day,
+             f"; bundle clusters on calls while {cfg.memeos.bundle_min_credits:g}+ credits are left"
+             if cfg.memeos.bundle_on_calls else "", "?" if balance is None else f"{balance:g}")
+    return gate
 
 
 def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalFeed | None]:
     gmgn = build_gmgn(cfg)
     market, feed = build_market(cfg, with_feed, gmgn=gmgn)
-    safety = build_safety(cfg, gmgn=gmgn)
+    memeos = build_memeos(cfg)
+    safety = build_safety(cfg, gmgn=gmgn, memeos=memeos)
     if cfg.execution.mode == "live":
         if os.environ.get(LIVE_CONFIRM_ENV) != "yes":
             raise SystemExit(
@@ -271,20 +294,33 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         history = ScanHistory(cfg.learning, cfg.agent.scan_log_file)
         log.info("Track record on: buys are checked against what earlier coins in the scan log did (needs %d+ "
                  "finished rows per group)", cfg.learning.min_lane_samples)
+    kols = None
+    if cfg.kols.enabled and gmgn is not None:
+        from .data.kols import KolTracker
+
+        kols = KolTracker(cfg.kols, gmgn)
+        log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
+                 cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
+                 f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
         if url:
             from .caller import Caller, DiscordWebhook, Describer
+            from .data.larpcheck import LarpCheckGate
+            from .facts import FactGatherer
 
-            caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn))
+            find = getattr(safety, "find", None)
+            larp = find(LarpCheckGate) if find else (safety if isinstance(safety, LarpCheckGate) else None)
+            caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn),
+                            facts=FactGatherer(gmgn, kols, larp, memeos=memeos))
             log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
                      ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
         else:
             log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
                         cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, caller=caller, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, kols=kols, memeos=memeos, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 

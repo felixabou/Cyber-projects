@@ -51,7 +51,7 @@ nano .env
 ```
 Also set `MEMECOIN_UI_PASSWORD` (a long password for the dashboard login) and `DOMAIN`
 (your public IP with dashes, plus `.sslip.io`, e.g. IP 129.80.1.2 gives `129-80-1-2.sslip.io`; it's free and needs no purchase).
-Fill in `DISCORD_WEBHOOK_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `LARPCHECK_API_KEY` and `GMGN_API_KEY`.
+Fill in `DISCORD_WEBHOOK_URL`, `MEMEOS_API_KEY` (optional), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `LARPCHECK_API_KEY` and `GMGN_API_KEY`.
 To get the Discord webhook: in your server, open the channel's **Edit Channel -> Integrations -> Webhooks -> New Webhook**, then **Copy Webhook URL**. Anyone with that URL can post to the channel, so treat it like a password. Save with Ctrl+O, Enter, Ctrl+X.
 Type the keys in the server's editor yourself. Never paste them into chat and never commit `.env`.
 If GMGN ties your key to an IP, add the server's public IP in your GMGN API settings.

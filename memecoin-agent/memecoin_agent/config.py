@@ -268,6 +268,11 @@ class LarpCheckConfig:
     # blocks the buy, but no verdict is required, no check is started and no credit is spent.
     # "full" = same rules as tech tokens. "off" = LarpCheck isn't consulted for memes at all.
     memes: str = "lookup"
+    # LarpCheck credits used up (its premium plan, or the day's checks spent), or no API key: "allow" lets the other
+    # safety checks decide the coin (a bad verdict LarpCheck already has still blocks it); "reject" skips the buy.
+    on_no_credits: str = "allow"
+    # LarpCheck down, or a check it started never finishing: "allow" = the other safety checks decide; "reject" = no buy.
+    on_unavailable: str = "allow"
 
 
 @dataclass
@@ -675,6 +680,45 @@ class CallerConfig:
 
 
 @dataclass
+class MemeosConfig:
+    """MEME OS (memeos.world) developer API. Key: the MEMEOS_API_KEY environment variable or api_key_file.
+    X-Ray (5 credits) is one of the first safety checks, after LarpCheck; bundle clusters (35 credits) are read for
+    Discord calls. When X-Ray is out of credits or unreachable, the other safety checks decide."""
+
+    enabled: bool = True
+    api_key_env: str = "MEMEOS_API_KEY"
+    api_key_file: str | None = "~/.config/memeos/api_key"
+    base_url: str = "https://memeos.world"
+    xray: bool = True
+    # X-Ray caps new, thin coins at CAUTION (no red flag is not proof of safety), so CAUTION never blocks.
+    reject_verdicts: list[str] = field(default_factory=lambda: ["HIGH RISK", "SCAM", "RUG", "DANGER", "CRITICAL"])
+    min_score: float | None = None  # e.g. 40: also skip scores in X-Ray's red band (under 40)
+    reject_flags: list[str] = field(default_factory=list)  # X-Ray flag names that skip a coin, e.g. bundled_supply
+    max_xray_per_day: int = 100  # 500 credits
+    cache_minutes: float = 30.0
+    bundle_on_calls: bool = True
+    max_bundle_per_day: int = 10  # 350 credits
+    # Bundle reads only while at least this many credits are left, so a small balance (the free checks) goes to
+    # the buy checks rather than to the reports.
+    bundle_min_credits: float = 500
+
+
+@dataclass
+class KolConfig:
+    """Known traders (GMGN's KOL feed, needs a GMGN key): who bought each coin and how many already sold. Shown
+    in Discord calls and logged in the scan log (kol_bought, kol_sold) so the skip rule can be tested before use."""
+
+    enabled: bool = True
+    chains: list[str] = field(default_factory=lambda: ["sol", "bsc", "base"])  # GMGN chain names
+    poll_every_s: float = 60.0
+    max_age_hours: float = 24.0
+    # Skip a coin when at least skip_min_kols KOLs bought it and this share of them already sold (null = off:
+    # turn it on once `memecoin-agent scans` shows those coins doing worse).
+    skip_sold_share: float | None = None
+    skip_min_kols: int = 3
+
+
+@dataclass
 class UncheckedConfig:
     """Chains no honeypot or tax checker covers (Elysium). Coins there are found, called with an UNCHECKED
     warning and paper-bought at a small fixed size; never bought in live mode. Size limits are its own,
@@ -740,12 +784,18 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     caller: CallerConfig = field(default_factory=CallerConfig)
     unchecked: UncheckedConfig = field(default_factory=UncheckedConfig)
+    kols: KolConfig = field(default_factory=KolConfig)
+    memeos: MemeosConfig = field(default_factory=MemeosConfig)
 
     def validate(self) -> None:
         if any(m <= 0 for m in self.caller.follow_up_minutes):
             raise ValueError("caller.follow_up_minutes must all be > 0")
         if self.caller.recap_hour_utc is not None and not 0 <= self.caller.recap_hour_utc <= 23:
             raise ValueError("caller.recap_hour_utc must be 0-23 or null")
+        if self.memeos.max_xray_per_day < 0 or self.memeos.max_bundle_per_day < 0:
+            raise ValueError("memeos.max_xray_per_day and memeos.max_bundle_per_day must be >= 0")
+        if self.kols.skip_sold_share is not None and not 0 < self.kols.skip_sold_share <= 1:
+            raise ValueError("kols.skip_sold_share must be in (0, 1] or null")
         if self.unchecked.position_usd <= 0:
             raise ValueError("unchecked.position_usd must be > 0")
         if self.watch.interval_s <= 0:
@@ -801,6 +851,8 @@ class Config:
             raise ValueError("larpcheck.exit_sell_fraction must be in (0, 1]")
         if self.larpcheck.on_unchecked not in ("allow", "check", "reject"):
             raise ValueError("larpcheck.on_unchecked must be 'allow', 'check' or 'reject'")
+        if self.larpcheck.on_no_credits not in ("allow", "reject") or self.larpcheck.on_unavailable not in ("allow", "reject"):
+            raise ValueError("larpcheck.on_no_credits and larpcheck.on_unavailable must be 'allow' or 'reject'")
         if self.larpcheck.require_verdict and self.larpcheck.on_unchecked == "allow":
             raise ValueError("larpcheck.on_unchecked: allow contradicts require_verdict: true "
                              "(use 'check' or 'reject', or set require_verdict: false)")
@@ -859,6 +911,8 @@ _SECTIONS: dict[str, type] = {
     "watch": WatchConfig,
     "caller": CallerConfig,
     "unchecked": UncheckedConfig,
+    "kols": KolConfig,
+    "memeos": MemeosConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

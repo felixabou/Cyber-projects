@@ -50,6 +50,8 @@ class Agent:
         regime: object | None = None,
         history: object | None = None,
         caller: object | None = None,
+        kols: object | None = None,
+        memeos: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -90,6 +92,10 @@ class Agent:
         self.history = history
         # caller.Caller: every automatic buy posted to Discord as a call, then followed up.
         self.caller = caller
+        # data.kols.KolTracker: which known traders bought each coin and how many already sold.
+        self.kols = kols
+        # data.memeos.MemeosGate: MEME OS X-Ray, the last check before a buy (it costs credits).
+        self.memeos = memeos
         self._regime_state: str | None = None
         self._lowcap_first: dict[str, tuple[datetime, float]] = {}  # mint -> when it first qualified, and its price
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
@@ -134,6 +140,11 @@ class Agent:
                     self.analytics.update(now, self._fetch)
                 except Exception as exc:
                     log.warning("After-sale tracking failed: %s", exc)
+            if self.kols is not None:
+                try:
+                    self.kols.poll()
+                except Exception as exc:
+                    log.warning("KOL feed failed: %s", exc)
             scan_every = 1 if self.cfg.sniper.enabled else self.cfg.agent.scan_every_ticks
             if self.ticks % scan_every == 0:
                 self.scan_and_enter(now)
@@ -437,11 +448,11 @@ class Agent:
         return EntryEvaluation(snapshot=s, passed=not reasons, score=score, reasons=reasons, lane="unchecked")
 
     def _announce(self, snap: TokenSnapshot, now: datetime, lane: str, why: str | None, size: float, price: float,
-                  safety: Any = None, unchecked: bool = False) -> None:
+                  safety: Any = None, unchecked: bool = False, score: float | None = None) -> None:
         if self.caller is None:
             return
         try:
-            self.caller.call(snap, now, lane, why or "", size, price, safety, unchecked)
+            self.caller.call(snap, now, lane, why or "", size, price, safety, unchecked, score)
         except Exception as exc:  # a failed post must never undo or block the trade
             log.warning("Discord call for %s failed: %s", snap.symbol, exc)
 
@@ -707,6 +718,14 @@ class Agent:
                 outcomes[snap.mint] = blocked
                 log.info("Skip %s: %s", snap.symbol, blocked)
                 continue
+            if self.kols is not None and (blocked := self.kols.skip_reason(snap.chain, snap.mint)):
+                outcomes[snap.mint] = blocked
+                log.info("Skip %s: %s", snap.symbol, blocked)
+                continue
+            if snap.chain != "solana" and self.memeos is not None and (why := self.memeos.block_reason(snap.mint)):
+                outcomes[snap.mint] = why  # MEME OS first; Solana runs it inside self.safety, after LarpCheck
+                log.info("Skip %s: %s", snap.symbol, why)
+                continue
             if ev.lane == "unchecked":
                 if self.cfg.execution.mode == "live":
                     outcomes[snap.mint] = f"skipped: {snap.chain} has no safety check; paper only"
@@ -793,7 +812,8 @@ class Agent:
                 self.analytics.log_entry(snap, ev.lane, ev.score, size, fill.price_usd, now, verdicts.get(snap.mint),
                                          kind=pos.kind, holders=prof.holders if prof else None)
             outcomes[snap.mint] = "bought"
-            self._announce(snap, now, ev.lane, note, size, fill.price_usd, report, unchecked=ev.lane == "unchecked")
+            self._announce(snap, now, ev.lane, note, size, fill.price_usd, report, unchecked=ev.lane == "unchecked",
+                           score=ev.score)
             log.info("BUY %s $%.2f @ %.10g | %s liq $%.0f mcap $%.0f 1h %+.0f%% | %s",
                      snap.symbol, size, fill.price_usd, note or f"score {ev.score:.2f}", snap.liquidity_usd,
                      snap.market_cap_usd, snap.price_change_h1, snap.url)
@@ -822,6 +842,8 @@ class Agent:
         if snap.chain != "solana":
             if self.cfg.execution.mode == "live":
                 return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
+            if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
+                return why
             if self.chain_safety is None:
                 return f"unsafe: no honeypot check available for {snap.chain}"
             rep = self.chain_safety.check(snap.chain, snap.mint)
@@ -1085,7 +1107,12 @@ class Agent:
         self.last_scan_at = now
         if self.scanlog is not None:
             try:
-                self.scanlog.observe(now.timestamp(), evals, outcomes, self.kinds)
+                extras = {}
+                if self.kols is not None:
+                    for e in evals:
+                        if (k := self.kols.stats(e.snapshot.chain, e.snapshot.mint)) is not None:
+                            extras[e.snapshot.mint] = {"kol_bought": k.bought, "kol_sold": k.sold}
+                self.scanlog.observe(now.timestamp(), evals, outcomes, self.kinds, extras)
             except Exception as exc:
                 log.warning("Scan log failed: %s", exc)
         self.last_scan = [

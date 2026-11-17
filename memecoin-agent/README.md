@@ -648,6 +648,38 @@ Every automatic buy is posted to a Discord channel as a call, at the moment the 
 - a description when one is found: GMGN's token info first, then the project's own DexScreener profile;
 - links to DexScreener, GMGN and the project's website and socials.
 
+Each call also carries, where the data exists:
+
+- a score out of 10 and a label (LOW-CAP, LAUNCH, VOLATILE...);
+- the last 15 minutes' move and volume against the 15 minutes before (GeckoTerminal);
+- holders, top-10 share, dev, bundlers, snipers, insiders, fresh wallets and creator history (GMGN), holders and
+  organic score (Jupiter), and how much of the pool is locked or burned (RugCheck);
+- known traders (KOLs): how many bought, who and when, and how many already sold (GMGN's KOL feed);
+- LarpCheck's verdict with a link, only when someone already checked the coin (lookups spend no credits);
+- a Bubblemaps link (Solana, Ethereum, BSC, Base, Arbitrum, Polygon, Avalanche, Tron and a few more);
+- a short Best / Worst list.
+
+The KOL counts are also written to the scan log (`kol_bought`, `kol_sold`), and `memecoin-agent scans` compares coins
+most of whose KOL buyers already sold with the rest. Set `kols.skip_sold_share` (e.g. 0.75) only once that
+comparison shows those coins doing worse.
+
+### MEME OS
+
+Safety checks run in this order on every coin the agent would buy: LarpCheck, MEME OS X-Ray, then RugCheck,
+Jupiter and GMGN (and the honeypot round trip). When LarpCheck or MEME OS is out of credits, down, or never finishes
+a check, it passes the coin on and the original checks decide; those always run.
+
+With a MEME OS key (`MEMEOS_API_KEY`), each candidate gets an X-Ray report (5 credits). A verdict in
+`memeos.reject_verdicts` (HIGH RISK and worse) skips the coin; CAUTION does not, since X-Ray gives every new, thin
+coin CAUTION at most. Discord calls show the verdict, score, flags and authorities with a link to the report, and
+the share of supply held by wallets funded from the same source (bundle check, 35 credits), read only while
+`bundle_min_credits` (500) or more are left so a small balance such as the free checks goes to the buy checks.
+When the balance can't pay for another X-Ray, or MEME OS answers 402, X-Ray switches off for the day.
+
+When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
+safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks
+a coin.
+
 Follow-ups at 15 minutes, 1 hour and 4 hours show the move since the call, and a daily recap (00:00 UTC) shows
 the last 24 hours: how many calls, how many went up 50% or doubled, the median after an hour, and the best.
 

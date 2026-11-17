@@ -23,6 +23,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import CallerConfig
+from .facts import GMGN_CHAIN, FactGatherer, TokenFacts, bubblemaps_url, judge
 from .models import SafetyReport, TokenSnapshot
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,8 @@ log = logging.getLogger(__name__)
 GREEN, ORANGE, BLUE, GREY = 0x2ECC71, 0xE67E22, 0x3498DB, 0x95A5A6
 DESCRIPTION_KEYS = ("description", "intro", "introduction", "summary", "narrative", "desc")
 DEX_PROFILE_FEEDS = ("/token-profiles/latest/v1", "/token-boosts/latest/v1", "/token-boosts/top/v1")
-GMGN_CHAIN = {"solana": "sol", "ethereum": "eth", "bsc": "bsc", "base": "base", "arbitrum": "arb",
-              "robinhood": "robinhood", "monad": "monad", "tron": "tron", "hyperevm": "hyperevm"}
+LANE_LABEL = {"launch": "LAUNCH", "sniper": "SNIPE", "lowcap": "LOW-CAP", "momentum": "MOMENTUM",
+              "narrative": "NARRATIVE", "copy": "COPY", "longterm": "LONG-TERM", "unchecked": "UNCHECKED"}
 
 
 def _usd(v: float | None) -> str:
@@ -154,8 +155,8 @@ class Call:
 
 class Caller:
     def __init__(self, cfg: CallerConfig, webhook: DiscordWebhook, describer: Describer | None = None,
-                 state_path: str | Path | None = None) -> None:
-        self.cfg, self.webhook, self.describer = cfg, webhook, describer
+                 state_path: str | Path | None = None, facts: FactGatherer | None = None) -> None:
+        self.cfg, self.webhook, self.describer, self.facts = cfg, webhook, describer, facts
         self.state_path = Path(state_path or cfg.state_file)
         self.calls: list[Call] = []
         self.last_recap: str | None = None
@@ -177,13 +178,20 @@ class Caller:
 
     # -- the call ---------------------------------------------------------------------------------
     def report(self, snap: TokenSnapshot, now: datetime, lane: str, why: str, size_usd: float, price: float,
-               safety: SafetyReport | None, unchecked: bool, description: str | None, source: str) -> dict:
+               safety: SafetyReport | None, unchecked: bool, description: str | None, source: str,
+               facts: TokenFacts | None = None, score: float | None = None) -> dict:
+        f = facts or TokenFacts()
         age = snap.age_minutes(now)
         age_text = "?" if age is None else (f"{age:.0f}m" if age < 120 else f"{age / 60:.1f}h")
         ratio = snap.buy_sell_ratio_h1
         links = [f"[DexScreener]({snap.url})"] if snap.url else []
         if gmgn := GMGN_CHAIN.get(snap.chain):
             links.append(f"[GMGN](https://gmgn.ai/{gmgn}/token/{snap.mint})")
+        bubble = bubblemaps_url(snap.chain, snap.mint)
+        links.append(f"[Bubblemaps]({bubble})" if bubble else f"Bubblemaps: not available on {snap.chain}")
+        if f.larp:
+            links.append(f"[LarpCheck]({f.larp['url']})")
+        links.append(f"[MEME OS X-Ray](https://memeos.world/xray/{snap.mint})")
         links += [f"[link]({u})" for u in snap.links[:4]]
 
         if unchecked:
@@ -199,9 +207,54 @@ class Caller:
         body = []
         if unchecked:
             body.append(f"**WARNING: UNCHECKED CHAIN ({snap.chain.upper()}).** No safety check was run.")
-        body.append(_cut(description, 1500) if description else "_No description found._")
+        body.append(_cut(description, 1000) if description else "_No description found._")
         if description and source:
             body.append(f"_Description: {source}_")
+
+        risk = [x for x in (
+            f"Holders {f.holders:,.0f}" if f.holders is not None else None,
+            f"Top 10 {f.top10_pct:.0f}%" if f.top10_pct is not None else None,
+            f"Dev {f.dev_pct:.1f}%" if f.dev_pct is not None else None,
+            f"Bundlers {f.bundlers_pct:.0f}%" if f.bundlers_pct is not None else None,
+            f"Snipers {f.snipers:.0f}" if f.snipers is not None else None,
+            f"Insiders {f.insiders_pct:.0f}%" if f.insiders_pct is not None else None,
+            f"Fresh wallets {f.fresh_pct:.0f}%" if f.fresh_pct is not None else None,
+            f"LP locked {f.lp_locked_pct:.0f}%" if f.lp_locked_pct is not None else None,
+            f"Organic {f.organic_score:.0f}/100" if f.organic_score is not None else None,
+            f"Creator's past launches {f.creator_launches:.0f}" if f.creator_launches is not None else None,
+        ) if x]
+        momentum = None
+        if f.m15_pct is not None:
+            momentum = f"15m {_pct(f.m15_pct)} · vol {_usd(f.vol15)}"
+            if f.vol15_prev:
+                momentum += f" ({f.vol15 / f.vol15_prev:.1f}x prev 15m)"
+        kol = None
+        if f.kols is not None:
+            names = ", ".join(f"{n} {m:.0f}m ago" for n, m in f.kols.names[:4])
+            kol = f"{f.kols.bought} bought · {f.kols.sold} already sold" + (f" ({names})" if names else "")
+        elif f.kol_holders is not None:
+            kol = f"{f.kol_holders:.0f} known traders holding" + (
+                f", {f.smart_holders:.0f} smart-money wallets" if f.smart_holders is not None else "")
+        larp = None
+        if f.larp:
+            sc = f" {f.larp['score']:g}/100" if f.larp.get("score") is not None else ""
+            stamp = f", coin {f.larp['coin_stamp']}" if f.larp.get("coin_stamp") else ""
+            larp = f"[{f.larp['verdict']}{sc}{stamp}]({f.larp['url']})" + (f": {f.larp['summary']}" if f.larp.get("summary") else "")
+        memeos = []
+        if f.xray is not None:
+            x = f.xray
+            sc = f" {x.score:g}/100" if x.score is not None else ""
+            memeos.append(f"[X-Ray {x.verdict}{sc}]({x.url})")
+            if x.flags:
+                memeos.append("flags: " + ", ".join(fl.replace("_", " ") for fl in x.flags[:6]))
+            auth = [f"{k} {v}" for k, v in (("mint", x.mint_authority), ("freeze", x.freeze_authority)) if v]
+            if auth:
+                memeos.append(", ".join(auth))
+        if f.bundle is not None and f.bundle.linked_supply_pct is not None:
+            b = f.bundle
+            memeos.append(f"linked wallets hold {b.linked_supply_pct:.0f}% ({b.clusters} funder cluster"
+                          f"{'s' if b.clusters != 1 else ''}" + (f", biggest {b.biggest_wallets} wallets" if b.biggest_wallets else "") + ")")
+        best, worst = judge(snap, f, age, unchecked)
 
         fields = [
             {"name": "Contract", "value": f"`{snap.mint}`", "inline": False},
@@ -213,25 +266,46 @@ class Caller:
             {"name": "Txns 1h", "value": f"{snap.buys_h1} buys / {snap.sells_h1} sells ({ratio:.2f}x)", "inline": True},
             {"name": "Price change", "value": f"5m {_pct(snap.price_change_m5)} | 1h {_pct(snap.price_change_h1)} | "
                                               f"6h {_pct(snap.price_change_h6)}", "inline": False},
+            *([{"name": "Momentum", "value": momentum, "inline": False}] if momentum else []),
+            *([{"name": "Holders & risk", "value": _cut(" · ".join(risk), 1024), "inline": False}] if risk else []),
+            *([{"name": "Known traders (KOLs)", "value": _cut(kol, 1024), "inline": False}] if kol else []),
             {"name": "Safety", "value": _cut(checks, 1024), "inline": False},
+            *([{"name": "LarpCheck", "value": _cut(larp, 1024), "inline": False}] if larp else []),
+            *([{"name": "MEME OS", "value": _cut(" · ".join(memeos), 1024), "inline": False}] if memeos else []),
+            {"name": "Best", "value": _cut("\n".join(f"• {b}" for b in best) or "• nothing stands out", 1024), "inline": True},
+            {"name": "Worst", "value": _cut("\n".join(f"• {w}" for w in worst) or "• nothing major found", 1024), "inline": True},
             {"name": "Why it was called", "value": _cut(why or f"{lane} lane", 1024), "inline": False},
             {"name": "Paper buy", "value": f"${size_usd:.2f} at ${price:.10g}", "inline": True},
         ]
         if links:
             fields.append({"name": "Links", "value": _cut(" | ".join(links), 1024), "inline": False})
-        title = f"{'UNCHECKED CALL' if unchecked else 'CALL'}: {snap.symbol}" + (f" ({snap.name})" if snap.name else "")
-        return {"title": _cut(title, 256), "url": snap.url or None, "description": _cut("\n\n".join(body), 4096),
-                "color": ORANGE if unchecked else GREEN, "fields": fields,
-                "footer": {"text": "Paper trade. Not financial advice."}, "timestamp": now.isoformat()}
+        tags = [LANE_LABEL.get(lane, lane.upper())]
+        if not unchecked and ((age is not None and age < 30) or snap.liquidity_usd < 15_000):
+            tags.append("VOLATILE")
+        head = "UNCHECKED CALL" if unchecked else "CALL"
+        title = " · ".join([head, *(t for t in tags if t != "UNCHECKED"), f"${snap.symbol}"])
+        if score is not None:
+            title += f" · {max(0, min(10, round(score * 10)))}/10"
+        if snap.name:
+            body.insert(0, f"**{snap.name}** · {age_text} old")
+        embed = {"title": _cut(title, 256), "url": snap.url or None, "description": _cut("\n\n".join(body), 2000),
+                 "color": ORANGE if unchecked else GREEN, "fields": fields,
+                 "footer": {"text": "Paper trade. Not financial advice."}, "timestamp": now.isoformat()}
+        # Discord refuses an embed over 6,000 characters in all: the description gives way first.
+        size = len(embed["title"]) + len(embed["footer"]["text"]) + sum(len(x["name"]) + len(x["value"]) for x in fields)
+        if size + len(embed["description"]) > 5900:
+            embed["description"] = _cut(embed["description"], max(100, 5900 - size))
+        return embed
 
     def call(self, snap: TokenSnapshot, now: datetime, lane: str, why: str, size_usd: float, price: float,
-             safety: SafetyReport | None = None, unchecked: bool = False) -> bool:
+             safety: SafetyReport | None = None, unchecked: bool = False, score: float | None = None) -> bool:
         if any(c.mint == snap.mint and c.chain == snap.chain for c in self.calls):
             return False  # already called and still being followed
         description, source = (None, "")
         if self.cfg.describe and self.describer is not None:
             description, source = self.describer.describe(snap)
-        embed = self.report(snap, now, lane, why, size_usd, price, safety, unchecked, description, source)
+        facts = self.facts.gather(snap) if self.facts is not None else None
+        embed = self.report(snap, now, lane, why, size_usd, price, safety, unchecked, description, source, facts, score)
         ok = self.webhook.post(embeds=[embed])
         self.calls.append(Call(snap.mint, snap.symbol, snap.chain, now.isoformat(), price, snap.market_cap_usd,
                                lane, unchecked))
