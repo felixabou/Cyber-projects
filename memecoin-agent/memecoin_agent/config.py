@@ -800,8 +800,10 @@ class Config:
             raise ValueError("memeos.max_xray_per_day and memeos.max_bundle_per_day must be >= 0")
         if self.kols.skip_sold_share is not None and not 0 < self.kols.skip_sold_share <= 1:
             raise ValueError("kols.skip_sold_share must be in (0, 1] or null")
-        if self.unchecked.position_usd <= 0:
-            raise ValueError("unchecked.position_usd must be > 0")
+        from .models import UNCHECKED_MAX_USD
+
+        if not 0 < self.unchecked.position_usd <= UNCHECKED_MAX_USD:
+            raise ValueError(f"unchecked.position_usd must be > 0 and at most ${UNCHECKED_MAX_USD:g} (a hard limit)")
         if self.watch.interval_s <= 0:
             raise ValueError("watch.interval_s must be > 0")
         for t in self.watch.approvals:

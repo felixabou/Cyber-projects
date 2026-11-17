@@ -14,7 +14,7 @@ from .config import Config
 from .data import MarketData, SafetyChecker
 from .data.dexscreener import canonical_chain
 from .execution import Executor
-from .models import TokenSnapshot, TradeRecord, utcnow
+from .models import ALWAYS_UNCHECKED_CHAINS, UNCHECKED_MAX_USD, TokenSnapshot, TradeRecord, is_unchecked, utcnow
 from .portfolio import Portfolio
 from .risk import RiskManager
 from .strategy import EntryEvaluation, ExitDecision, evaluate_entry, evaluate_exit, launch_reasons, lowcap_reasons
@@ -356,6 +356,8 @@ class Agent:
         unchecked = {canonical_chain(c) for c in self.cfg.unchecked.chains} if self.cfg.unchecked.enabled else set()
         for s in snaps.values():
             self._remember_price(s, now)
+            if s.chain in unchecked or s.chain in ALWAYS_UNCHECKED_CHAINS:
+                s.unchecked = True  # paper only, capped, labelled: whatever lane or config comes next
             if s.chain in unchecked:
                 evals.append(self._unchecked_lane(s, now))
                 continue
@@ -455,6 +457,18 @@ class Agent:
             reasons.append(f"older than {c.max_age_hours:g}h")
         score = evaluate_entry(s, self.cfg.filters, now).score
         return EntryEvaluation(snapshot=s, passed=not reasons, score=score, reasons=reasons, lane="unchecked")
+
+    def _unchecked_guard(self, snap: TokenSnapshot, lane: str) -> str | None:
+        """Why an unchecked coin may not be bought here (None: it may). Paper only, and only through the unchecked
+        lane, so it is never shown as a safety-approved trade. The live executors refuse it again on their own."""
+        if not (is_unchecked(snap) or lane == "unchecked"):
+            return None
+        if self.cfg.execution.mode == "live" or getattr(self.executor, "live", True):
+            log.error("Refused UNCHECKED %s (%s): unchecked coins never reach a live executor", snap.symbol, snap.chain)
+            return f"refused: {snap.chain} is UNCHECKED (no safety check); unchecked coins are paper-only"
+        if lane != "unchecked":
+            return f"unsafe: {snap.chain} is UNCHECKED (no safety check); only the unchecked lane may paper-buy it"
+        return None
 
     def _intended_size(self, ev: EntryEvaluation) -> float | None:
         """What the candidate would have been bought for (the lane's cap, before conviction scaling)."""
@@ -814,7 +828,8 @@ class Agent:
                                 "skipped: insufficient balance for a minimum-size position", size=0.0)
                 break
             if ev.lane == "unchecked":
-                size = round(min(self.cfg.unchecked.position_usd, self.executor.available_usd(self.pf)), 2)
+                size = round(min(self.cfg.unchecked.position_usd, UNCHECKED_MAX_USD,
+                                 self.executor.available_usd(self.pf)), 2)
             elif ev.lane == "sniper":
                 size = min(size, self.cfg.sniper.max_position_usd)
             elif ev.lane == "lowcap":
@@ -835,6 +850,10 @@ class Agent:
                     and (why := self.route_check.check(snap.mint, size)):
                 self._block(outcomes, ev, "safety", "honeypot_route", "unsafe: " + why, size=size)
                 log.info("Skip %s: %s", snap.symbol, why)
+                continue
+            if why := self._unchecked_guard(snap, ev.lane):  # the last word before any executor sees the coin
+                self._block(outcomes, ev, "execution" if why.startswith("refused") else "safety", "unchecked_guard",
+                            why, size=size)
                 continue
             preflight = getattr(self.executor, "preflight_pregraduation", self.executor.preflight) \
                 if ev.lane == "sniper" else self.executor.preflight
@@ -919,6 +938,8 @@ class Agent:
         """The checks every non-momentum buy gets, by chain. None: buy it."""
         if lane in ("copy", "longterm") and (knife := self.falling_knife(snap)):
             return f"waiting: {knife}"
+        if lane != "manual" and snap.chain in ALWAYS_UNCHECKED_CHAINS | {canonical_chain(c) for c in self.cfg.unchecked.chains}:
+            return f"unsafe: {snap.chain} is UNCHECKED (no safety check); only the unchecked lane may paper-buy it"
         if snap.chain != "solana":
             if self.cfg.execution.mode == "live":
                 return f"skipped: live trading is Solana-only ({snap.chain} is paper-only)"
@@ -961,6 +982,15 @@ class Agent:
 
     def _open(self, snap: TokenSnapshot, size: float, now: datetime, lane: str, reason: str,
               managed: bool = True) -> Any:
+        unchecked = {canonical_chain(c) for c in self.cfg.unchecked.chains}
+        if snap.chain in unchecked or snap.chain in ALWAYS_UNCHECKED_CHAINS:
+            snap.unchecked = True
+        if is_unchecked(snap):
+            if self.cfg.execution.mode == "live" or getattr(self.executor, "live", True):
+                from .execution import UncheckedLiveError
+
+                raise UncheckedLiveError(f"refused: {snap.chain} is UNCHECKED (no safety check); paper-only")
+            reason = f"UNCHECKED: no safety check exists for {snap.chain} | {reason}"
         fill = self.executor.buy(snap, size)
         pos = self.pf.open(snap, fill, now, 0.0, reason=reason, lane=lane, managed=managed)
         pos.kind = self.kinds.get(snap.mint, "")

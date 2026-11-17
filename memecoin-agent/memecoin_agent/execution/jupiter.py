@@ -22,7 +22,7 @@ from ..data import MarketData
 from ..data.dexscreener import WSOL_MINT
 from ..models import Fill, Position, TokenSnapshot
 from ..portfolio import Portfolio
-from . import ExecutionError
+from . import ExecutionError, refuse_unchecked_live
 from .solana_rpc import SolanaRpc
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ def load_keypair() -> Any:
 
 
 class JupiterExecutor:
+    live = True
     def __init__(
         self,
         cfg: ExecutionConfig,
@@ -144,6 +145,10 @@ class JupiterExecutor:
     def preflight(self, snap: TokenSnapshot, usd: float) -> str | None:
         """Honeypot / thin-route guard: quote the buy, then quote selling it straight back."""
         try:
+            refuse_unchecked_live(snap)
+        except ExecutionError as exc:
+            return str(exc)
+        try:
             lamports = int(usd / self.market.sol_price_usd() * LAMPORTS_PER_SOL)
             buy_q = self.quote(WSOL_MINT, snap.mint, lamports)
             sell_q = self.quote(snap.mint, WSOL_MINT, int(buy_q["outAmount"]))
@@ -155,6 +160,7 @@ class JupiterExecutor:
         return None
 
     def buy(self, snap: TokenSnapshot, usd: float) -> Fill:
+        refuse_unchecked_live(snap)
         lamports = int(usd / self.market.sol_price_usd() * LAMPORTS_PER_SOL)
         if lamports > self._spendable_lamports():
             raise ExecutionError(f"Insufficient SOL for ${usd:.2f} buy (keeping {self.cfg.min_sol_reserve} SOL reserve)")

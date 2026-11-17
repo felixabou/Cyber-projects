@@ -413,7 +413,7 @@ caller:
 unchecked:
   enabled: true
   chains: [elysium]
-  position_usd: 10
+  position_usd: 10              # hard ceiling $25: the config can't raise it, and live mode never buys these
   quote_symbols: [HYPE, WHYPE, USDC, USDT, USDT0]
   discover_every_s: 120
   min_liquidity_usd: 3000

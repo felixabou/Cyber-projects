@@ -579,7 +579,7 @@ function renderOverview(v) {
   replace($("#recent-trades"), tradesTable(v.trades.slice(0, 8), false));
 }
 
-const LANE_LABELS = { copy: "Copy", lowcap: "Low cap", longterm: "Long-term", manual: "Manual", launch: "Launch" };
+const LANE_LABELS = { copy: "Copy", lowcap: "Low cap", longterm: "Long-term", manual: "Manual", launch: "Launch", unchecked: "UNCHECKED" };
 const CHAIN_LABELS = {
   solana: "SOL", ethereum: "ETH", bsc: "BSC", base: "Base", arbitrum: "ARB", polygon: "Polygon",
   optimism: "OP", avalanche: "AVAX", fantom: "FTM", linea: "Linea", scroll: "Scroll", zksync: "zkSync",
@@ -590,7 +590,8 @@ const CHAIN_LABELS = {
 function positionPills(p) {
   const pills = [];
   if (p.chain && p.chain !== "solana") pills.push(h("span", { class: "pill pill-chain", text: CHAIN_LABELS[p.chain] || p.chain }));
-  if (LANE_LABELS[p.lane]) pills.push(h("span", { class: "pill", text: LANE_LABELS[p.lane] }));
+  if (p.lane === "unchecked") pills.push(h("span", { class: "pill pill-unchecked", title: "No safety check exists for this chain: paper only, capped size", text: "UNCHECKED" }));
+  else if (LANE_LABELS[p.lane]) pills.push(h("span", { class: "pill", text: LANE_LABELS[p.lane] }));
   if (p.dust) pills.push(h("span", { class: "pill pill-dust", title: "Kept after a LarpCheck exit; left alone until you close it", text: "dust" }));
   if (p.stage === "runner") pills.push(h("span", { class: "pill pill-runner", title: "Initials and half the profit are out; the rest runs", text: "runner" }));
   if (p.stage === "dip watch") pills.push(h("span", { class: "pill pill-dip", title: p.review_note || "", text: "dip watch" }));

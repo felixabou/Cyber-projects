@@ -24,7 +24,7 @@ import httpx
 
 from .config import CallerConfig
 from .facts import GMGN_CHAIN, FactGatherer, TokenFacts, bubblemaps_url, judge
-from .models import SafetyReport, TokenSnapshot
+from .models import SafetyReport, TokenSnapshot, is_unchecked
 
 log = logging.getLogger(__name__)
 
@@ -302,6 +302,7 @@ class Caller:
              safety: SafetyReport | None = None, unchecked: bool = False, score: float | None = None) -> bool:
         if any(c.mint == snap.mint and c.chain == snap.chain for c in self.calls):
             return False  # already called and still being followed
+        unchecked = unchecked or lane == "unchecked" or is_unchecked(snap)  # never shown as safety-approved
         description, source = (None, "")
         if self.cfg.describe and self.describer is not None:
             description, source = self.describer.describe(snap)

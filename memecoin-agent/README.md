@@ -734,6 +734,20 @@ search, qualify on their own size and activity limits (`unchecked:` in the confi
 than the other lanes allow), are paper-bought at a fixed $10, and are called as **UNCHECKED** with a warning that
 they may be impossible to sell. They are never bought in live mode.
 
+That guarantee doesn't rest on one check or on the config:
+
+- **Explicit marker.** Coins on an unchecked chain carry `unchecked = True` on their snapshot, and their positions the
+  `unchecked` lane. Elysium is also listed in the code (`ALWAYS_UNCHECKED_CHAINS`), so removing it from
+  `unchecked.chains` or disabling the lane doesn't make its coins look checked: they are refused instead.
+- **The agent** refuses an unchecked coin right before any executor sees it: in live mode, on any executor that
+  reports itself live, or through any lane other than the unchecked lane (so it can't appear as a safety-approved
+  trade). The copy and long-term lanes refuse unchecked chains too.
+- **Every live executor** (Jupiter, PumpPortal) refuses to buy an unchecked coin, or anything off Solana, on its own,
+  whatever the caller or the config says. Sells are never blocked, so an exit always works.
+- **Paper buys are capped**: `unchecked.position_usd` (default $10) can't be set above $25, and the paper executor
+  refuses anything larger. Trades are labelled UNCHECKED in the trade log, the dashboard and Discord, and reported as
+  their own lane in `memecoin-agent report`.
+
 ## Run it 24/7 in the cloud
 
 To keep paper trading while your computer is off, run the agent on a server. The

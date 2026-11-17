@@ -195,7 +195,7 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
             log.warning("PumpPortal pre-graduation execution enabled; entries remain gated by agent checks")
         log.warning("LIVE TRADING ENABLED for wallet %s", keypair.pubkey())
     else:
-        executor = PaperExecutor(cfg.execution)
+        executor = PaperExecutor(cfg.execution, unchecked_cap_usd=cfg.unchecked.position_usd)
     pf = Portfolio.load(cfg.agent.state_file, cfg.risk.starting_balance_usd)
     from .data.larpcheck import CompositeSafety, LarpCheckGate
 
