@@ -969,7 +969,7 @@ def load_config(path: str | Path | None) -> Config:
     if path is None:
         cfg = Config()
     else:
-        raw = yaml.safe_load(Path(path).read_text()) or {}
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8-sig")) or {}
         if not isinstance(raw, dict):
             raise ValueError("Config file must contain a mapping at the top level")
         unknown = set(raw) - set(_SECTIONS)

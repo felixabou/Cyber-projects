@@ -67,7 +67,7 @@ def load_token(cfg: TelegramConfig) -> str | None:
     if cfg.token_file:
         path = Path(cfg.token_file).expanduser()
         if path.exists():
-            return path.read_text().strip() or None
+            return path.read_text(encoding="utf-8-sig").strip() or None
     return None
 
 

@@ -140,7 +140,7 @@ class PumpPortalFeed:
             data = [e.__dict__ for e in self._events.values()]
         self.buffer_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.buffer_file.with_suffix(f".{os.getpid()}.tmp")  # run + record may share the file
-        tmp.write_text(json.dumps(data))
+        tmp.write_text(json.dumps(data), encoding="utf-8")
         tmp.replace(self.buffer_file)
         self._last_save = self.clock()
 
@@ -148,7 +148,7 @@ class PumpPortalFeed:
         if self.buffer_file is None or not self.buffer_file.exists():
             return
         try:
-            items = json.loads(self.buffer_file.read_text())
+            items = json.loads(self.buffer_file.read_text(encoding="utf-8"))
         except ValueError:
             log.warning("Ignoring unreadable feed buffer %s", self.buffer_file)
             return

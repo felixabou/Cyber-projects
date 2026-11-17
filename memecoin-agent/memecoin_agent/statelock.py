@@ -35,7 +35,7 @@ class StateLock:
         if fcntl is None and msvcrt is None:
             raise StateLocked("No file-locking backend is available; refusing to run two traders on one state file")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fh = self.path.open("a+")
+        fh = self.path.open("a+", encoding="utf-8")
         backend = "unix" if fcntl is not None else "windows"
         try:
             if backend == "unix":

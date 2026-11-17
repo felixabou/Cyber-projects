@@ -45,7 +45,7 @@ def load_keypair() -> Any:
             return Keypair.from_bytes(bytes(json.loads(secret)))
         return Keypair.from_base58_string(secret)
     if path:
-        return Keypair.from_bytes(bytes(json.loads(Path(path).expanduser().read_text())))
+        return Keypair.from_bytes(bytes(json.loads(Path(path).expanduser().read_text(encoding="utf-8-sig"))))
     raise ExecutionError("Set SOLANA_PRIVATE_KEY or SOLANA_KEYPAIR_PATH for live trading")
 
 

@@ -50,7 +50,7 @@ def load_api_key(cfg: LarpCheckConfig) -> str | None:
     if cfg.api_key_file:
         path = Path(cfg.api_key_file).expanduser()
         if path.exists():
-            return path.read_text().strip() or None
+            return path.read_text(encoding="utf-8-sig").strip() or None
     return None
 
 
