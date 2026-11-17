@@ -34,7 +34,7 @@ def test_buy_is_logged_and_sold_coin_is_watched_then_reported(tmp_path):
     agent = Agent(cfg, market, FakeSafety(), PaperExecutor(cfg.execution), Portfolio(cash_usd=1000),
                   clock=clock, persist=False, analytics=an)
     agent.scan_and_enter(NOW)
-    entry = list(csv.DictReader(an.entries_csv.open()))[0]
+    entry = list(csv.DictReader(an.entries_csv.open(encoding="utf-8")))[0]
     assert entry["mint"] == "GOOD" and entry["lane"] == "momentum" and float(entry["liquidity_usd"]) == 80_000
     price = market.snaps["GOOD"].price_usd
     market.snaps["GOOD"] = make_snap(mint="GOOD", price_usd=price * 0.45)  # past the 50% hard stop
@@ -45,7 +45,7 @@ def test_buy_is_logged_and_sold_coin_is_watched_then_reported(tmp_path):
     market.snaps["GOOD"] = make_snap(mint="GOOD", price_usd=price * 1.5)  # it runs after the sale
     an.update(clock.t + timedelta(minutes=5), agent._fetch)
     an.update(clock.t + timedelta(minutes=70), agent._fetch)  # window over
-    after = list(csv.DictReader(an.after_csv.open()))[0]
+    after = list(csv.DictReader(an.after_csv.open(encoding="utf-8")))[0]
     assert after["exit_reason"].startswith("stop loss") and float(after["high_pct"]) > 100
     assert not an.watches and not Analytics(tmp_path).watches  # persisted, nothing left to watch
     trips = round_trips(cfg.agent.trades_csv, an.entries_csv, an.after_csv)

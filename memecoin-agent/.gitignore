@@ -10,3 +10,9 @@ __pycache__/
 .venv/
 /exports/
 /data/
+
+# test output
+.coverage
+coverage.xml
+test-results.xml
+offline-results.xml

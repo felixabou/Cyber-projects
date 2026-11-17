@@ -1,0 +1,99 @@
+# Tests for memecoin-agent on every pull request and every push to main.
+# No secrets, API keys, wallets, RPC endpoints or webhooks are used: every external service is mocked in the tests,
+# and the offline job blocks all network access except the local machine.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: memecoin-agent
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    env:
+      PYTHONUTF8: "0"  # keep each OS's own default encoding (cp1252 on Windows), so unencoded file opens show up
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: memecoin-agent/pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" pytest-cov
+      - name: Compile and import check
+        run: |
+          python -m compileall -q memecoin_agent tests
+          python -c "import memecoin_agent.cli, memecoin_agent.agent, memecoin_agent.exitval, memecoin_agent.telemetry, memecoin_agent.caller"
+      - name: Tests (any file opened without an encoding fails the build)
+        run: >
+          python -X warn_default_encoding -m pytest -q -p no:cacheprovider -W error::EncodingWarning
+          --junitxml=test-results.xml --cov=memecoin_agent --cov-report=xml --cov-report=term
+      - name: Upload test results and coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            memecoin-agent/test-results.xml
+            memecoin-agent/coverage.xml
+          if-no-files-found: ignore
+
+  offline:
+    name: offline deterministic tests (no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: memecoin-agent/pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" pytest-socket
+      - name: Tests with every outbound connection blocked (the dashboard and feed tests use the local machine only)
+        run: python -m pytest -q -p no:cacheprovider --allow-hosts=127.0.0.1,localhost,::1 --junitxml=offline-results.xml
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-results
+          path: memecoin-agent/offline-results.xml
+          if-no-files-found: ignore
+
+  dashboard:
+    name: dashboard script syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check app.js parses
+        run: node --check memecoin_agent/ui/static/app.js

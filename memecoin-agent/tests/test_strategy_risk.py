@@ -104,7 +104,7 @@ def test_state_roundtrip(tmp_path, snap):
     loaded = Portfolio.load(tmp_path / "s.json", 0)
     assert loaded.cash_usd == 900
     assert loaded.positions[snap.mint].opened_at == NOW
-    assert "buy" in (tmp_path / "t.csv").read_text()
+    assert "buy" in (tmp_path / "t.csv").read_text(encoding="utf-8")
 
 
 def test_risk_limits(snap):
@@ -148,16 +148,16 @@ def test_paper_fills_cost_money(snap):
 # -- config -------------------------------------------------------------------------
 def test_config_yaml(tmp_path):
     p = tmp_path / "c.yaml"
-    p.write_text("risk:\n  max_open_positions: 2\nexits:\n  take_profit_levels:\n    - {at_pct: 30, sell_fraction: 1.0}\n")
+    p.write_text("risk:\n  max_open_positions: 2\nexits:\n  take_profit_levels:\n    - {at_pct: 30, sell_fraction: 1.0}\n", encoding="utf-8")
     cfg = load_config(p)
     assert cfg.risk.max_open_positions == 2
     assert cfg.exits.take_profit_levels[0].at_pct == 30
     assert cfg.filters.min_liquidity_usd == FilterConfig().min_liquidity_usd
 
-    p.write_text("risk:\n  max_open_postions: 2\n")
+    p.write_text("risk:\n  max_open_postions: 2\n", encoding="utf-8")
     with pytest.raises(ValueError, match="max_open_postions"):
         load_config(p)
-    p.write_text("execution:\n  mode: yolo\n")
+    p.write_text("execution:\n  mode: yolo\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mode"):
         load_config(p)
 

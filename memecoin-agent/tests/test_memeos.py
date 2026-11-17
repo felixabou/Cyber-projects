@@ -93,7 +93,7 @@ def test_key_from_environment_or_file(monkeypatch, tmp_path):
     cfg = MemeosConfig(api_key_file=str(tmp_path / "key"))
     monkeypatch.delenv("MEMEOS_API_KEY", raising=False)
     assert load_api_key(cfg) is None
-    (tmp_path / "key").write_text("sk_memeos_file\n")
+    (tmp_path / "key").write_text("sk_memeos_file\n", encoding="utf-8")
     assert load_api_key(cfg) == "sk_memeos_file"
     monkeypatch.setenv("MEMEOS_API_KEY", "sk_memeos_env")
     assert load_api_key(cfg) == "sk_memeos_env"

@@ -53,7 +53,7 @@ def test_slices_of_the_one_journal(tmp_path):
                    trade(NOW - timedelta(hours=20), symbol="DAY"),
                    trade(NOW - timedelta(hours=5), symbol="FIVE"),
                    trade(NOW - timedelta(minutes=30), "sell", symbol="NEW", pnl=4.5)])
-    with path.open("a") as fh:
+    with path.open("a", encoding="utf-8") as fh:
         fh.write("2026-10-28T14:59:00+00:00,buy,PARTIAL")  # a row the agent is still writing
     session_start = NOW - timedelta(hours=6)
     get = lambda which: select(path, which, NOW, session_start)  # noqa: E731
@@ -73,7 +73,7 @@ def test_slices_of_the_one_journal(tmp_path):
 
 def test_old_config_files_with_an_export_section_still_load(tmp_path):
     p = tmp_path / "config.yaml"
-    p.write_text("export:\n  enabled: true\n  dir: exports\n  every_minutes: 60\ntelegram:\n  send_exports: true\n")
+    p.write_text("export:\n  enabled: true\n  dir: exports\n  every_minutes: 60\ntelegram:\n  send_exports: true\n", encoding="utf-8")
     assert load_config(p).export.dir == "exports"
 
 

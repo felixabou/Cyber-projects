@@ -133,7 +133,7 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
     no_key = cli.build_safety(cfg)  # no key, strict: every buy refused, loudly
     assert not no_key.check("ANY").ok and no_key.check("ANY").category == "larpcheck_no_key"
     cfg.larpcheck.paper_policy = "fallback"
-    (tmp_path / "key").write_text("lc_file\n")
+    (tmp_path / "key").write_text("lc_file\n", encoding="utf-8")
     assert load_api_key(cfg.larpcheck) == "lc_file"
     monkeypatch.setenv("LARPCHECK_API_KEY", "lc_env")
     assert load_api_key(cfg.larpcheck) == "lc_env"

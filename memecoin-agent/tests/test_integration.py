@@ -26,7 +26,7 @@ feeds:
   buffer_file: null
 """
     path = tmp_path / "config.yaml"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 

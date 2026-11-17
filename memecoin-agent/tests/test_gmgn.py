@@ -241,7 +241,7 @@ def test_key_loading_and_wiring(monkeypatch, tmp_path):
     cfg.gmgn.api_key_file = str(tmp_path / ".env")
     monkeypatch.delenv("GMGN_API_KEY", raising=False)
     assert load_api_key(cfg.gmgn) is None and cli.build_gmgn(cfg) is None
-    (tmp_path / ".env").write_text("GMGN_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\\nabc\\n\nGMGN_API_KEY=gm_file\n")
+    (tmp_path / ".env").write_text("GMGN_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\\nabc\\n\nGMGN_API_KEY=gm_file\n", encoding="utf-8")
     assert load_api_key(cfg.gmgn) == "gm_file"  # the file gmgn-cli writes; the private key is ignored
     monkeypatch.setenv("GMGN_API_KEY", "gm_env")
     assert load_api_key(cfg.gmgn) == "gm_env"

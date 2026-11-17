@@ -1,5 +1,7 @@
 # memecoin-agent
 
+[![CI](https://github.com/felixabou/Cyber-projects/actions/workflows/ci.yml/badge.svg)](https://github.com/felixabou/Cyber-projects/actions/workflows/ci.yml)
+
 An automated trading agent for memecoins. Its main lane finds new Solana tokens on
 DexScreener, screens out obvious rugs, enters tokens with real liquidity and steady buy
 pressure, takes its initial stake out early and lets the rest run. Separate lanes handle
@@ -99,6 +101,21 @@ launch-feed buffer (`state/feed.json`) and the equity chart (`state/equity.csv`)
 The `demo` market is synthetic and favourable by construction. It checks that
 the plumbing and risk rules work. Its PnL tells you **nothing** about real
 performance.
+
+## Tests
+
+```
+pip install -e ".[dev]"
+python -m pytest -q                                                           # the whole suite, offline
+python -X warn_default_encoding -m pytest -q -W error::EncodingWarning        # also fail on any file opened without an encoding
+pip install pytest-socket && python -m pytest -q --allow-hosts=127.0.0.1,localhost,::1   # prove no test touches the network
+```
+
+No test needs an API key, a wallet, an RPC endpoint or a Discord webhook: every outside service is mocked. GitHub
+Actions (`.github/workflows/ci.yml`) runs the suite on every pull request and every push to main, on Linux and
+Windows with Python 3.10 and 3.12 (Windows keeps its cp1252 default, so a file opened without an encoding fails the
+build), plus an offline job with all outbound connections blocked and a syntax check of the dashboard script. Test
+results and coverage are uploaded as artifacts. No lint or type checker is configured yet.
 
 ## GMGN: discovery and safety
 
