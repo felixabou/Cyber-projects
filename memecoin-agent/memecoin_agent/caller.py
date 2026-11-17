@@ -191,6 +191,7 @@ class Caller:
         links.append(f"[Bubblemaps]({bubble})" if bubble else f"Bubblemaps: not available on {snap.chain}")
         if f.larp:
             links.append(f"[LarpCheck]({f.larp['url']})")
+        links.append(f"[MEME OS X-Ray](https://memeos.world/xray/{snap.mint})")
         links += [f"[link]({u})" for u in snap.links[:4]]
 
         if unchecked:
@@ -239,6 +240,20 @@ class Caller:
             sc = f" {f.larp['score']:g}/100" if f.larp.get("score") is not None else ""
             stamp = f", coin {f.larp['coin_stamp']}" if f.larp.get("coin_stamp") else ""
             larp = f"[{f.larp['verdict']}{sc}{stamp}]({f.larp['url']})" + (f": {f.larp['summary']}" if f.larp.get("summary") else "")
+        memeos = []
+        if f.xray is not None:
+            x = f.xray
+            sc = f" {x.score:g}/100" if x.score is not None else ""
+            memeos.append(f"[X-Ray {x.verdict}{sc}]({x.url})")
+            if x.flags:
+                memeos.append("flags: " + ", ".join(fl.replace("_", " ") for fl in x.flags[:6]))
+            auth = [f"{k} {v}" for k, v in (("mint", x.mint_authority), ("freeze", x.freeze_authority)) if v]
+            if auth:
+                memeos.append(", ".join(auth))
+        if f.bundle is not None and f.bundle.linked_supply_pct is not None:
+            b = f.bundle
+            memeos.append(f"linked wallets hold {b.linked_supply_pct:.0f}% ({b.clusters} funder cluster"
+                          f"{'s' if b.clusters != 1 else ''}" + (f", biggest {b.biggest_wallets} wallets" if b.biggest_wallets else "") + ")")
         best, worst = judge(snap, f, age, unchecked)
 
         fields = [
@@ -256,6 +271,7 @@ class Caller:
             *([{"name": "Known traders (KOLs)", "value": _cut(kol, 1024), "inline": False}] if kol else []),
             {"name": "Safety", "value": _cut(checks, 1024), "inline": False},
             *([{"name": "LarpCheck", "value": _cut(larp, 1024), "inline": False}] if larp else []),
+            *([{"name": "MEME OS", "value": _cut(" · ".join(memeos), 1024), "inline": False}] if memeos else []),
             {"name": "Best", "value": _cut("\n".join(f"• {b}" for b in best) or "• nothing stands out", 1024), "inline": True},
             {"name": "Worst", "value": _cut("\n".join(f"• {w}" for w in worst) or "• nothing major found", 1024), "inline": True},
             {"name": "Why it was called", "value": _cut(why or f"{lane} lane", 1024), "inline": False},

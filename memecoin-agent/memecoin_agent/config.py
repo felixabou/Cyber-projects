@@ -678,6 +678,27 @@ class CallerConfig:
 
 
 @dataclass
+class MemeosConfig:
+    """MEME OS (memeos.world) developer API. Key: the MEMEOS_API_KEY environment variable or api_key_file.
+    X-Ray (5 credits) runs on a coin only after it passed every free check, just before the buy; bundle clusters
+    (35 credits) are read for Discord calls. Both are capped per day; out of credits, the other checks decide."""
+
+    enabled: bool = True
+    api_key_env: str = "MEMEOS_API_KEY"
+    api_key_file: str | None = "~/.config/memeos/api_key"
+    base_url: str = "https://memeos.world"
+    xray: bool = True
+    # X-Ray caps new, thin coins at CAUTION (no red flag is not proof of safety), so CAUTION never blocks.
+    reject_verdicts: list[str] = field(default_factory=lambda: ["HIGH RISK", "SCAM", "RUG", "DANGER", "CRITICAL"])
+    min_score: float | None = None  # e.g. 40: also skip scores in X-Ray's red band (under 40)
+    reject_flags: list[str] = field(default_factory=list)  # X-Ray flag names that skip a coin, e.g. bundled_supply
+    max_xray_per_day: int = 100  # 500 credits
+    cache_minutes: float = 30.0
+    bundle_on_calls: bool = True
+    max_bundle_per_day: int = 10  # 350 credits
+
+
+@dataclass
 class KolConfig:
     """Known traders (GMGN's KOL feed, needs a GMGN key): who bought each coin and how many already sold. Shown
     in Discord calls and logged in the scan log (kol_bought, kol_sold) so the skip rule can be tested before use."""
@@ -759,12 +780,15 @@ class Config:
     caller: CallerConfig = field(default_factory=CallerConfig)
     unchecked: UncheckedConfig = field(default_factory=UncheckedConfig)
     kols: KolConfig = field(default_factory=KolConfig)
+    memeos: MemeosConfig = field(default_factory=MemeosConfig)
 
     def validate(self) -> None:
         if any(m <= 0 for m in self.caller.follow_up_minutes):
             raise ValueError("caller.follow_up_minutes must all be > 0")
         if self.caller.recap_hour_utc is not None and not 0 <= self.caller.recap_hour_utc <= 23:
             raise ValueError("caller.recap_hour_utc must be 0-23 or null")
+        if self.memeos.max_xray_per_day < 0 or self.memeos.max_bundle_per_day < 0:
+            raise ValueError("memeos.max_xray_per_day and memeos.max_bundle_per_day must be >= 0")
         if self.kols.skip_sold_share is not None and not 0 < self.kols.skip_sold_share <= 1:
             raise ValueError("kols.skip_sold_share must be in (0, 1] or null")
         if self.unchecked.position_usd <= 0:
@@ -883,6 +907,7 @@ _SECTIONS: dict[str, type] = {
     "caller": CallerConfig,
     "unchecked": UncheckedConfig,
     "kols": KolConfig,
+    "memeos": MemeosConfig,
     "regime": RegimeConfig,
     "discovery": DiscoveryConfig,
     "learning": LearningConfig,

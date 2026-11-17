@@ -663,6 +663,15 @@ The KOL counts are also written to the scan log (`kol_bought`, `kol_sold`), and 
 most of whose KOL buyers already sold with the rest. Set `kols.skip_sold_share` (e.g. 0.75) only once that
 comparison shows those coins doing worse.
 
+### MEME OS
+
+With a MEME OS key (`MEMEOS_API_KEY`), every automatic buy gets an X-Ray report first (5 credits), after all the
+free checks have passed so credits are only spent on coins about to be bought. A verdict in
+`memeos.reject_verdicts` (HIGH RISK and worse) skips the coin; CAUTION does not, since X-Ray gives every new, thin
+coin CAUTION at most. Discord calls show the verdict, score, flags and authorities with a link to the report, and
+the share of supply held by wallets funded from the same source (bundle check, 35 credits, `max_bundle_per_day`).
+Daily caps keep the spend bounded, and when the credits run out (HTTP 402) the other safety checks decide.
+
 When LarpCheck has no credits left (its premium plan, or the day's checks spent) or there is no key, the other
 safety checks decide each coin (`larpcheck.on_no_credits: allow`); a bad verdict LarpCheck already has still blocks
 a coin.

@@ -72,19 +72,22 @@ class TokenFacts:
     vol15_prev: float | None = None
     kols: Any = None  # data.kols.KolStats
     larp: dict[str, Any] | None = None  # verdict, score, coin_stamp, summary, url
+    xray: Any = None  # data.memeos.Xray
+    bundle: Any = None  # data.memeos.Bundle
     sources: list[str] = field(default_factory=list)
 
 
 class FactGatherer:
     def __init__(self, gmgn: Any = None, kols: Any = None, larpcheck: Any = None, http: httpx.Client | None = None,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
-        self.gmgn, self.kols, self.larpcheck, self.sleep = gmgn, kols, larpcheck, sleep
+                 sleep: Callable[[float], None] = time.sleep, memeos: Any = None) -> None:
+        self.gmgn, self.kols, self.larpcheck, self.sleep, self.memeos = gmgn, kols, larpcheck, sleep, memeos
         self.http = http or httpx.Client(timeout=10.0, headers={"Accept": "application/json"})
 
     def gather(self, snap: TokenSnapshot) -> TokenFacts:
         f = TokenFacts()
         for name, step in (("GMGN", self._gmgn), ("Jupiter", self._jupiter), ("RugCheck", self._rugcheck),
-                           ("GeckoTerminal", self._momentum), ("KOL feed", self._kols), ("LarpCheck", self._larp)):
+                           ("GeckoTerminal", self._momentum), ("KOL feed", self._kols), ("LarpCheck", self._larp),
+                           ("MEME OS", self._memeos)):
             try:
                 if step(snap, f):
                     f.sources.append(name)
@@ -177,6 +180,14 @@ class FactGatherer:
         return True
 
 
+    def _memeos(self, s: TokenSnapshot, f: TokenFacts) -> bool:
+        if self.memeos is None:
+            return False
+        f.xray = self.memeos.reports.get(s.mint) or self.memeos.xray(s.mint)  # usually read before the buy already
+        f.bundle = self.memeos.bundle(s.mint)
+        return f.xray is not None or f.bundle is not None
+
+
 def judge(s: TokenSnapshot, f: TokenFacts, age_min: float | None, unchecked: bool = False) -> tuple[list[str], list[str]]:
     """(best points, worst points) for a call, from whatever facts were found."""
     best, worst = [], []
@@ -190,6 +201,15 @@ def judge(s: TokenSnapshot, f: TokenFacts, age_min: float | None, unchecked: boo
     add(best, v in ("REAL", "LIKELY REAL"), f"LarpCheck {v}")
     add(worst, v in ("LARP", "LIKELY LARP", "SCAM"), f"LarpCheck {v}")
     add(worst, unchecked, "no safety check on this chain")
+    x = f.xray
+    add(best, x is not None and x.score is not None and x.score >= 60 and x.verdict not in ("HIGH RISK", "SCAM", "RUG"),
+        f"MEME OS X-Ray {x.verdict if x else ''} {x.score if x and x.score is not None else 0:g}")
+    add(worst, x is not None and (x.verdict in ("HIGH RISK", "SCAM", "RUG", "DANGER", "CRITICAL")
+                                  or (x.score is not None and x.score < 40)),
+        f"MEME OS X-Ray {x.verdict if x else ''}" + (f" {x.score:g}" if x and x.score is not None else ""))
+    b = f.bundle
+    add(worst, b is not None and (b.linked_supply_pct or 0) >= 30, f"linked wallets hold {b.linked_supply_pct if b else 0:.0f}%")
+    add(best, b is not None and b.linked_supply_pct is not None and b.linked_supply_pct <= 10, "little linked supply")
     k = f.kols
     add(best, k is not None and k.bought >= 3 and k.sold_share < 0.5, f"{k.bought - k.sold if k else 0} KOLs still holding")
     add(worst, k is not None and k.bought >= 3 and k.sold_share >= 0.75, f"{k.sold if k else 0} of {k.bought if k else 0} KOLs already sold")

@@ -434,3 +434,17 @@ kols:
   max_age_hours: 24
   skip_sold_share: null         # e.g. 0.75: skip when 75%+ of the KOLs who bought already sold
   skip_min_kols: 3
+
+# MEME OS (memeos.world). Key: the MEMEOS_API_KEY environment variable (or api_key_file), never this file.
+# X-Ray (5 credits) runs on a coin only after every free check passed, just before the buy; bundle clusters
+# (35 credits) are read for Discord calls. Out of credits (or over the caps below), the other checks decide.
+memeos:
+  enabled: true
+  xray: true
+  reject_verdicts: [HIGH RISK, SCAM, RUG, DANGER, CRITICAL]   # CAUTION never blocks: X-Ray caps every new coin there
+  min_score: null               # e.g. 40: also skip X-Ray's red band (scores under 40)
+  reject_flags: []              # X-Ray flag names that skip a coin, e.g. [bundled_supply]
+  max_xray_per_day: 100         # 500 credits a day at most
+  cache_minutes: 30
+  bundle_on_calls: true
+  max_bundle_per_day: 10        # 350 credits a day at most

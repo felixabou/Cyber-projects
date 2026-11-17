@@ -51,6 +51,7 @@ class Agent:
         history: object | None = None,
         caller: object | None = None,
         kols: object | None = None,
+        memeos: object | None = None,
     ) -> None:
         self.cfg = cfg
         self.market = market
@@ -93,6 +94,8 @@ class Agent:
         self.caller = caller
         # data.kols.KolTracker: which known traders bought each coin and how many already sold.
         self.kols = kols
+        # data.memeos.MemeosGate: MEME OS X-Ray, the last check before a buy (it costs credits).
+        self.memeos = memeos
         self._regime_state: str | None = None
         self._lowcap_first: dict[str, tuple[datetime, float]] = {}  # mint -> when it first qualified, and its price
         self._nc_scan: set[str] = set()  # mints looked up this scan (the per-scan lookup cap)
@@ -775,6 +778,10 @@ class Agent:
                 outcomes[snap.mint] = "unsafe: " + why
                 log.info("Skip %s: %s", snap.symbol, why)
                 continue
+            if self.memeos is not None and (why := self.memeos.block_reason(snap.mint)):
+                outcomes[snap.mint] = why
+                log.info("Skip %s: %s", snap.symbol, why)
+                continue
             preflight = getattr(self.executor, "preflight_pregraduation", self.executor.preflight) \
                 if ev.lane == "sniper" else self.executor.preflight
             if reason := preflight(snap, size):
@@ -838,7 +845,11 @@ class Agent:
             if self.chain_safety is None:
                 return f"unsafe: no honeypot check available for {snap.chain}"
             rep = self.chain_safety.check(snap.chain, snap.mint)
-            return None if rep.ok else "unsafe: " + "; ".join(rep.reasons)
+            if not rep.ok:
+                return "unsafe: " + "; ".join(rep.reasons)
+            if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
+                return why
+            return None
         if self.profiler is not None:
             try:
                 prof = self.profiler.profile(snap)
@@ -868,6 +879,8 @@ class Agent:
             return "unsafe: " + why
         if reason := self.executor.preflight(snap, size):
             return f"skipped: {reason}"
+        if self.memeos is not None and lane != "manual" and (why := self.memeos.block_reason(snap.mint)):
+            return why
         return None
 
     def _open(self, snap: TokenSnapshot, size: float, now: datetime, lane: str, reason: str,

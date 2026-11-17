@@ -282,6 +282,25 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
         log.info("KOL feed on: known traders' buys and sells on %s, every %.0fs%s", ", ".join(cfg.kols.chains),
                  cfg.kols.poll_every_s, "" if cfg.kols.skip_sold_share is None else
                  f"; skips coins most of whose KOL buyers ({cfg.kols.skip_sold_share:.0%}+) already sold")
+    memeos = None
+    if cfg.memeos.enabled:
+        from .data.memeos import MemeosClient, MemeosError, MemeosGate, load_api_key as memeos_key
+
+        mkey = memeos_key(cfg.memeos)
+        if mkey:
+            mclient = MemeosClient(mkey, cfg.memeos.base_url)
+            memeos = MemeosGate(cfg.memeos, mclient)
+            try:
+                acct = mclient.account()  # free: confirms the key and shows the balance
+                log.info("MEME OS on: X-Ray before each buy (up to %d a day)%s; %s credits left",
+                         cfg.memeos.max_xray_per_day,
+                         f", bundle clusters on calls (up to {cfg.memeos.max_bundle_per_day} a day)"
+                         if cfg.memeos.bundle_on_calls else "", acct.get("balance", "?"))
+            except MemeosError as exc:
+                log.warning("MEME OS key check failed (%s); X-Ray stays on and the other checks decide if it keeps "
+                            "failing", exc)
+        else:
+            log.info("MEME OS off: no key (set the %s environment variable)", cfg.memeos.api_key_env)
     caller = None
     if cfg.caller.enabled:
         url = os.environ.get(cfg.caller.webhook_env)
@@ -293,14 +312,14 @@ def build_agent(cfg: Config, with_feed: bool = True) -> tuple[Agent, PumpPortalF
             find = getattr(safety, "find", None)
             larp = find(LarpCheckGate) if find else (safety if isinstance(safety, LarpCheckGate) else None)
             caller = Caller(cfg.caller, DiscordWebhook(url, cfg.caller.username), Describer(gmgn),
-                            facts=FactGatherer(gmgn, kols, larp))
+                            facts=FactGatherer(gmgn, kols, larp, memeos=memeos))
             log.info("Discord caller on: every automatic buy is posted as a call, followed up at %s minutes",
                      ", ".join(f"{m:g}" for m in cfg.caller.follow_up_minutes))
         else:
             log.warning("Discord caller off: set the %s environment variable to your Discord webhook URL",
                         cfg.caller.webhook_env)
     return Agent(cfg, market, safety, executor, pf, newscheck=newscheck, scanlog=scanlog, regime=regime,
-                 history=history, caller=caller, kols=kols, guard=guard, launch_scan=launch_scan, analytics=analytics,
+                 history=history, caller=caller, kols=kols, memeos=memeos, guard=guard, launch_scan=launch_scan, analytics=analytics,
                  profiler=profiler, route_check=route_check, multichain=dex, copy_tracker=copy_tracker,
                  longterm=longterm, chain_safety=chain_safety), feed
 
