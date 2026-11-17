@@ -807,6 +807,32 @@ Known live-mode limitations:
 - The `status` command's "return vs start" figure compares against `starting_balance_usd`, not your real deposit.
 - The launch feed only sees graduations that happen while the agent (or recorder) is running. Downtime leaves gaps, which DexScreener's feeds partly cover.
 
+## Exit validation out of sample (`exitlab --validate`)
+
+`memecoin-agent exitlab` replays your past entries under different exit settings. Choosing the best of those on the
+same trades overfits, so `--validate` checks exits the way a forecast should be checked:
+
+- **Chronological split**: training, validation and an optional final holdout (`--split 0.6,0.2,0.2`). Entries in an
+  earlier period whose replay window reaches into the next one are dropped (`--purge-hours`, default the horizon), so
+  no candle is used twice. The best strategy is picked on the training period only, and its out-of-sample rank shown.
+- **Baselines**: your current exits, the previous defaults (50% stop, 70% leash), a fixed stop / take-profit
+  (`--fixed-stop 30 --fixed-take 100`) and buy-and-hold to the horizon.
+- **Frictions**: entry and exit latency (`--entry-latency 10 --exit-latency 10` seconds), slippage per side
+  (`--slippage 1`), the paper fee per side, exit orders that fail and are decided again (`--fail-rate 0.05`), fills
+  capped at a share of each candle's volume so a large sale takes several candles (`--max-volume-share 0.2`), partial
+  exits, and a horizon (`--horizon 30` hours) after which what is left is sold at the last price.
+- **Metrics per period**: net return (cost-weighted), win rate, median and average return with a 90% bootstrap
+  interval, maximum drawdown (cumulative, in % of one stake), profit factor, worst trade, trades and time held. Each
+  period is labelled IN-SAMPLE or OUT-OF-SAMPLE; periods under 30 trades carry a small-sample warning and under 10
+  a "too few to judge" one.
+
+Limits: minute candles hold no order book, so slippage and the volume cap are assumptions, not measurements; each
+minute is replayed open, low, high, close; liquidity pulls aren't in the candles; and with a few dozen trades the
+intervals are wide. On the 68 cached entries from October and November, the fixed 30%/100% baseline led on the
+training period and finished level with the current exits out of sample (-12.4% and -12.8% net on the 14-trade
+holdout), inside the noise. A strategy that only wins in-sample has shown nothing. The agent's live exits are not
+changed by any of this.
+
 ## Backtesting
 
 Backtests replay recorded market data through the production agent, strategy,

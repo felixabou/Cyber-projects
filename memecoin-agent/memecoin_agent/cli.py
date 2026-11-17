@@ -590,7 +590,20 @@ def cmd_exitlab(args: argparse.Namespace, cfg: Config) -> None:
     source = Candles(args.cache or str(Path(cfg.agent.state_file).parent / "candles"))
     print(f"Exit lab: {len(entries)} entries; downloading minute candles for the ones not cached yet "
           f"(about 5 seconds each)...", flush=True)
-    print(compare(entries, source.after, variants, cfg.execution.paper_fee_pct))
+    if not args.validate:
+        print(compare(entries, source.after, variants, cfg.execution.paper_fee_pct))
+        return
+    from .exitval import SimParams, default_strategies, from_exits, validate
+
+    fractions = tuple(float(x) for x in args.split.split(","))
+    params = SimParams(fee_pct=cfg.execution.paper_fee_pct, slip_pct=args.slippage, entry_latency_s=args.entry_latency,
+                       exit_latency_s=args.exit_latency, fail_rate=args.fail_rate,
+                       max_volume_share=args.max_volume_share or None, horizon_hours=args.horizon)
+    strategies = default_strategies(cfg.exits, cfg.execution.paper_fee_pct, args.fixed_stop, args.fixed_take)
+    for name, exits in variants.items():
+        if name not in ("your settings", "wide (50% stop, 70% leash)"):
+            strategies[name] = from_exits(exits, cfg.execution.paper_fee_pct)
+    print(validate(entries, source.after, strategies, params, fractions, args.purge_hours)[0])
 
 
 def cmd_status(args: argparse.Namespace, cfg: Config) -> None:
@@ -813,6 +826,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="another set of exit settings to compare, e.g. --set exits.hard_stop_pct=35 (repeatable)")
     p.add_argument("--last", type=int, default=None, help="only the newest N entries")
     p.add_argument("--cache", default=None, help="candle cache directory (default: next to the state file)")
+    p.add_argument("--validate", action="store_true",
+                   help="out-of-sample check: split by date into train / validation / holdout, with realistic fills")
+    p.add_argument("--split", default="0.6,0.2,0.2", help="period fractions, two or three (default 0.6,0.2,0.2)")
+    p.add_argument("--entry-latency", type=float, default=10.0, help="seconds from signal to entry fill (default 10)")
+    p.add_argument("--exit-latency", type=float, default=10.0, help="seconds from exit signal to fill (default 10)")
+    p.add_argument("--slippage", type=float, default=1.0, help="%% per side (default 1)")
+    p.add_argument("--fail-rate", type=float, default=0.05, help="share of exit orders that fail and retry (default 0.05)")
+    p.add_argument("--max-volume-share", type=float, default=0.2,
+                   help="most of a candle's volume one sale can take (default 0.2; 0 = no cap)")
+    p.add_argument("--fixed-stop", type=float, default=30.0, help="the fixed baseline's stop %% (default 30)")
+    p.add_argument("--fixed-take", type=float, default=100.0, help="the fixed baseline's take-profit %% (default 100)")
+    p.add_argument("--horizon", type=float, default=30.0, help="hours a trade may run before it is closed (default 30)")
+    p.add_argument("--purge-hours", type=float, default=None,
+                   help="drop entries this close to the next period (default: the horizon; shorter keeps more trades)")
     p.set_defaults(func=cmd_exitlab)
 
     sub.add_parser("status", help="show portfolio from the state file").set_defaults(func=cmd_status)
