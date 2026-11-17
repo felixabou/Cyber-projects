@@ -67,7 +67,7 @@ def scan_transfers(rpc: Rpc, token: str, creation_block: int, first_n: int) -> l
     times: dict[int, int] = {}
     out: list[Transfer] = []
     lo, chunk = creation_block, CHUNK_BLOCKS
-    while lo <= head and len(out) < first_n and chunk >= MIN_CHUNK_BLOCKS:
+    while lo <= head and len(out) < first_n:
         hi = min(head, lo + chunk - 1)
         try:
             logs = rpc.request("eth_getLogs", [{"address": token, "topics": [TRANSFER],
@@ -75,6 +75,8 @@ def scan_transfers(rpc: Rpc, token: str, creation_block: int, first_n: int) -> l
         except RuntimeError as exc:
             if "HTTP 400" not in str(exc) and "HTTP 413" not in str(exc) and "range" not in str(exc).lower():
                 raise
+            if chunk // 2 < MIN_CHUNK_BLOCKS:
+                raise RuntimeError(f"provider refuses log reads even at {MIN_CHUNK_BLOCKS} blocks: {exc}") from None
             chunk //= 2
             log.info("Log range %d blocks refused, trying %d: %s", hi - lo + 1, chunk, exc)
             continue

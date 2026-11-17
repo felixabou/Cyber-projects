@@ -1,3 +1,4 @@
+import pytest
 from memecoin_agent.watch.launch_check import (
     DEAD,
     EIP7702_PREFIX,
@@ -106,3 +107,14 @@ def test_range_refused_by_provider_is_split_until_accepted():
     chain = Strict([log(105, 0, POOL, "0x" + "e" * 40, 3)], head=400, creation=100)
     got = scan_transfers(chain, TOKEN, 100, 10)
     assert [t.amount for t in got] == [3]
+
+
+def test_provider_refusing_every_range_raises_instead_of_returning_empty():
+    class Refuses(FakeChain):
+        def request(self, method, params):
+            if method == "eth_getLogs":
+                raise RuntimeError("RPC HTTP 400: unsupported")
+            return super().request(method, params)
+
+    with pytest.raises(RuntimeError, match="unsupported"):
+        scan_transfers(Refuses([]), TOKEN, 100, 10)
